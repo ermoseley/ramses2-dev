@@ -58,6 +58,12 @@ subroutine condinit(r,g,x,q,dx,nn)
 #endif
   real(kind=8)::xx,yy,zz,rr,theta,pi,xcenter,ttmin,ttmax
 #if INIT==DFMMTEST
+#ifndef DFMM
+  ! DFMMTEST initialises Pi directly and reads the dfmm_ic_* knobs, neither of
+  ! which exists at DFMM=0.  Without this the build fails with a page of
+  ! "not a member of the run_t structure" and out-of-bounds warnings.
+#error INIT=DFMMTEST needs a dfmm build: add DFMM=1..4 (and make clean)
+#endif
   real(kind=8)::twopi_L,shear_amp,pi_amp,drho_amp,uadv
 #endif
 #if INIT==BLOWUP
