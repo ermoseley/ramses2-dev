@@ -39,7 +39,7 @@ end subroutine r_output_hydro
 !###################################################
 subroutine output_hydro(s,filename)
   use amr_parameters, only: ndim, twotondim, flen
-  use hydro_parameters, only: nvar, nprim, nener,ie
+  use hydro_parameters, only: nvar, nprim, nener,ie, ndfmm
   use ramses_commons, only: ramses_t, open_file, close_file
   implicit none
   type(ramses_t)::s
@@ -122,9 +122,15 @@ subroutine output_hydro(s,filename)
            end do
 #endif
 #if NVAR>5+NENER
-           ! Compute passive scalars
-           do n=1,nvar-5-nener
+           ! Compute passive scalars.  The dfmm moment block at the top of the
+           ! state vector is density-like, not a mass fraction, so it must NOT
+           ! be divided by rho -- otherwise snapshots store Pi/rho and Q/rho.
+           ! Same reasoning as hydro/input_hydro_condinit.f90.
+           do n=1,nvar-5-nener-ndfmm
               qold(ind,ie+nener+n)=uold(ind,5+nener+n)/dd
+           end do
+           do n=nvar-nener-ndfmm+1-5,nvar-5-nener
+              qold(ind,ie+nener+n)=uold(ind,5+nener+n)
            end do
 #endif
         end do
