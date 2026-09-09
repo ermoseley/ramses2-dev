@@ -136,18 +136,24 @@ contains
     deallocate(a0,a1,u1)
   end subroutine incomp_step_rk2
 
-  real(kind=8) function incomp_dt(u,n,boxlen,nu,courant)
-    ! Advective and viscous, not acoustic.  The viscous limb applies only to
-    ! rung 1: rung 4's stress is hyperbolic and relaxed by an exact
-    ! exponential map, so it carries no parabolic constraint -- the timestep
-    ! is where that advantage of the moment formulation shows up.
+  real(kind=8) function incomp_dt(u,n,boxlen,nu,courant,cmom)
+    ! Three limbs: advective always, viscous for rung 1, and -- when the third
+    ! moment is evolved -- the hyperbolic speed of the Pi <-> Q pair.
+    !
+    ! That last limb corrects a claim this function used to make.  Rung 4's
+    ! *stress relaxation* is stiff and handled by an exact exponential map, so
+    ! it carries no parabolic constraint; but once Q is carried, Pi's flux is Q
+    ! and Q's production is theta_0 grad Pi, and the pair propagates at the
+    ! thermal speed.  Removing compressibility removes the acoustic constraint
+    ! from the velocity equation only.  Pass cmom = 0 for rung 1 or for a
+    ! ten-moment rung 4, where Pi genuinely only advects.
     integer,intent(in)::n
-    real(kind=8),intent(in)::boxlen,nu,courant
+    real(kind=8),intent(in)::boxlen,nu,courant,cmom
     real(kind=8),intent(in)::u(3,n,n,n)
     real(kind=8)::dx,umax,dta,dtv
     dx   = boxlen/dble(n)
     umax = max(maxval(abs(u)),1.0d-30)
-    dta  = courant*dx/(3.0d0*umax)
+    dta  = courant*dx/(3.0d0*(umax+max(cmom,0.0d0)))
     if(nu>0.0d0)then
        dtv = courant*dx*dx/(2.0d0*3.0d0*nu)
        incomp_dt = min(dta,dtv)

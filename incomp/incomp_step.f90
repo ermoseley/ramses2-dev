@@ -81,28 +81,46 @@ contains
     write(*,'(" incompressible: n=",I5,"  p0=",1pe10.3,"  rho0=",1pe10.3, &
          & "  nu=",1pe10.3,"  stress=",A)') &
          n, r%incomp_p0, r%incomp_rho0, incomp_nu(r), trim(r%incomp_stress)
+    ! Say which moment system is running.  A DFMM=1 build with
+    ! incomp_stress='moment' is a legitimate rung, but it is the
+    ! incompressible limit of the TEN-moment system and is therefore not
+    ! comparable with a DFMM>=2 compressible run; saying so here is cheaper
+    ! than discovering it from a plot.
+    if(trim(r%incomp_stress)=='moment')then
+       if(ndfmm>=15)then
+          write(*,'(" incompressible: twenty-moment (Pi and Q evolved),", &
+               & "  tau=",1pe10.3,"  tau_q=tau/Pr=",1pe10.3)') &
+               r%dfmm_tau, r%dfmm_tau/max(r%dfmm_prandtl,1.0d-30)
+       else
+          write(*,*)'incompressible: TEN-moment (Pi only; Q not carried at', &
+               ' DFMM=1) -- not the incompressible limit of a DFMM>=2 run'
+       endif
+    endif
   end subroutine incomp_validate
 
-  subroutine incomp_gather(r,m,ilevel,n,u,pi5,want_pi,tower,want_tower)
+  subroutine incomp_gather(r,m,ilevel,n,u,pi5,want_pi,q10,want_q, &
+                           tower,want_tower)
     ! uold -> uniform lattice, by Cartesian key.  For levelmin == levelmax the
     ! key is a bijection onto the lattice, so this is exact; the caller checks
     ! that every site was written.
     use amr_commons, only: run_t, mesh_t
     use amr_parameters, only: ndim, twotondim
-    use hydro_parameters, only: ipi, il
+    use hydro_parameters, only: ipi, iq, il
     type(run_t)::r
     type(mesh_t)::m
     integer,intent(in)::ilevel,n
     real(kind=8),intent(out)::u(3,n,n,n)
     real(kind=8),intent(out)::pi5(5,n,n,n)
     logical,intent(in)::want_pi
+    real(kind=8),intent(out)::q10(10,n,n,n)
+    logical,intent(in)::want_q
     real(kind=8),intent(out)::tower(18,n,n,n)
     logical,intent(in)::want_tower
     integer::igrid,ind,idim,ic(3),nstride,i,j,k,iv
     integer::nfilled
     real(kind=8)::irho
 
-    u = 0.0d0; pi5 = 0.0d0; tower = 0.0d0
+    u = 0.0d0; pi5 = 0.0d0; q10 = 0.0d0; tower = 0.0d0
     nfilled = 0
     irho = 1.0d0/r%incomp_rho0
     do igrid=m%head(ilevel),m%tail(ilevel)
@@ -124,6 +142,12 @@ contains
                 pi5(iv,i,j,k) = m%uold(ind,ipi+iv-1,igrid)
              end do
           endif
+          if(want_q)then
+             ! Q is density-like, like Pi: stored as the moment itself.
+             do iv=1,10
+                q10(iv,i,j,k) = m%uold(ind,iq+iv-1,igrid)
+             end do
+          endif
           if(want_tower)then
              ! The mass-like tower is stored as rho X, so divide it out.
              do iv=1,18
@@ -140,7 +164,8 @@ contains
     endif
   end subroutine incomp_gather
 
-  subroutine incomp_scatter(r,m,ilevel,n,u,pi5,want_pi,tower,want_tower)
+  subroutine incomp_scatter(r,m,ilevel,n,u,pi5,want_pi,q10,want_q, &
+                            tower,want_tower)
     ! Uniform lattice -> unew, restoring the compressible slots to their
     ! incompressible values so that every downstream tool keeps working.
     !
@@ -149,13 +174,15 @@ contains
     ! uold would be clobbered.
     use amr_commons, only: run_t, mesh_t
     use amr_parameters, only: ndim, twotondim
-    use hydro_parameters, only: ipi, il
+    use hydro_parameters, only: ipi, iq, il
     type(run_t)::r
     type(mesh_t)::m
     integer,intent(in)::ilevel,n
     real(kind=8),intent(in)::u(3,n,n,n)
     real(kind=8),intent(in)::pi5(5,n,n,n)
     logical,intent(in)::want_pi
+    real(kind=8),intent(in)::q10(10,n,n,n)
+    logical,intent(in)::want_q
     real(kind=8),intent(in)::tower(18,n,n,n)
     logical,intent(in)::want_tower
     integer::igrid,ind,idim,ic(3),nstride,i,j,k,iv
@@ -176,13 +203,21 @@ contains
           m%unew(ind,3,igrid) = rho0*u(2,i,j,k)
           m%unew(ind,4,igrid) = rho0*u(3,i,j,k)
           m%unew(ind,5,igrid) = ek + 1.5d0*p0
+          ! Every dfmm slot must be written: unew is not initialised from
+          ! uold on this path, and r_set_uold copies unew -> uold straight
+          ! afterwards, so an unwritten slot would propagate whatever was
+          ! left in the buffer.  Copy first, then overwrite what we evolved.
+          do iv=6,size(m%unew,2)
+             m%unew(ind,iv,igrid) = m%uold(ind,iv,igrid)
+          end do
           if(want_pi)then
              do iv=1,5
                 m%unew(ind,ipi+iv-1,igrid) = pi5(iv,i,j,k)
              end do
-          else
-             do iv=6,size(m%unew,2)
-                m%unew(ind,iv,igrid) = m%uold(ind,iv,igrid)
+          endif
+          if(want_q)then
+             do iv=1,10
+                m%unew(ind,iq+iv-1,igrid) = q10(iv,i,j,k)
              end do
           endif
           if(want_tower)then
@@ -205,12 +240,17 @@ contains
     integer,intent(in)::ilevel
     real(kind=8),intent(out)::mass,ekin,eint,eani,dt
     integer::n
-    real(kind=8),allocatable::u(:,:,:,:),pi5(:,:,:,:),tw(:,:,:,:)
-    real(kind=8)::vol,e
+    logical::use_q
+    real(kind=8),allocatable::u(:,:,:,:),pi5(:,:,:,:),q10(:,:,:,:)
+    real(kind=8),allocatable::tw(:,:,:,:)
+    real(kind=8)::vol,e,cmom
 
     n = incomp_nside(r)
-    allocate(u(3,n,n,n),pi5(5,n,n,n),tw(18,n,n,n))
-    call incomp_gather(r,m,ilevel,n,u,pi5,.false.,tw,.false.)
+    ! Pi is gathered only when the timestep actually needs it, i.e. when the
+    ! third moment is evolved and the Pi <-> Q pair sets a wave speed.
+    use_q = (trim(r%incomp_stress)=='moment') .and. (ndfmm>=15)
+    allocate(u(3,n,n,n),pi5(5,n,n,n),q10(10,n,n,n),tw(18,n,n,n))
+    call incomp_gather(r,m,ilevel,n,u,pi5,use_q,q10,.false.,tw,.false.)
     ! Note: the caller is responsible for the host copy being current.  On the
     ! Metal path r_courant_fine runs after r_set_uold, which has just been
     ! followed by incomp_step's own device upload, and the timestep only needs
@@ -221,8 +261,10 @@ contains
     eint = 1.5d0*r%incomp_p0*r%boxlen**3
     ekin = eint + e*r%boxlen**3
     eani = 0.0d0
-    dt   = incomp_dt(u,n,r%boxlen,incomp_nu(r),r%courant_factor)
-    deallocate(u,pi5,tw)
+    cmom = 0.0d0
+    if(use_q) cmom = incomp_qspeed(pi5,n,r%incomp_p0,r%incomp_rho0)
+    dt   = incomp_dt(u,n,r%boxlen,incomp_nu(r),r%courant_factor,cmom)
+    deallocate(u,pi5,q10,tw)
   end subroutine incomp_cmpdt
 
   subroutine incomp_step(sim,ilevel,dt)
@@ -234,29 +276,32 @@ contains
     integer,intent(in)::ilevel
     real(kind=8),intent(in)::dt
     integer::n,nbad
-    logical::use_pi,use_tw
-    real(kind=8),allocatable::u(:,:,:,:),pi5(:,:,:,:),tw(:,:,:,:)
-    real(kind=8)::dv,ef,cmin,gmin
+    logical::use_pi,use_q,use_tw
+    real(kind=8),allocatable::u(:,:,:,:),pi5(:,:,:,:),q10(:,:,:,:)
+    real(kind=8),allocatable::tw(:,:,:,:)
+    real(kind=8)::dv,ef,cmin,gmin,qmax,c0
 
     n = incomp_nside(sim%r)
     use_pi = (trim(sim%r%incomp_stress)=='moment')
+    use_q  = use_pi .and. (ndfmm>=15)
     use_tw = use_pi .and. (ndfmm>=33)
-    allocate(u(3,n,n,n),pi5(5,n,n,n),tw(18,n,n,n))
+    allocate(u(3,n,n,n),pi5(5,n,n,n),q10(10,n,n,n),tw(18,n,n,n))
 #ifdef _METAL
     ! The device holds the state between steps; bring it home first.
     call metal_uold_to_host(sim)
 #endif
-    call incomp_gather(sim%r,sim%m,ilevel,n,u,pi5,use_pi,tw,use_tw)
+    call incomp_gather(sim%r,sim%m,ilevel,n,u,pi5,use_pi,q10,use_q,tw,use_tw)
     call incomp_step_rk2(u,n,sim%r%boxlen,dt,incomp_nu(sim%r),pi5, &
          sim%r%incomp_rho0,use_pi)
     ! The moment sector follows the velocity, as in the compressible code:
     ! sources follow transport, and Pi is advected by the velocity that has
     ! just been made divergence-free.
     if(use_pi) &
-         call incomp_moment_step(u,pi5,tw(1:3,:,:,:),tw(4:9,:,:,:), &
+         call incomp_moment_step(u,pi5,q10,tw(1:3,:,:,:),tw(4:9,:,:,:), &
               tw(10:18,:,:,:),n,sim%r%boxlen,dt,sim%r%incomp_p0, &
-              sim%r%incomp_rho0,sim%r%dfmm_tau,use_tw)
-    call incomp_scatter(sim%r,sim%m,ilevel,n,u,pi5,use_pi,tw,use_tw)
+              sim%r%incomp_rho0,sim%r%dfmm_tau,sim%r%dfmm_prandtl, &
+              use_q,use_tw)
+    call incomp_scatter(sim%r,sim%m,ilevel,n,u,pi5,use_pi,q10,use_q,tw,use_tw)
 #ifdef _METAL
     call metal_unew_to_device(sim)
 #endif
@@ -280,9 +325,25 @@ contains
                   & "  max |Pi|/p0 ",1pe10.3)') &
                   ilevel, cmin, maxval(abs(pi5))/sim%r%incomp_p0
           endif
+          if(use_q)then
+             ! q_i = Q_ijj/2 in the packed ordering
+             ! (xxx,yyy,zzz,xxy,xxz,yyx,yyz,zzx,zzy,xyz).  Its
+             ! Chapman-Enskog value is zero at first order here, so this
+             ! number IS the departure from the first-order closure -- it
+             ! plays the role that ||q - q_CE|| plays in the compressible
+             ! ledger, with q_CE = 0.
+             qmax = 0.5d0*max( &
+                  maxval(abs(q10(1,:,:,:)+q10(6,:,:,:)+q10(8,:,:,:))), &
+                  maxval(abs(q10(4,:,:,:)+q10(2,:,:,:)+q10(9,:,:,:))), &
+                  maxval(abs(q10(5,:,:,:)+q10(7,:,:,:)+q10(3,:,:,:))))
+             c0 = sqrt(sim%r%incomp_p0/sim%r%incomp_rho0)
+             write(*,'(" incomp level=",I2,"  max |q|/(p0 c0) ",1pe10.3, &
+                  & "  max |Q| ",1pe10.3)') &
+                  ilevel, qmax/(sim%r%incomp_p0*c0), maxval(abs(q10))
+          endif
        endif
     endif
-    deallocate(u,pi5,tw)
+    deallocate(u,pi5,q10,tw)
   end subroutine incomp_step
 
 end module incomp_step_module
