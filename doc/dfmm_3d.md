@@ -840,6 +840,11 @@ Verified in this repository at the time of writing:
   gates in Section 7, from fresh runs.
 * That the hyperbolic core is untouched by Stages 3 and 4: Gates 3 and 5
   reproduce their Stage-2 numbers bit-for-bit under a `DFMM=4` binary.
+* That the incompressible rungs are the incompressible limit of the *same*
+  moment system, not a lower one: `doc/incompressible.md` Gates 6 and 8. The
+  cross-rung consistency signal is `min g(rank)` at `K = 1`, 0.619 from the
+  host float64 spectral incompressible rung against 0.625 from the Metal
+  float32 finite-volume compressible one.
 * That every stage selector still builds after the shared-file edits that
   Stages 3, 4 and the incompressible rungs made to `amr_commons.f90`,
   `read_params.f90`, `bin/Makefile`, `pm/newdt_fine.f90`,

@@ -64,11 +64,38 @@ strain, so it dissipates LESS than the Newtonian stress does, and the flow
 decays more slowly.  That lag is the whole reason the moment rungs exist.  Use
 tau = 0.0005 as the regression value; use tau = 0.02 to see the lag.
 
-Q_ijk is deliberately absent from the incompressible rungs.  The
-Chapman-Enskog heat flux is proportional to grad theta, and theta = p_0/rho_0
-is a constant here, so q_CE vanishes identically -- carrying Q would add ten
-advected fields that are analytically zero.  The dual-frame sector at DFMM=4
-is still carried and still diagnosed.
+GATE 8 (rung 4, the Burnett heat flux).  Q_ijk IS carried at DFMM>=2, and the
+same three runs give a second, sharper gate.  theta = p_0/rho_0 is constant
+here, so the FIRST-ORDER Chapman-Enskog heat flux vanishes identically -- but
+Q's production is -theta_0 (d_k Pi_ij + d_j Pi_ik + d_i Pi_jk) + O(Pi^2),
+which is nonzero wherever Pi varies.  Contracting gives
+
+    q_i -> -tau_q theta_0 d_j Pi_ij  =  2 tau_q theta_0 p_0 tau k^2 * (the
+                                        Taylor-Green shape) ,  tau_q = tau/Pr
+
+a Burnett-order heat flux driven by the velocity Laplacian.  With Pr = 2/3 and
+the discrete max of |sin kx cos ky| on 32^3 equal to 0.9903926402, the
+prediction and the measurement are
+
+    dfmm_tau    max|q| predicted   measured     ratio
+    ----------------------------------------------------
+    0.02          4.007e-02        5.776e-02    1.4415
+    0.002         4.618e-04        4.675e-04    1.0122
+    0.0005        2.921e-05        2.932e-05    1.0036
+
+converging to 1 as a second-order prediction must, and failing by 44% at
+tau = 0.02 where max|Pi|/p_0 = 0.21 and it should fail.  The tau^2 scaling
+holds to 0.8% between the two small-tau points.  Because the first-order value
+is EXACTLY zero, this gate tests Q's production with no leading-order term to
+hide behind -- including the exact -d_l R + T_Q1 cancellation, which is
+analytic here and only discrete in the compressible code.
+
+A DFMM=1 build with incomp_stress='moment' gives the TEN-moment incompressible
+rung instead (Pi only).  That is a legitimate object and the code says which
+one is running at startup, but it is NOT comparable with a DFMM>=2
+compressible run.  Note the twenty-moment rung is 3.4x more expensive at the
+same tau (81 steps vs 24 here): once Q is carried, the Pi <-> Q pair is
+hyperbolic at the thermal speed and incomp_dt has a limb for it.
 
 TWO THINGS THAT WILL MISLEAD YOU IF YOU READ THE LOG NAIVELY.
   * The 'incomp level=' diagnostic prints the state AFTER the step whose
