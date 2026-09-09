@@ -5,6 +5,12 @@
 subroutine condinit(r,g,x,q,dx,nn)
   use amr_parameters, only: ndim, nvector
   use hydro_parameters, only: nvar, nener
+#if defined(DFMM) && NDFMM>=18
+  use hydro_parameters, only: il
+#endif
+#if defined(DFMM) && NDFMM>=33
+  use hydro_parameters, only: isxx, isxv
+#endif
   use amr_commons, only: run_t, global_t
   use input_hydro_condinit_module, only: region_condinit
   use constants, only: kB, mH, M_sun, factG_in_cgs
@@ -46,9 +52,12 @@ subroutine condinit(r,g,x,q,dx,nn)
 #define BLOWUP 13
 
   integer::i
+#if defined(DFMM) && NDFMM>=18
+  integer::idfmm
+#endif
   real(kind=8)::xx,yy,zz,rr,theta,pi,xcenter,ttmin,ttmax
 #if INIT==DFMMTEST
-  real(kind=8)::twopi_L,shear_amp,pi_amp,drho_amp
+  real(kind=8)::twopi_L,shear_amp,pi_amp,drho_amp,uadv
 #endif
 #if INIT==BLOWUP
   real(kind=8)::kw,cstr,uamp,xx0,yy0,zz0,ck,sk,cx,cy,sx,sy
@@ -484,6 +493,11 @@ subroutine condinit(r,g,x,q,dx,nn)
   !   D /= 0, rest 0  -> Fourier response.  There is no pressure gradient, so
   !                      the gas stays nearly static while q relaxes to
   !                      q_z -> -(5/2) tau_q p d_z theta   (Stage 2 only).
+  !   uadv /= 0, rest 0-> uniform translation at u = (uadv, uadv, uadv).  The
+  !                      velocity gradient vanishes identically, so this is
+  !                      pure advection and every Stage-3/4 field has a closed
+  !                      form: D_i = -uadv t, Sxv = theta t I,
+  !                      Sxx = (sigma_x0^2 + theta t^2) I  (Stages 3 and 4).
   !
   ! The shear and Fourier gates are the Navier-Stokes and Fourier baselines
   ! against which the blowup deviation diagnostics |Pi - Pi_NS| and |q - q_CE|
@@ -493,11 +507,12 @@ subroutine condinit(r,g,x,q,dx,nn)
   shear_amp = r%dfmm_ic_shear
   pi_amp    = r%dfmm_ic_pi
   drho_amp  = r%dfmm_ic_drho
+  uadv      = r%dfmm_ic_uadv
   do i=1,nn
      q(i,1) = 1.0d0 + drho_amp*sin(twopi_L*x(i,3))
-     q(i,2) = shear_amp*sin(twopi_L*x(i,3))
-     q(i,3) = 0.0d0
-     q(i,4) = 0.0d0
+     q(i,2) = shear_amp*sin(twopi_L*x(i,3)) + uadv
+     q(i,3) = uadv
+     q(i,4) = uadv
      q(i,5) = 1.0d0
      ! Zero the whole dfmm block, then set Pi.  At Stage 2 this also zeroes
      ! the ten components of Q_ijk at ivar 11..20.
@@ -580,6 +595,53 @@ subroutine condinit(r,g,x,q,dx,nn)
      endif
 #endif
   end do
+#endif
+
+#if defined(DFMM) && NDFMM>=18
+  ! ------------------------------------------------------------------
+  ! Mass-like dfmm tower (Stages 3 and 4) -- the second frame.
+  !
+  ! Set here, after the per-problem block above and for every INIT choice,
+  ! because most of those blocks zero q(i,6:nvar) wholesale.
+  !
+  ! Stage 3 carries the Lagrangian *displacement* D_i = L_i - x_i, not the
+  ! label L_i itself, so its initial value is zero and the block above has
+  ! already set it.  Why the displacement: on a periodic box a periodic flow
+  ! satisfies L(x + Lbox e) = L(x) + Lbox e, so L has a jump of one box length
+  ! across the wrap plane.  A centred difference of L there returns a
+  ! deformation tensor larger than the true one by Lbox/(2 dx) -- which is the
+  ! whole grid -- and an upwind advection of that jump smears it, corrupting a
+  ! band of cells permanently.  D is periodic and smooth, has no jump, starts
+  ! at zero, and stays small, so d L_i / d x_j = delta_ij + d D_i / d x_j is
+  ! clean everywhere and float32 carries it at its own magnitude.
+  !
+  ! The phase-space packet starts isotropic in position and uncorrelated with
+  ! velocity,
+  !     Sxx_ij = sigma_x0^2 delta_ij,   Sxv_ij = 0,
+  ! matching the reference's alpha = sigma_x0, beta = 0
+  ! (py-1d/dfmm/schemes/cholesky.py: run_sine).  Sxx must be non-singular for
+  ! the Schur complement Gamma = Svv - Sxv^T Sxx^-1 Sxv, and hence the rank
+  ! indicator, to be defined at t = 0 -- so sigma_x0 = 0 is not allowed and
+  ! read_params.f90 rejects it.
+  ! ------------------------------------------------------------------
+  do i=1,nn
+     do idfmm=0,2
+        q(i,il+idfmm) = 0.0d0
+     end do
+  end do
+#if NDFMM>=33
+  do i=1,nn
+     do idfmm=0,5
+        q(i,isxx+idfmm) = 0.0d0
+     end do
+     do idfmm=0,2
+        q(i,isxx+idfmm) = r%dfmm_ic_sigmax**2
+     end do
+     do idfmm=0,8
+        q(i,isxv+idfmm) = 0.0d0
+     end do
+  end do
+#endif
 #endif
 
 end subroutine condinit

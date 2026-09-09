@@ -206,6 +206,15 @@ module amr_commons
      real(kind=8)::dfmm_ic_shear=0.0d0
      real(kind=8)::dfmm_ic_pi=0.0d0
      real(kind=8)::dfmm_ic_drho=0.0d0
+     ! Uniform velocity added to all three components of the DFMMTEST initial
+     ! condition.  A uniform flow has zero velocity gradient, so it isolates
+     ! pure advection: it is the Stage-3/4 exactness gate.
+     real(kind=8)::dfmm_ic_uadv=0.0d0
+     ! Initial position width of the Stage-4 phase-space packet:
+     ! Sxx_ij = dfmm_ic_sigmax**2 delta_ij, Sxv_ij = 0.  Matches the 1D
+     ! reference's sigma_x0 = 0.02.  Must be strictly positive, since Sxx has
+     ! to be invertible for the rank indicator to be defined at t = 0.
+     real(kind=8)::dfmm_ic_sigmax=2.0d-2
 #endif
 
      ! INIT=BLOWUP parameters.  These are deliberately NOT inside #ifdef DFMM:

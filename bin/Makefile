@@ -65,12 +65,22 @@ endif
 # dfmm moment fields (see doc/dfmm_3d.md).  DFMM selects the stage:
 #   DFMM=1  NDFMM=5   Pi_xx, Pi_yy, Pi_xy, Pi_xz, Pi_yz            at ivar 6..10
 #   DFMM=2  NDFMM=15  the above plus the 10 components of Q_ijk     at ivar 11..20
-# Keeping stage 1 selectable makes its gate results reproducible, and the Q
-# sector is expensive enough to be worth switching off when it is not needed.
+#   DFMM=3  NDFMM=18  the above plus the Lagrangian label rho L_i   at ivar 21..23
+#   DFMM=4  NDFMM=33  the above plus the phase-space covariance
+#                     rho Sxx_ij (6) at ivar 24..29 and
+#                     rho Sxv_ij (9) at ivar 30..38
+# Every stage stays selectable so its gate results remain reproducible, and
+# each sector is expensive enough to be worth switching off when unused.
+# The first 15 fields are density-like (flux u_k X), the rest mass-like
+# (flux u_k rho X); the split point is what NDFMM_DENS/NDFMM_MASS encode.
 ifeq ($(strip $(DFMM)),1)
    NDFMM = 5
 else ifeq ($(strip $(DFMM)),2)
    NDFMM = 15
+else ifeq ($(strip $(DFMM)),3)
+   NDFMM = 18
+else ifeq ($(strip $(DFMM)),4)
+   NDFMM = 33
 else
    NDFMM = 0
 endif

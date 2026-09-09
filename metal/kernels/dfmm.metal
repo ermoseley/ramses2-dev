@@ -5,10 +5,14 @@
  * equation, flux, source and realizability ledger; this file implements
  * Sections 3, 4 and 5 of it.
  *
- * Two stages are selectable at compile time via NDFMM (bin/Makefile DFMM=n):
+ * Four stages are selectable at compile time via NDFMM (bin/Makefile DFMM=n):
  *   NDFMM=5   Stage 1, ten-moment Gaussian closure: Pi_ij evolved, Q_ijk = 0.
  *   NDFMM=15  Stage 2, adds the third central moment Q_ijk with the Wick
  *             fourth moment R_ijkl = (P_ij P_kl + P_ik P_jl + P_il P_jk)/rho.
+ *   NDFMM=18  Stage 3, adds the Lagrangian label L_i (D L_i / Dt = 0).
+ *   NDFMM=33  Stage 4, adds the position-velocity phase-space covariance
+ *             blocks Sxx_ij and Sxv_ij -- the second frame, which is what
+ *             makes the method dual-frame.
  *
  * Scope: NDIM=3, float32, HLL (or LLF) numerical flux only.  HLLC is not
  * provided: its middle-state construction is defined for the Euler system and
@@ -22,6 +26,15 @@
  *   ivar 6..10  Pi_xx, Pi_yy, Pi_xy, Pi_xz, Pi_yz  with Pi_zz = -(Pi_xx+Pi_yy)
  *   ivar 11..20 Q_xxx Q_yyy Q_zzz Q_xxy Q_xxz Q_yyx Q_yyz Q_zzx Q_zzy Q_xyz
  *               (Stage 2 only)
+ *   ivar 21..23 rho D_x, rho D_y, rho D_z, D_i = L_i - x_i   (Stage 3 only)
+ *   ivar 24..29 rho Sxx_xx yy zz xy xz yz                   (Stage 4 only)
+ *   ivar 30..38 rho Sxv_ij, row-major 3i+j, NOT symmetric   (Stage 4 only)
+ *
+ * The first two blocks are density-like and hyperbolically coupled, so they
+ * ride through the Riemann solver in dfmm_integrator_kernel.  The last two
+ * are mass-like and purely advected, so they ride in dfmm_passive_kernel
+ * using the face mass flux the core kernel stores -- see the comment on that
+ * kernel for why the split is forced and why it costs no accuracy.
  *
  * This is a self-contained translation unit: it deliberately does not include
  * hydro.metal, so the baseline hydro kernels cannot be perturbed by anything
@@ -63,8 +76,32 @@ using namespace metal;
 #define NDFMM 5
 #endif
 
+/* The NDFMM dfmm fields split into two kinds with different transport laws:
+ *
+ *   density-like (DF_NDENS fields: Pi_ij, Q_ijk)
+ *       flux u_k X, hyperbolically coupled to rho/u/E through Pi in the
+ *       momentum flux and Q + R in the energy and Pi fluxes.  These are
+ *       carried through reconstruction and the Riemann solve, so they set
+ *       DF_NV.
+ *
+ *   mass-like (DF_NMASS fields: rho L_i, rho Sxx_ij, rho Sxv_ij)
+ *       flux u_k rho X, i.e. pure advection with no feedback whatsoever on
+ *       the hyperbolic core.  Handled by dfmm_passive_kernel.
+ *
+ * The mass-like form is forced, not chosen: a density-like field with no
+ * source obeys D X / Dt = -X div u, whereas the Lagrangian label and the
+ * phase-space covariance are defined by D X / Dt = (their sources), with no
+ * div u term.
+ */
+#if NDFMM > 15
+#define DF_NDENS 15
+#else
+#define DF_NDENS NDFMM
+#endif
+#define DF_NMASS (NDFMM - DF_NDENS)
+
 /* Number of fields carried through reconstruction and the Riemann solve. */
-#define DF_NV (5 + NDFMM)
+#define DF_NV (5 + DF_NDENS)
 
 /* Primitive/conserved vector slots. */
 #define DI_RHO 0
@@ -109,6 +146,47 @@ constant int DF_QMAP[27] = {
 
 /* sym6 slot of (a,b) for the (xx,yy,zz,xy,xz,yz) packing. */
 constant int DF_S6[3][3] = {{0,3,4},{3,1,5},{4,5,2}};
+#endif
+
+/* ---------------------------------------------------------------------------
+ * Mass-like passive tower (Stages 3 and 4) -- the second frame.
+ *
+ * Slot m below is an offset within the DF_NMASS-vector, i.e. ivar
+ * 6 + DF_NDENS + m.
+ *
+ *   D_i      3 slots, a vector: the Lagrangian displacement L_i - x_i
+ *   Sxx_ij   6 slots, symmetric, sym6 packing (xx, yy, zz, xy, xz, yz)
+ *   Sxv_ij   9 slots, row-major 3i+j, NOT symmetric
+ *
+ * Sxv is genuinely asymmetric.  Its antisymmetric part is the phase-space
+ * packet's angular momentum, which any flow with vorticity generates from an
+ * isotropic start, so symmetrising it would discard physics, not storage.
+ *
+ * The Lagrangian label obeys D L_i / Dt = 0, so the displacement obeys
+ *     D D_i / Dt = -u_i,
+ * which is the one source the tower carries unconditionally: it is kinematics,
+ * not closure, so dfmm_source=.false. does not switch it off.  Carrying D
+ * rather than L is what keeps the deformation tensor usable on a periodic box
+ * -- see hydro/condinit.f90 for the argument.
+ *
+ * D_i and Sxx_ij need no relaxation (collisions do not move particles, and
+ * they do not act on the Lagrangian label at all); Sxv_ij relaxes toward
+ * zero, since collisions randomise velocity and so destroy the
+ * position-velocity correlation.  See dfmm_source_kernel.
+ * --------------------------------------------------------------------------*/
+#if DF_NMASS > 0
+#define DF_HAVE_L 1
+#define DP_L   0
+#else
+#define DF_HAVE_L 0
+#endif
+
+#if DF_NMASS >= 18
+#define DF_HAVE_S 1
+#define DP_SXX 3
+#define DP_SXV 9
+#else
+#define DF_HAVE_S 0
 #endif
 
 constant int   TWOTONDIM = 8;
@@ -165,6 +243,38 @@ struct df_subgrid_t {
 struct df_ix_t { float v[DF_NV][3][2][2]; };
 struct df_iy_t { float v[DF_NV][2][3][2]; };
 struct df_iz_t { float v[DF_NV][2][2][3]; };
+
+#if DF_NMASS > 0
+/* Threadgroup storage for dfmm_passive_kernel:
+ *   stencil  (4 + DF_NMASS) * 6^3 * 4 B     (rho, u_i, then the tower)
+ *   faces    6 * DF_NMASS * 12 * 4 B
+ *   refined  64 B
+ * =  6976 B at Stage 3 (DF_NMASS =  3)
+ * = 24256 B at Stage 4 (DF_NMASS = 18)
+ * both inside the 32768 B Apple per-threadgroup limit.  The alternative --
+ * carrying all 38 fields in one kernel -- needs 43840 B and does not fit,
+ * which is what forces the split (doc/dfmm_3d.md Section 6). */
+#define DP_NST (4 + DF_NMASS)
+#define DP_RHO 0
+#define DP_UX  1
+#define DP_X0  4
+
+struct dp_subgrid_t {
+    float v[DP_NST][6][6][6];
+    bool  refined[4][4][4];
+};
+struct dp_ix_t { float v[DF_NMASS][3][2][2]; };
+struct dp_iy_t { float v[DF_NMASS][2][3][2]; };
+struct dp_iz_t { float v[DF_NMASS][2][2][3]; };
+
+/* Flat face index within one oct, matching the [3][2][2] / [2][3][2] /
+ * [2][2][3] interface shapes: 12 faces per direction, 36 per oct.  The x
+ * block occupies 0..11, y 12..23, z 24..35. */
+#define DP_FX(i,j,k) ((i)*4 + (j)*2 + (k))
+#define DP_FY(i,j,k) (12 + (i)*6 + (j)*2 + (k))
+#define DP_FZ(i,j,k) (24 + (i)*6 + (j)*3 + (k))
+#define DP_NFACE 36
+#endif
 
 /* ===========================================================================
  * Symmetric-tensor helpers
@@ -233,6 +343,78 @@ static inline float df_lam_min_sym6(thread const float *A) {
     float eig3 = q + 2.0f*pp*cos(phi + 2.0943951023931953f);  /* +2pi/3 */
     return min(eig3, min(eig1, 3.0f*q - eig1 - eig3));
 }
+
+#if DF_NMASS >= 18
+/* Inverse of a symmetric 3x3 given as sym6, via cofactors.  Returns the
+ * determinant; the inverse is written only when it is usable. */
+static inline float df_inv_sym6(thread const float *A, thread float *Ai) {
+    float d = A[0]*(A[1]*A[2] - A[5]*A[5])
+            - A[3]*(A[3]*A[2] - A[5]*A[4])
+            + A[4]*(A[3]*A[5] - A[1]*A[4]);
+    if (!(d > 0.0f)) return d;
+    float id = 1.0f/d;
+    Ai[0] = (A[1]*A[2] - A[5]*A[5])*id;
+    Ai[1] = (A[0]*A[2] - A[4]*A[4])*id;
+    Ai[2] = (A[0]*A[1] - A[3]*A[3])*id;
+    Ai[3] = (A[4]*A[5] - A[3]*A[2])*id;
+    Ai[4] = (A[3]*A[5] - A[1]*A[4])*id;
+    Ai[5] = (A[3]*A[4] - A[0]*A[5])*id;
+    return d;
+}
+
+/* Smallest generalized eigenvalue of the pencil (A, B): the least lam with
+ * A v = lam B v, for symmetric A and symmetric positive definite B.
+ *
+ * Computed as lam_min of L^-1 A L^-T with B = L L^T.  That is a congruence
+ * transform, so it has exactly the same spectrum as B^-1 A while staying
+ * symmetric, which is what lets the existing closed-form eigenvalue routine
+ * be reused.  Returns -HUGE_VALF if B is not numerically positive definite.
+ */
+static inline float df_gen_lam_min(thread const float *A, thread const float *B) {
+    float l11 = B[0];
+    if (!(l11 > 0.0f)) return -HUGE_VALF;
+    l11 = sqrt(l11);
+    float il11 = 1.0f/l11;
+    float l21 = B[3]*il11, l31 = B[4]*il11;
+    float l22 = B[1] - l21*l21;
+    if (!(l22 > 0.0f)) return -HUGE_VALF;
+    l22 = sqrt(l22);
+    float il22 = 1.0f/l22;
+    float l32 = (B[5] - l31*l21)*il22;
+    float l33 = B[2] - l31*l31 - l32*l32;
+    if (!(l33 > 0.0f)) return -HUGE_VALF;
+    l33 = sqrt(l33);
+    float il33 = 1.0f/l33;
+
+    /* M = L^-1, lower triangular */
+    float M[9];
+    M[0] = il11;                            M[1] = 0.0f;         M[2] = 0.0f;
+    M[3] = -l21*il11*il22;                  M[4] = il22;         M[5] = 0.0f;
+    M[6] = (l21*l32 - l22*l31)*il11*il22*il33;
+    M[7] = -l32*il22*il33;                  M[8] = il33;
+
+    float Am[9]; df_mat_from_sym6(A, Am);
+    /* Y = M A, then C = Y M^T */
+    float Y[9];
+    for (int a = 0; a < 3; a++) for (int b = 0; b < 3; b++) {
+        float acc = 0.0f;
+        for (int c = 0; c < 3; c++) acc += M[3*a+c]*Am[3*c+b];
+        Y[3*a+b] = acc;
+    }
+    float C[6];
+    float c00 = 0.0f, c11 = 0.0f, c22 = 0.0f, c01 = 0.0f, c02 = 0.0f, c12 = 0.0f;
+    for (int c = 0; c < 3; c++) {
+        c00 += Y[0*3+c]*M[0*3+c];
+        c11 += Y[1*3+c]*M[1*3+c];
+        c22 += Y[2*3+c]*M[2*3+c];
+        c01 += Y[0*3+c]*M[1*3+c];
+        c02 += Y[0*3+c]*M[2*3+c];
+        c12 += Y[1*3+c]*M[2*3+c];
+    }
+    C[0] = c00; C[1] = c11; C[2] = c22; C[3] = c01; C[4] = c02; C[5] = c12;
+    return df_lam_min_sym6(C);
+}
+#endif
 
 /* ---------------------------------------------------------------------------
  * Frame rotation for y/z faces.
@@ -342,7 +524,7 @@ static inline void df_cons_to_prim(thread const float *c, thread float *w,
     w[DI_UZ]  = c[DI_UZ] / rho;
     float ekin = 0.5f*(c[DI_UX]*c[DI_UX] + c[DI_UY]*c[DI_UY] + c[DI_UZ]*c[DI_UZ]) / rho;
     w[DI_P]   = max(DF_GM1*(c[DI_P] - ekin), rho*smallc2/DF_GAMMA);
-    for (int m = 0; m < NDFMM; m++) w[DI_PI+m] = c[DI_PI+m];
+    for (int m = 0; m < DF_NDENS; m++) w[DI_PI+m] = c[DI_PI+m];
 }
 
 static inline void df_prim_to_cons(thread const float *w, thread float *c) {
@@ -353,7 +535,7 @@ static inline void df_prim_to_cons(thread const float *w, thread float *c) {
     c[DI_UZ]  = rho*w[DI_UZ];
     c[DI_P]   = w[DI_P]/DF_GM1
               + 0.5f*rho*(w[DI_UX]*w[DI_UX] + w[DI_UY]*w[DI_UY] + w[DI_UZ]*w[DI_UZ]);
-    for (int m = 0; m < NDFMM; m++) c[DI_PI+m] = w[DI_PI+m];
+    for (int m = 0; m < DF_NDENS; m++) c[DI_PI+m] = w[DI_PI+m];
 }
 
 /* ===========================================================================
@@ -381,7 +563,7 @@ static inline void df_phys_flux(thread const float *w, thread float *F) {
     F[DI_UY]  = rho*uy*ux + pxy;
     F[DI_UZ]  = rho*uz*ux + pxz;
     F[DI_P]   = ux*(E + p) + (ux*pxx + uy*pxy + uz*pxz);
-    for (int m = 0; m < NDFMM; m++) F[DI_PI+m] = ux*w[DI_PI+m];
+    for (int m = 0; m < DF_NDENS; m++) F[DI_PI+m] = ux*w[DI_PI+m];
 
 #if DF_HAVE_Q
     thread const float *Q = &w[DI_Q];
@@ -668,7 +850,7 @@ static void df_trace(
         src[DI_UZ]  = -(ux*sx[DI_UZ] + uy*sy[DI_UZ] + uz*sz[DI_UZ]) - sz[DI_P]*irho;
         src[DI_P]   = -(ux*sx[DI_P] + uy*sy[DI_P] + uz*sz[DI_P]) - divs*DF_GAMMA*p;
         /* Pi is density-like: transport contributes u.grad Pi + Pi div u */
-        for (int m = 0; m < NDFMM; m++)
+        for (int m = 0; m < DF_NDENS; m++)
             src[DI_PI+m] = -(ux*sx[DI_PI+m] + uy*sy[DI_PI+m] + uz*sz[DI_PI+m])
                            - divs*w[DI_PI+m];
 
@@ -987,6 +1169,43 @@ static void df_coarse_cell_update(
     }
 }
 
+#if DF_NMASS > 0
+/* Publish the face mass fluxes for dfmm_passive_kernel.
+ *
+ * Called after the fine-face zeroing, so a face hidden behind refinement
+ * arrives as an exact zero and the passive tower inherits the AMR bookkeeping
+ * for free rather than repeating it.
+ *
+ * Indexed by the *relative* subgrid index within this dispatch, not by the
+ * oct index: both kernels are dispatched with one threadgroup per subgrid
+ * over the same head_idx, so block_idx is the same in both and the buffer
+ * only needs to be num_subgrids long.  This mirrors the UCT face-product
+ * buffer already used by the MHD path.
+ */
+static void df_store_face_mass(
+    device float *fmass,
+    threadgroup const df_ix_t &fx, threadgroup const df_iy_t &fy,
+    threadgroup const df_iz_t &fz,
+    int block_idx, int thread_idx, uint threads_per_tg)
+{
+    const int ias = (2*NSUBGRID+1)*(2*NSUBGRID)*(2*NSUBGRID);
+    device float *base = fmass + block_idx*DP_NFACE;
+    for (int wi = thread_idx; wi < 3*ias; wi += int(threads_per_tg)) {
+        int i, j, k;
+        if (wi < ias) {
+            index_1Dto3D(wi, 2*NSUBGRID+1, 2*NSUBGRID, i, j, k);
+            base[DP_FX(i,j,k)] = fx.v[DI_RHO][i][j][k];
+        } else if (wi < 2*ias) {
+            index_1Dto3D(wi - ias, 2*NSUBGRID, 2*NSUBGRID+1, i, j, k);
+            base[DP_FY(i,j,k)] = fy.v[DI_RHO][i][j][k];
+        } else {
+            index_1Dto3D(wi - 2*ias, 2*NSUBGRID, 2*NSUBGRID, i, j, k);
+            base[DP_FZ(i,j,k)] = fz.v[DI_RHO][i][j][k];
+        }
+    }
+}
+#endif
+
 /* ===========================================================================
  * dfmm_integrator_kernel — transport only (Section 3 fluxes)
  * ========================================================================= */
@@ -1011,6 +1230,9 @@ kernel void dfmm_integrator_kernel(
     device const int   *father           [[buffer(17)]],
     device const float *f                [[buffer(18)]],
     constant int       &source_on        [[buffer(19)]],
+#if DF_NMASS > 0
+    device float       *fmass            [[buffer(20)]],
+#endif
     uint block_idx      [[threadgroup_position_in_grid]],
     uint thread_idx     [[thread_position_in_threadgroup]],
     uint threads_per_tg [[threads_per_threadgroup]])
@@ -1036,6 +1258,11 @@ kernel void dfmm_integrator_kernel(
     if (ilevel < levelmax)
         df_zero_fine_fluxes(ls, int(thread_idx), threads_per_tg, lx, ly, lz);
 
+#if DF_NMASS > 0
+    df_store_face_mass(fmass, lx, ly, lz, int(block_idx), int(thread_idx),
+                       threads_per_tg);
+#endif
+
     df_conservative_update(unew, nbor, lx, ly, lz,
                            head_idx, int(block_idx), int(thread_idx),
                            threads_per_tg, dtdx);
@@ -1045,6 +1272,317 @@ kernel void dfmm_integrator_kernel(
                               head_idx, int(block_idx), ngridmax,
                               int(thread_idx), dtdx/float(TWOTONDIM));
 }
+
+#if DF_NMASS > 0
+/* ===========================================================================
+ * dfmm_passive_kernel — advection of the mass-like tower (Stages 3 and 4)
+ *
+ * Why a separate kernel.  The single-kernel design holds a 6^3 primitive
+ * stencil plus six 3x2x2 interface arrays per field, which is 1152 B per
+ * field against a 32 KiB threadgroup budget: 28 fields.  Stage 4 has 38.  So
+ * the hyperbolic core (rho, u, E, Pi, Q -- 20 fields) and the passive tower
+ * (rho L_i, rho Sxx, rho Sxv -- 18 fields) must be swept separately.
+ *
+ * Why the split costs nothing.  The tower's only flux is u_k (rho X), so its
+ * numerical flux is fully determined by the face mass flux and an upwind
+ * choice of X:
+ *
+ *     F[rho X] = F[rho] * X_upwind,   upwind side chosen by sign(F[rho]).
+ *
+ * dfmm_integrator_kernel already computed F[rho] with the full 20-field
+ * Riemann solve and stored it, so the tower is transported by *exactly* the
+ * mass flux the density used -- consistency by construction, not by
+ * recomputation.  A uniform X therefore stays uniform to the last bit, and
+ * mass-weighted conservation of rho X follows from conservation of rho.
+ *
+ * Why upwind and not HLL.  Running rho X through HLL as an extra field gives
+ * F = a_L X_L + a_R X_R with a_L + a_R = F[rho] but a_R < 0, so a static
+ * fluid (F[rho] = 0, S_L = -c, S_R = +c) still produces the flux
+ * (c/2)(X_L - X_R).  That smears X at the sound speed even where nothing
+ * moves.  Pi and Q have to accept that -- their fluxes are genuinely
+ * non-advective, so they must ride the acoustic waves -- but for a field
+ * whose exact evolution is D X / Dt = 0 it would destroy the deformation
+ * tensor d L_i / d x_j within a sound-crossing time, which is the one thing
+ * Stage 3 exists to measure.  Upwinding on the mass flux is the standard
+ * finite-volume treatment of an advected scalar and is exact for F[rho] = 0.
+ * ========================================================================= */
+
+/* Load rho, u_i and the tower's primitives X = (rho X)/rho into the 6^3
+ * stencil.  Gravity is deliberately not applied to u here: this kernel only
+ * needs u for the reconstruction predictor, and the half-step gravity kick
+ * the core kernel applies is already reflected in the face mass fluxes that
+ * actually move the tower. */
+static void dp_load_subgrid(
+    device const float *uold, device const int *nbor,
+    int head_idx, int block_idx, int thread_idx, float smallr,
+    uint threads_per_tg, threadgroup dp_subgrid_t &ls)
+{
+    const int work_size  = 2*NSUBGRID + 4;
+    const int total_work = work_size*work_size*work_size;
+
+    for (int wi = thread_idx; wi < total_work; wi += int(threads_per_tg)) {
+        int i_sg, j_sg, k_sg;
+        index_1Dto3D(wi/8, work_size/2, work_size/2, i_sg, j_sg, k_sg);
+        int subgrid_idx = head_idx + block_idx;
+        int source_idx  = nbor_get(nbor, subgrid_idx, wi/8 + 1);
+        int cell_idx    = wi%8 + 1;
+
+        int ib, jb, kb;
+        index_1Dto3D(cell_idx - 1, 2, 2, ib, jb, kb);
+        int i = ib + 2*i_sg, j = jb + 2*j_sg, k = kb + 2*k_sg;
+
+        float rho = max(df_u_get(uold, source_idx, 1, cell_idx), smallr);
+        float irho = 1.0f/rho;
+        ls.v[DP_RHO  ][i][j][k] = rho;
+        ls.v[DP_UX+0 ][i][j][k] = df_u_get(uold, source_idx, 2, cell_idx)*irho;
+        ls.v[DP_UX+1 ][i][j][k] = df_u_get(uold, source_idx, 3, cell_idx)*irho;
+        ls.v[DP_UX+2 ][i][j][k] = df_u_get(uold, source_idx, 4, cell_idx)*irho;
+        for (int m = 0; m < DF_NMASS; m++)
+            ls.v[DP_X0+m][i][j][k] =
+                df_u_get(uold, source_idx, DF_NV + 1 + m, cell_idx)*irho;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+/* MUSCL-Hancock predictor for the tower.  X is mass-like, so its primitive
+ * form obeys D X / Dt = S with no -X div u term, and the transport part of
+ * the predictor is just -u.grad X.
+ *
+ * The Liouville production S (Sxv + Sxv^T for Sxx, Svv - Sxv G^T for Sxv) is
+ * deliberately absent, exactly as the strain production of Pi is absent from
+ * df_trace: sources follow the flux update, so that the interface states are
+ * never advanced by a term that the source stage will integrate with its own
+ * relaxation.  For L_i there is no source at all, so this predictor is the
+ * complete second-order reconstruction. */
+static void dp_trace(
+    threadgroup dp_subgrid_t &ls, int thread_idx, uint threads_per_tg,
+    threadgroup dp_ix_t &lx, threadgroup dp_ix_t &rx,
+    threadgroup dp_iy_t &ly, threadgroup dp_iy_t &ry,
+    threadgroup dp_iz_t &lz, threadgroup dp_iz_t &rz,
+    float dtdx, int slope)
+{
+    const int work_size  = 2*NSUBGRID + 2;
+    const int total_work = work_size*work_size*work_size;
+
+    for (int wi = thread_idx; wi < total_work; wi += int(threads_per_tg)) {
+        int i, j, k;
+        index_1Dto3D(wi, work_size, work_size, i, j, k);
+        i += 1; j += 1; k += 1;
+
+        float ux = ls.v[DP_UX+0][i][j][k];
+        float uy = ls.v[DP_UX+1][i][j][k];
+        float uz = ls.v[DP_UX+2][i][j][k];
+
+        float q[DF_NMASS], sx[DF_NMASS], sy[DF_NMASS], sz[DF_NMASS];
+        for (int m = 0; m < DF_NMASS; m++) {
+            int iv = DP_X0 + m;
+            float w = ls.v[iv][i][j][k];
+            sx[m] = 0.5f*df_slope(ls.v[iv][i-1][j][k], w, ls.v[iv][i+1][j][k], slope);
+            sy[m] = 0.5f*df_slope(ls.v[iv][i][j-1][k], w, ls.v[iv][i][j+1][k], slope);
+            sz[m] = 0.5f*df_slope(ls.v[iv][i][j][k-1], w, ls.v[iv][i][j][k+1], slope);
+            q[m]  = w - dtdx*(ux*sx[m] + uy*sy[m] + uz*sz[m]);
+        }
+
+#define DP_STORE(ARR, I0, I1, I2, S, SGN)                                      \
+        for (int m = 0; m < DF_NMASS; m++)                                     \
+            ARR.v[m][I0][I1][I2] = q[m] SGN S[m];
+
+        if (i > 1 && (j > 1 && j < work_size) && (k > 1 && k < work_size))
+            DP_STORE(rx, i-2, j-2, k-2, sx, -)
+        if (i < work_size && (j > 1 && j < work_size) && (k > 1 && k < work_size))
+            DP_STORE(lx, i-1, j-2, k-2, sx, +)
+        if ((i > 1 && i < work_size) && j > 1 && (k > 1 && k < work_size))
+            DP_STORE(ry, i-2, j-2, k-2, sy, -)
+        if ((i > 1 && i < work_size) && j < work_size && (k > 1 && k < work_size))
+            DP_STORE(ly, i-2, j-1, k-2, sy, +)
+        if ((i > 1 && i < work_size) && (j > 1 && j < work_size) && k > 1)
+            DP_STORE(rz, i-2, j-2, k-2, sz, -)
+        if ((i > 1 && i < work_size) && (j > 1 && j < work_size) && k < work_size)
+            DP_STORE(lz, i-2, j-2, k-1, sz, +)
+#undef DP_STORE
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+/* Upwind flux, written in place over the left-state arrays so the update
+ * stage reads them exactly as the core kernel's does.  A zero mass flux --
+ * either a genuinely static face or one zeroed behind refinement -- gives an
+ * exactly zero passive flux, whichever branch is taken. */
+static void dp_flux(
+    device const float *fmass, int block_idx,
+    threadgroup dp_ix_t &lx, threadgroup const dp_ix_t &rx,
+    threadgroup dp_iy_t &ly, threadgroup const dp_iy_t &ry,
+    threadgroup dp_iz_t &lz, threadgroup const dp_iz_t &rz,
+    int thread_idx, uint threads_per_tg)
+{
+    const int ias = (2*NSUBGRID+1)*(2*NSUBGRID)*(2*NSUBGRID);
+    device const float *base = fmass + block_idx*DP_NFACE;
+
+    for (int wi = thread_idx; wi < 3*ias; wi += int(threads_per_tg)) {
+        int i, j, k;
+        if (wi < ias) {
+            index_1Dto3D(wi, 2*NSUBGRID+1, 2*NSUBGRID, i, j, k);
+            float fm = base[DP_FX(i,j,k)];
+            for (int m = 0; m < DF_NMASS; m++)
+                lx.v[m][i][j][k] = fm*((fm >= 0.0f) ? lx.v[m][i][j][k]
+                                                    : rx.v[m][i][j][k]);
+        } else if (wi < 2*ias) {
+            index_1Dto3D(wi - ias, 2*NSUBGRID, 2*NSUBGRID+1, i, j, k);
+            float fm = base[DP_FY(i,j,k)];
+            for (int m = 0; m < DF_NMASS; m++)
+                ly.v[m][i][j][k] = fm*((fm >= 0.0f) ? ly.v[m][i][j][k]
+                                                    : ry.v[m][i][j][k]);
+        } else {
+            index_1Dto3D(wi - 2*ias, 2*NSUBGRID, 2*NSUBGRID, i, j, k);
+            float fm = base[DP_FZ(i,j,k)];
+            for (int m = 0; m < DF_NMASS; m++)
+                lz.v[m][i][j][k] = fm*((fm >= 0.0f) ? lz.v[m][i][j][k]
+                                                    : rz.v[m][i][j][k]);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+kernel void dfmm_passive_kernel(
+    device const oct_t *grid             [[buffer(0)]],
+    device const float *uold             [[buffer(1)]],
+    device float       *unew             [[buffer(2)]],
+    device const int   *nbor             [[buffer(3)]],
+    device const float *fmass            [[buffer(4)]],
+    constant int       &head_idx         [[buffer(5)]],
+    constant int       &num_subgrids     [[buffer(6)]],
+    constant int       &ngridmax         [[buffer(7)]],
+    constant int       &ilevel           [[buffer(8)]],
+    constant int       &levelmin         [[buffer(9)]],
+    constant float     &smallr           [[buffer(10)]],
+    constant float     &dt               [[buffer(11)]],
+    constant float     &dx               [[buffer(12)]],
+    constant int       &slope            [[buffer(13)]],
+    device const int   *father           [[buffer(14)]],
+    uint block_idx      [[threadgroup_position_in_grid]],
+    uint thread_idx     [[thread_position_in_threadgroup]],
+    uint threads_per_tg [[threads_per_threadgroup]])
+{
+    if (int(block_idx) >= num_subgrids) return;
+    float dtdx = dt/dx;
+
+    threadgroup dp_subgrid_t ls;
+    threadgroup dp_ix_t lx, rx;
+    threadgroup dp_iy_t ly, ry;
+    threadgroup dp_iz_t lz, rz;
+
+    dp_load_subgrid(uold, nbor, head_idx, int(block_idx), int(thread_idx),
+                    smallr, threads_per_tg, ls);
+
+    dp_trace(ls, int(thread_idx), threads_per_tg, lx, rx, ly, ry, lz, rz,
+             dtdx, slope);
+
+    dp_flux(fmass, int(block_idx), lx, rx, ly, ry, lz, rz,
+            int(thread_idx), threads_per_tg);
+
+    /* Conservative update -- same face bookkeeping as
+     * df_conservative_update, at the tower's ivar offset. */
+    {
+        const int work_size  = 2*NSUBGRID;
+        const int total_work = work_size*work_size*work_size;
+        for (int work_idx = int(thread_idx); work_idx < total_work;
+             work_idx += int(threads_per_tg)) {
+            int subgrid_idx = head_idx + int(block_idx);
+            int i_sg, j_sg, k_sg;
+            index_1Dto3D(work_idx/8, work_size/2, work_size/2, i_sg, j_sg, k_sg);
+            i_sg += 1; j_sg += 1; k_sg += 1;
+            int ind_nbor = 1 + i_sg + NSUBGRIDP2*j_sg + NSUBGRIDP2*NSUBGRIDP2*k_sg;
+            int oct_idx  = nbor_get(nbor, subgrid_idx, ind_nbor);
+
+            int cell_idx = work_idx%8 + 1;
+            int i, j, k;
+            index_1Dto3D(cell_idx - 1, 2, 2, i, j, k);
+            i += 2*(i_sg - 1);
+            j += 2*(j_sg - 1);
+            k += 2*(k_sg - 1);
+
+            for (int m = 0; m < DF_NMASS; m++) {
+                float upd = (lx.v[m][i][j][k] - lx.v[m][i+1][j  ][k  ])*dtdx
+                          + (ly.v[m][i][j][k] - ly.v[m][i  ][j+1][k  ])*dtdx
+                          + (lz.v[m][i][j][k] - lz.v[m][i  ][j  ][k+1])*dtdx;
+                int iv = DF_NV + 1 + m;
+                df_u_set(unew, oct_idx, iv, cell_idx,
+                         df_u_get(unew, oct_idx, iv, cell_idx) + upd);
+            }
+        }
+    }
+
+    /* Coarse-level flux correction, mirroring df_coarse_cell_update. */
+    if (ilevel > levelmin) {
+        const int ias = NSUBGRID*NSUBGRID;
+        int tid = int(thread_idx);
+        if (tid < 6*ias) {
+            int subgrid_idx = head_idx + int(block_idx);
+            float cfs = dtdx/float(TWOTONDIM);
+            int face     = tid/ias;
+            int work_idx = tid%ias;
+            int j_raw = work_idx%NSUBGRID;
+            int k_raw = work_idx/NSUBGRID;
+
+            float acc[DF_NMASS];
+            for (int m = 0; m < DF_NMASS; m++) acc[m] = 0.0f;
+            int ind_nbor = 0;
+
+            if (face == 0) {
+                int j_sg = j_raw + 1, k_sg = k_raw + 1;
+                for (int j = 2*j_sg-2; j <= 2*j_sg-1; j++)
+                    for (int k = 2*k_sg-2; k <= 2*k_sg-1; k++)
+                        for (int m = 0; m < DF_NMASS; m++) acc[m] -= lx.v[m][0][j][k]*cfs;
+                ind_nbor = 1 + 0 + NSUBGRIDP2*j_sg + NSUBGRIDP2*NSUBGRIDP2*k_sg;
+            } else if (face == 1) {
+                int j_sg = j_raw + 1, k_sg = k_raw + 1;
+                for (int j = 2*j_sg-2; j <= 2*j_sg-1; j++)
+                    for (int k = 2*k_sg-2; k <= 2*k_sg-1; k++)
+                        for (int m = 0; m < DF_NMASS; m++) acc[m] += lx.v[m][2*NSUBGRID][j][k]*cfs;
+                ind_nbor = 1 + (NSUBGRID+1) + NSUBGRIDP2*j_sg + NSUBGRIDP2*NSUBGRIDP2*k_sg;
+            } else if (face == 2) {
+                int i_sg = j_raw + 1, k_sg = k_raw + 1;
+                for (int i = 2*i_sg-2; i <= 2*i_sg-1; i++)
+                    for (int k = 2*k_sg-2; k <= 2*k_sg-1; k++)
+                        for (int m = 0; m < DF_NMASS; m++) acc[m] -= ly.v[m][i][0][k]*cfs;
+                ind_nbor = 1 + i_sg + NSUBGRIDP2*0 + NSUBGRIDP2*NSUBGRIDP2*k_sg;
+            } else if (face == 3) {
+                int i_sg = j_raw + 1, k_sg = k_raw + 1;
+                for (int i = 2*i_sg-2; i <= 2*i_sg-1; i++)
+                    for (int k = 2*k_sg-2; k <= 2*k_sg-1; k++)
+                        for (int m = 0; m < DF_NMASS; m++) acc[m] += ly.v[m][i][2*NSUBGRID][k]*cfs;
+                ind_nbor = 1 + i_sg + NSUBGRIDP2*(NSUBGRID+1) + NSUBGRIDP2*NSUBGRIDP2*k_sg;
+            } else if (face == 4) {
+                int i_sg = j_raw + 1, j_sg = k_raw + 1;
+                for (int i = 2*i_sg-2; i <= 2*i_sg-1; i++)
+                    for (int j = 2*j_sg-2; j <= 2*j_sg-1; j++)
+                        for (int m = 0; m < DF_NMASS; m++) acc[m] -= lz.v[m][i][j][0]*cfs;
+                ind_nbor = 1 + i_sg + NSUBGRIDP2*j_sg + NSUBGRIDP2*NSUBGRIDP2*0;
+            } else {
+                int i_sg = j_raw + 1, j_sg = k_raw + 1;
+                for (int i = 2*i_sg-2; i <= 2*i_sg-1; i++)
+                    for (int j = 2*j_sg-2; j <= 2*j_sg-1; j++)
+                        for (int m = 0; m < DF_NMASS; m++) acc[m] += lz.v[m][i][j][2*NSUBGRID]*cfs;
+                ind_nbor = 1 + i_sg + NSUBGRIDP2*j_sg + NSUBGRIDP2*NSUBGRIDP2*(NSUBGRID+1);
+            }
+
+            int source_idx = nbor_get(nbor, subgrid_idx, ind_nbor);
+            if (source_idx > ngridmax) {
+                int father_idx = father[source_idx - 1];
+                int ic = grid[source_idx-1].ckey[0] - 2*grid[father_idx-1].ckey[0];
+                int jc = grid[source_idx-1].ckey[1] - 2*grid[father_idx-1].ckey[1];
+                int kc = grid[source_idx-1].ckey[2] - 2*grid[father_idx-1].ckey[2];
+                int cell_idx = 1 + ic + 2*jc + 4*kc;
+                for (int m = 0; m < DF_NMASS; m++)
+                    atomic_add_float(
+                        (device atomic_uint *)&unew[df_u_flat(father_idx, DF_NV + 1 + m,
+                                                              cell_idx)],
+                        acc[m]);
+            }
+        }
+    }
+}
+#endif /* DF_NMASS > 0 */
 
 /* ===========================================================================
  * dfmm_source_kernel — production terms and exact BGK relaxation
@@ -1100,6 +1638,156 @@ kernel void dfmm_integrator_kernel(
  *                 the branch below for why this is the right comparison run.
  */
 constant int DF_CLOSURE_NS = 1;
+
+#if DF_HAVE_S
+/* ---------------------------------------------------------------------------
+ * Phase-space covariance update (Stage 4) -- the second frame.
+ *
+ * Under the linearised flow around a cell the 6x6 phase-space covariance
+ *     M = [[Sxx, Sxv], [Sxv^T, Svv]]
+ * obeys D M / Dt = J M + M J^T with J = [[0, I], [0, -G]], G_ij = d_j u_i:
+ *
+ *     D Sxx / Dt = Sxv + Sxv^T
+ *     D Sxv / Dt = Svv - Sxv G^T           (Svv = P/rho, from the hydro sector)
+ *     D Svv / Dt = -G Svv - Svv G^T        (already carried by p and Pi)
+ *
+ * the 3D generalisation of Eqs. (9)-(11) of the moment paper.  The 1D
+ * reference (py-1d/dfmm/schemes/cholesky.py) instead carries the Cholesky
+ * factors alpha, beta of the 2x2 covariance,
+ *     D alpha / Dt = beta,   D beta / Dt = gamma^2/alpha - (du/dx) beta,
+ *     Sxx = alpha^2,  Sxv = alpha beta,  Svv = beta^2 + gamma^2,
+ * and the two are analytically identical:
+ *     Sxx' = 2 alpha alpha' = 2 alpha beta                 = 2 Sxv
+ *     Sxv' = alpha' beta + alpha beta'
+ *          = beta^2 + gamma^2 - (du/dx) alpha beta         = Svv - Sxv G
+ * so carrying the covariance directly gives up nothing and gains three
+ * things: the system is linear in the evolved variables, there is no 1/alpha
+ * to floor, and realizability needs no clip because gamma is no longer a
+ * state variable.  gamma becomes a pure diagnostic -- the Schur complement
+ * Svv - Sxv^T Sxx^-1 Sxv, which is exactly what gamma^2 = Svv - beta^2 is in
+ * the reference -- and is computed in dfmm_diag_kernel.
+ *
+ * Like the displacement source, the Liouville terms are applied
+ * unconditionally rather than under source_on.  dfmm_source selects whether
+ * the *closure* is driven -- the strain production of Pi and the production of
+ * Q -- which is what the Euler-reduction gate switches off.  The second
+ * frame's evolution is not a closure model but the definition of the frame:
+ * D M / Dt = J M + M J^T is the linearised Liouville flow, it has no
+ * modelling content to disable, and the tower has no feedback whatsoever on
+ * the hyperbolic core, so leaving it on cannot perturb that gate.  It also
+ * makes dfmm_source=.false. a clean manufactured solution: with Pi and Q
+ * pinned at zero, Svv = theta I exactly and every component of Sxx and Sxv
+ * has a closed form (Gate 7).
+ *
+ * Relaxation follows the reference's physics: collisions randomise velocity,
+ * so they destroy the position-velocity correlation Sxv on the collision
+ * time, and they do not move particles, so Sxx is untouched.  Sxv therefore
+ * uses the same asymptotic-preserving map as Pi and Q, and that choice
+ * matters: the AP map gives the collisional equilibrium Sxv -> tau Svv,
+ * whence D Sxx / Dt = 2 tau theta, i.e. Brownian spreading with diffusivity
+ * tau theta = nu.  The reference applies its decay *after* the explicit
+ * source instead, which sends Sxv -> 0 and freezes Sxx, losing the diffusive
+ * limit; the two agree in the collisionless regime its own test problems use,
+ * which is where the 1D reduction gate compares them.
+ *
+ * Both blocks are written as an increment on the *conserved* transported
+ * value rather than as a primitive round trip whenever no relaxation acts, so
+ * that a run with no source is bit-exact pure advection.
+ *
+ * TIME CENTRING.  Sxv is advanced first, and Sxx is then advanced with the
+ * *trapezoidal* average of Sxv across the step rather than its value at the
+ * start.  This is not a refinement; the discrete system is not realizable
+ * without it.  In a uniform flow the exact solution is
+ *     Sxv = theta t,   Sxx = sigma_x0^2 + theta t^2,
+ * so the Schur complement Gamma = Svv - Sxv^2/Sxx satisfies
+ *     Gamma/Svv = sigma_x0^2 / (sigma_x0^2 + theta t^2) > 0   for all t.
+ * Forward Euler on Sxx instead gives Sxx = sigma_x0^2 + theta(t^2 - n dt^2),
+ * a one-signed lag growing linearly in the step count, so
+ *     Gamma/Svv = 1 - t^2 / (sigma_x0^2 + t^2 - n dt^2)
+ * crosses zero once n dt^2 = sigma_x0^2 -- measured at step 11 of the Stage-4
+ * uniform-flow gate at level 4 before this was fixed.  That is a purely
+ * numerical rank collapse and it is indistinguishable in a real run from the
+ * physical one the diagnostic exists to detect.
+ *
+ * With the trapezoid the telescoping sum gives
+ *     Sxx_N = sigma_x0^2 + dt^2 sum_{n<N}(2n+1) = sigma_x0^2 + theta t^2,
+ * the exact solution, and Gamma stays positive for all time.  This is the
+ * Stormer-Verlet pairing appropriate to a position-velocity pair, and it is
+ * what replaces the reference's structural guarantee: carrying alpha with
+ * Sxx = alpha^2 makes Sxx non-negative by construction but then needs a clip
+ * on beta to keep gamma^2 >= 0, whereas time-centring the covariance directly
+ * needs no clip anywhere.
+ * --------------------------------------------------------------------------*/
+static void df_phase_space_update(
+    device const float *uold, device float *unew,
+    int oct_idx, int cell_idx,
+    float rho_new, float p_new, thread const float *pi_new,
+    thread const float *Gm, bool relax,
+    float smallr, float dt, float invdt, float decay, float tomd)
+{
+    const int ivS = DF_NV + 1 + DP_SXX;
+    const int ivV = DF_NV + 1 + DP_SXV;
+
+    float irn = 1.0f/rho_new;
+    float avT[9];
+    for (int m = 0; m < 9; m++)
+        avT[m] = df_u_get(unew, oct_idx, ivV + m, cell_idx)*irn;
+
+    float Txx[6], Tv[9];
+
+    /* Sxv production:  T_ij = Svv_ij - Sxv_ik G_jk,  Svv = P/rho */
+    {
+        float Ps[6]; df_P_sym6(p_new, pi_new, Ps);
+        float SV[9]; df_mat_from_sym6(Ps, SV);
+        for (int a = 0; a < 3; a++) for (int b = 0; b < 3; b++) {
+            float acc = SV[3*a+b]*irn;
+            for (int cc = 0; cc < 3; cc++) acc -= avT[3*a+cc]*Gm[3*b+cc];
+            Tv[3*a+b] = acc;
+        }
+    }
+
+    /* Advance Sxv first, keeping its new primitive value for Sxx's
+     * trapezoid. */
+    float avN[9];
+    if (!relax) {
+        for (int m = 0; m < 9; m++) {
+            avN[m] = avT[m] + dt*Tv[m];
+            if (Tv[m] == 0.0f) continue;
+            float u0 = df_u_get(unew, oct_idx, ivV + m, cell_idx);
+            df_u_set(unew, oct_idx, ivV + m, cell_idx, u0 + rho_new*dt*Tv[m]);
+        }
+    } else {
+        float rho_old = max(df_u_get(uold, oct_idx, 1, cell_idx), smallr);
+        float iro = 1.0f/rho_old;
+        for (int m = 0; m < 9; m++) {
+            float avO = df_u_get(uold, oct_idx, ivV + m, cell_idx)*iro;
+            float rate = (avT[m] - avO)*invdt + Tv[m];
+            avN[m] = avO*decay + tomd*rate;
+            df_u_set(unew, oct_idx, ivV + m, cell_idx, rho_new*avN[m]);
+        }
+    }
+
+    /* Sxx production with the trapezoidal average of Sxv across the step,
+     *     T_ij = [ (Sxv + Sxv^T)|_start + (Sxv + Sxv^T)|_end ] / 2,
+     * in sym6 packing.  See the note above on why the midpoint is required
+     * and not merely more accurate. */
+    Txx[0] = avT[0] + avN[0];
+    Txx[1] = avT[4] + avN[4];
+    Txx[2] = avT[8] + avN[8];
+    Txx[3] = 0.5f*(avT[1] + avT[3] + avN[1] + avN[3]);
+    Txx[4] = 0.5f*(avT[2] + avT[6] + avN[2] + avN[6]);
+    Txx[5] = 0.5f*(avT[5] + avT[7] + avN[5] + avN[7]);
+
+    /* Sxx is never relaxed, so an increment on the transported conserved
+     * value is both exact and the correct update. */
+    for (int m = 0; m < 6; m++) {
+        if (Txx[m] == 0.0f) continue;
+        float u0 = df_u_get(unew, oct_idx, ivS + m, cell_idx);
+        df_u_set(unew, oct_idx, ivS + m, cell_idx, u0 + rho_new*dt*Txx[m]);
+    }
+}
+#endif
+
 
 
 kernel void dfmm_source_kernel(
@@ -1195,6 +1883,47 @@ kernel void dfmm_source_kernel(
         df_cons_to_prim(c, w, smallr, smallc2);
         float p = w[DI_P];
 
+        /* G_ij = d_j u_i, centred, from uold.  Hoisted out of both branches
+         * below because the phase-space sector needs it as well. */
+        float G[3][3];
+        for (int a = 0; a < 3; a++) {
+            G[a][0] = (st[a][i+1][j][k] - st[a][i-1][j][k])*inv2dx;
+            G[a][1] = (st[a][i][j+1][k] - st[a][i][j-1][k])*inv2dx;
+            G[a][2] = (st[a][i][j][k+1] - st[a][i][j][k-1])*inv2dx;
+        }
+
+#if DF_HAVE_L
+        /* Lagrangian displacement:  D D_i / Dt = -u_i, since D L_i / Dt = 0.
+         *
+         * Applied unconditionally, not under source_on: the label is a
+         * definition, not a closure model, and switching it off would leave
+         * D_i pinned at zero rather than leaving it un-modelled.
+         *
+         * Written as an increment on the transported conserved value so that
+         * a static flow leaves it bit-exactly unchanged.  Forward Euler on
+         * the post-transport velocity, matching the time-centring of every
+         * other source in this kernel. */
+        for (int m = 0; m < 3; m++) {
+            float uu = w[DI_UX + m];
+            if (uu == 0.0f) continue;
+            int iv = DF_NV + 1 + DP_L + m;
+            float u0 = df_u_get(unew, oct_idx, iv, cell_idx);
+            df_u_set(unew, oct_idx, iv, cell_idx, u0 - w[DI_RHO]*dt*uu);
+        }
+#endif
+
+#if DF_HAVE_S
+        /* The second frame.  Advanced here, ahead of the closure branch, so
+         * that it evolves identically under both closures: the
+         * Chapman-Enskog substitution below is a model for Pi at this same
+         * time level, not at a different one, and the phase-space tower has
+         * no feedback on the hyperbolic core in either case. */
+        df_phase_space_update(uold, unew, oct_idx, cell_idx,
+                              w[DI_RHO], p, &w[DI_PI], &G[0][0],
+                              tau_pi > 0.0f, smallr, dt, invdt,
+                              decay_pi, tomd_pi);
+#endif
+
         /* ------------------------------------------------------------------
          * Navier-Stokes-Fourier closure.
          *
@@ -1223,12 +1952,6 @@ kernel void dfmm_source_kernel(
          * reasons for preferring it.
          * ---------------------------------------------------------------- */
         if (closure == DF_CLOSURE_NS) {
-            float G[3][3];
-            for (int a = 0; a < 3; a++) {
-                G[a][0] = (st[a][i+1][j][k] - st[a][i-1][j][k])*inv2dx;
-                G[a][1] = (st[a][i][j+1][k] - st[a][i][j-1][k])*inv2dx;
-                G[a][2] = (st[a][i][j][k+1] - st[a][i][j][k-1])*inv2dx;
-            }
             float divu = G[0][0] + G[1][1] + G[2][2];
             float c2 = -2.0f*p*max(tau_pi, 0.0f);
             float S0[3][3];
@@ -1257,21 +1980,14 @@ kernel void dfmm_source_kernel(
             continue;
         }
 
-        float xo[NDFMM], xt[NDFMM], T[NDFMM];
-        for (int m = 0; m < NDFMM; m++) {
+        float xo[DF_NDENS], xt[DF_NDENS], T[DF_NDENS];
+        for (int m = 0; m < DF_NDENS; m++) {
             xo[m] = df_u_get(uold, oct_idx, 6 + m, cell_idx);
             xt[m] = w[DI_PI+m];
             T[m]  = 0.0f;
         }
 
         if (source_on != 0) {
-            /* G_ij = d_j u_i, centred, from uold */
-            float G[3][3];
-            for (int a = 0; a < 3; a++) {
-                G[a][0] = (st[a][i+1][j][k] - st[a][i-1][j][k])*inv2dx;
-                G[a][1] = (st[a][i][j+1][k] - st[a][i][j-1][k])*inv2dx;
-                G[a][2] = (st[a][i][j][k+1] - st[a][i][j][k-1])*inv2dx;
-            }
 
             float pis[6]; df_pi_to_sym6(xt, pis);
             float PIm[9]; df_mat_from_sym6(pis, PIm);
@@ -1341,7 +2057,7 @@ kernel void dfmm_source_kernel(
             df_u_set(unew, oct_idx, 6 + m, cell_idx, xo[m]*decay_pi + tomd_pi*rate);
         }
 #if DF_HAVE_Q
-        for (int m = 5; m < NDFMM; m++) {
+        for (int m = 5; m < DF_NDENS; m++) {
             float rate = (xt[m] - xo[m])*invdt + T[m];
             df_u_set(unew, oct_idx, 6 + m, cell_idx, xo[m]*decay_q + tomd_q*rate);
         }
@@ -1475,6 +2191,13 @@ kernel void dfmm_cmpdt_kernel(
  *   diag[3]  count of cells with lam_min(P) < 0       (as a float)
  *   diag[4]  max over cells of ||q - q_CE|| / (p c_s) (Fourier deviation)
  *   diag[5]  max over cells of ||q|| / (p c_s)        (heat-flux amplitude)
+ *   diag[9]  max over cells of sigma_max(d L_i/d x_j) (compression factor)
+ *   diag[10] max over cells of |rho/det(dL/dx) - 1|   (Lagrangian residual)
+ *   diag[11] min over cells of the rank indicator g   (phase-space collapse)
+ *   diag[12] count of cells with lam_min(Gamma) < 0   (as a float)
+ *
+ * Slots 9 and 10 are written only at Stage 3 and above, 11 and 12 only at
+ * Stage 4.
  *
  * Slots 4 and 5 are written only at Stage 2, where q is a primary variable;
  * at Stage 1 they stay at their initialised zero and the host does not print
@@ -1500,11 +2223,19 @@ kernel void dfmm_cmpdt_kernel(
  * The host reconstructs  min lam/p = (diag[6] > 0) ? -diag[6] : diag[0].
  * ========================================================================= */
 
-/* u_x, u_y, u_z, and at Stage 2 also theta = p/rho for grad theta. */
+/* u_x, u_y, u_z; at Stage 2 also theta = p/rho for grad theta; at Stage 3
+ * also the displacement D_x, D_y, D_z for the deformation tensor
+ * d L_i / d x_j = delta_ij + d D_i / d x_j. */
 #if DF_HAVE_Q
-#define DF_NDIAG 4
+#define DF_NDIAG_HYD 4
 #else
-#define DF_NDIAG 3
+#define DF_NDIAG_HYD 3
+#endif
+#if DF_HAVE_L
+#define DF_ST_DL DF_NDIAG_HYD
+#define DF_NDIAG (DF_NDIAG_HYD + 3)
+#else
+#define DF_NDIAG DF_NDIAG_HYD
 #endif
 
 kernel void dfmm_diag_kernel(
@@ -1549,6 +2280,11 @@ kernel void dfmm_diag_kernel(
                          + cc[DI_UZ]*cc[DI_UZ])/rho;
         st[3][i][j][k] = max(DF_GM1*(cc[DI_P] - ekin), rho*smallc2/DF_GAMMA)/rho;
 #endif
+#if DF_HAVE_L
+        for (int m = 0; m < 3; m++)
+            st[DF_ST_DL+m][i][j][k] =
+                df_u_get(uold, source_idx, DF_NV + 1 + DP_L + m, cell_idx)/rho;
+#endif
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -1557,6 +2293,8 @@ kernel void dfmm_diag_kernel(
 
     float lam_min_loc = HUGE_VALF, dev_max = 0.0f, ani_max = 0.0f, nbad = 0.0f;
     float devq_max = 0.0f, qmax = 0.0f, viol_max = 0.0f;
+    float defmax = 0.0f, lagerr = 0.0f;
+    float grank_min = HUGE_VALF, nsbad = 0.0f;
 
     for (int cell = int(thread_idx); cell < TWOTONDIM; cell += int(threads_per_tg)) {
         int cell_idx = cell + 1;
@@ -1657,9 +2395,136 @@ kernel void dfmm_diag_kernel(
             }
         }
 #endif
+
+#if DF_HAVE_L
+        /* -------------------------------------------------------------------
+         * Stage 3: the deformation tensor J_ij = d L_i / d x_j, formed as
+         * delta_ij + d D_i / d x_j from the stored displacement.  D is
+         * periodic and smooth where L is not, which is why it is the stored
+         * field (hydro/condinit.f90).
+         *
+         * L_i(x, t) is the initial position of the parcel now at x, so J is
+         * the inverse deformation gradient F^-1.  Two things follow, and both
+         * are what the blowup note's check 1 (spatial locality) needs:
+         *
+         *   sigma_max(J) = 1 / sigma_min(F) is the factor by which the flow
+         *   has thinned the thinnest material direction.  A structure that
+         *   started at scale l0 is now at scale l0 / sigma_max(J), so the
+         *   local Knudsen number is Kn = tau c_s sigma_max(J) / l0 -- an
+         *   *accumulated* measure, not an instantaneous gradient.  The host
+         *   forms Kn from this and boxlen.
+         *
+         *   rho / det J = rho0(L) recovers the initial density along the
+         *   trajectory, by conservation of mass.  Its spread over the box is
+         *   therefore a pure error measure whenever rho0 was uniform, which
+         *   is the case for every dfmm test problem; lagerr reports it
+         *   against rho0 = 1.
+         * ----------------------------------------------------------------- */
+        {
+            float J[9];
+            for (int a = 0; a < 3; a++) {
+                J[3*a+0] = (st[DF_ST_DL+a][i+1][j][k] - st[DF_ST_DL+a][i-1][j][k])*inv2dx;
+                J[3*a+1] = (st[DF_ST_DL+a][i][j+1][k] - st[DF_ST_DL+a][i][j-1][k])*inv2dx;
+                J[3*a+2] = (st[DF_ST_DL+a][i][j][k+1] - st[DF_ST_DL+a][i][j][k-1])*inv2dx;
+                J[3*a+a] += 1.0f;
+            }
+            /* sigma_max(J)^2 = lam_max(J^T J) = -lam_min(-J^T J) */
+            float JJ[6];
+            JJ[0] = -(J[0]*J[0] + J[3]*J[3] + J[6]*J[6]);
+            JJ[1] = -(J[1]*J[1] + J[4]*J[4] + J[7]*J[7]);
+            JJ[2] = -(J[2]*J[2] + J[5]*J[5] + J[8]*J[8]);
+            JJ[3] = -(J[0]*J[1] + J[3]*J[4] + J[6]*J[7]);
+            JJ[4] = -(J[0]*J[2] + J[3]*J[5] + J[6]*J[8]);
+            JJ[5] = -(J[1]*J[2] + J[4]*J[5] + J[7]*J[8]);
+            float s2 = -df_lam_min_sym6(JJ);
+            defmax = max(defmax, sqrt(max(s2, 0.0f)));
+
+            float detJ = J[0]*(J[4]*J[8] - J[5]*J[7])
+                       - J[1]*(J[3]*J[8] - J[5]*J[6])
+                       + J[2]*(J[3]*J[7] - J[4]*J[6]);
+            if (detJ > 0.0f) lagerr = max(lagerr, abs(w[DI_RHO]/detJ - 1.0f));
+            else             lagerr = max(lagerr, 1.0f);
+        }
+#endif
+
+#if DF_HAVE_S
+        /* -------------------------------------------------------------------
+         * Stage 4: phase-space rank collapse.
+         *
+         * The 6x6 covariance M = [[Sxx, Sxv], [Sxv^T, Svv]] is realizable
+         * exactly when Sxx > 0 and the Schur complement
+         *     Gamma = Svv - Sxv^T Sxx^-1 Sxv
+         * is positive semidefinite.  In 1D, Gamma = Svv - Sxv^2/Sxx =
+         * Svv - beta^2 = gamma^2, so Gamma is the direct generalisation of
+         * the reference's rank-collapse variable, and
+         *     g = sqrt( lam_min( Svv^-1 Gamma ) )
+         * generalises its normalised indicator gamma/sqrt(Svv): g = 1 means
+         * position and velocity are uncorrelated, g -> 0 means the packet has
+         * collapsed onto a phase-space filament, at which point no Gaussian
+         * closure can describe it.  This is the paper's second indicator.
+         *
+         * Reported as the *minimum* over cells: a maximum of the slack is
+         * structurally blind to the cells that have already collapsed, the
+         * same reasoning as for lam_min(P)/p.  Negative lam_min counts as a
+         * violation, and unlike the pressure cone it is never repaired --
+         * with the covariance carried directly there is nothing in the update
+         * that requires Gamma >= 0, so a violation is pure information.
+         * ----------------------------------------------------------------- */
+        {
+            const int ivS = DF_NV + 1 + DP_SXX;
+            const int ivV = DF_NV + 1 + DP_SXV;
+            float irho = 1.0f/w[DI_RHO];
+            float Sxx[6], Sxv[9];
+            for (int m = 0; m < 6; m++)
+                Sxx[m] = df_u_get(uold, oct_idx, ivS + m, cell_idx)*irho;
+            for (int m = 0; m < 9; m++)
+                Sxv[m] = df_u_get(uold, oct_idx, ivV + m, cell_idx)*irho;
+
+            float Svv[6]; df_P_sym6(p, &w[DI_PI], Svv);
+            for (int m = 0; m < 6; m++) Svv[m] *= irho;
+
+            float Sxxi[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+            float dxx = df_inv_sym6(Sxx, Sxxi);
+            float g2;
+            if (!(dxx > 0.0f)) {
+                /* Sxx singular or indefinite: the packet has no position
+                 * extent left in some direction, which is rank collapse in
+                 * its most extreme form. */
+                g2 = -1.0f;
+            } else {
+                /* N = Sxv^T Sxx^-1 Sxv, symmetric by construction */
+                float Ai[9]; df_mat_from_sym6(Sxxi, Ai);
+                float T[9];              /* T = Sxx^-1 Sxv */
+                for (int a = 0; a < 3; a++) for (int b = 0; b < 3; b++) {
+                    float acc = 0.0f;
+                    for (int c = 0; c < 3; c++) acc += Ai[3*a+c]*Sxv[3*c+b];
+                    T[3*a+b] = acc;
+                }
+                float N[6];
+                float n00 = 0.0f, n11 = 0.0f, n22 = 0.0f;
+                float n01 = 0.0f, n02 = 0.0f, n12 = 0.0f;
+                for (int c = 0; c < 3; c++) {
+                    n00 += Sxv[3*c+0]*T[3*c+0];
+                    n11 += Sxv[3*c+1]*T[3*c+1];
+                    n22 += Sxv[3*c+2]*T[3*c+2];
+                    n01 += Sxv[3*c+0]*T[3*c+1];
+                    n02 += Sxv[3*c+0]*T[3*c+2];
+                    n12 += Sxv[3*c+1]*T[3*c+2];
+                }
+                N[0] = n00; N[1] = n11; N[2] = n22;
+                N[3] = n01; N[4] = n02; N[5] = n12;
+                float Gam[6];
+                for (int m = 0; m < 6; m++) Gam[m] = Svv[m] - N[m];
+                g2 = df_gen_lam_min(Gam, Svv);
+            }
+            if (!(g2 == g2)) { nsbad += 1.0f; g2 = -1.0f; }
+            if (g2 < 0.0f) nsbad += 1.0f;
+            grank_min = min(grank_min, sqrt(max(g2, 0.0f)));
+        }
+#endif
     }
 
-    threadgroup float tg[9][32];
+    threadgroup float tg[13][32];
     uint lane = thread_idx % 32u, sg = thread_idx / 32u;
     float a0 = simd_min(max(lam_min_loc, 0.0f));
     float a6 = simd_max(max(-lam_min_loc, 0.0f));
@@ -1675,18 +2540,25 @@ kernel void dfmm_diag_kernel(
     float a3 = simd_sum(nbad);
     float a4 = simd_max(devq_max);
     float a5 = simd_max(qmax);
+    float a9 = simd_max(defmax);
+    float a10 = simd_max(lagerr);
+    float a11 = simd_min(grank_min);
+    float a12 = simd_sum(nsbad);
     if (lane == 0) {
         tg[0][sg] = a0; tg[1][sg] = a1; tg[2][sg] = a2;
         tg[3][sg] = a3; tg[4][sg] = a4; tg[5][sg] = a5;
         tg[6][sg] = a6;
         tg[7][sg] = a7;
         tg[8][sg] = a8;
+        tg[9][sg] = a9; tg[10][sg] = a10;
+        tg[11][sg] = a11; tg[12][sg] = a12;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (sg == 0 && lane == 0) {
         uint ng = (threads_per_tg + 31u)/32u;
         float b0 = HUGE_VALF, b1 = 0.0f, b2 = 0.0f, b3 = 0.0f;
         float b4 = 0.0f, b5 = 0.0f, b6 = 0.0f, b0lam = HUGE_VALF, b8 = 0.0f;
+        float b9 = 0.0f, b10 = 0.0f, b11 = HUGE_VALF, b12 = 0.0f;
         for (uint g = 0; g < ng; g++) {
             b0lam = min(b0lam, tg[7][g]);
             b8 = max(b8, tg[8][g]);
@@ -1694,6 +2566,8 @@ kernel void dfmm_diag_kernel(
             b2 = max(b2, tg[2][g]); b3 += tg[3][g];
             b4 = max(b4, tg[4][g]); b5 = max(b5, tg[5][g]);
             b6 = max(b6, tg[6][g]);
+            b9 = max(b9, tg[9][g]); b10 = max(b10, tg[10][g]);
+            b11 = min(b11, tg[11][g]); b12 += tg[12][g];
         }
         atomic_min_float_bits(&diag[0], b0);
         atomic_max_float     (&diag[7], max(DF_LAM_OFF - b0lam, 0.0f));
@@ -1704,6 +2578,15 @@ kernel void dfmm_diag_kernel(
         atomic_max_float     (&diag[5], b5);
         atomic_max_float     (&diag[6], b6);
         atomic_max_float     (&diag[8], b8);
+        /* Slots 9-12 are written only at Stages 3 and 4 and stay at their
+         * initialised values otherwise.  grank is non-negative by
+         * construction (it is a square root), so the bit-pattern min atomic
+         * is exact for it; the sign information is carried by the separate
+         * violation count in slot 12. */
+        atomic_max_float     (&diag[9],  b9);
+        atomic_max_float     (&diag[10], b10);
+        atomic_min_float_bits(&diag[11], b11);
+        atomic_add_float     (&diag[12], b12);
     }
 }
 

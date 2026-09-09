@@ -331,6 +331,8 @@ subroutine m_read_params(pst)
   real(kind=8)::dfmm_ic_shear=0.0d0
   real(kind=8)::dfmm_ic_pi=0.0d0
   real(kind=8)::dfmm_ic_drho=0.0d0
+  real(kind=8)::dfmm_ic_uadv=0.0d0
+  real(kind=8)::dfmm_ic_sigmax=2.0d-2
 #endif
   ! INIT=BLOWUP parameters (available in every build, see amr_commons.f90)
   real(kind=8)::blowup_delta=1.0d-1
@@ -677,7 +679,8 @@ subroutine m_read_params(pst)
   ! dfmm solver parameters
   namelist/dfmm_params/dfmm_tau,dfmm_prandtl,dfmm_source,dfmm_diag &
        & ,dfmm_fatal_realizability,dfmm_closure &
-       & ,dfmm_ic_shear,dfmm_ic_pi,dfmm_ic_drho
+       & ,dfmm_ic_shear,dfmm_ic_pi,dfmm_ic_drho,dfmm_ic_uadv &
+       & ,dfmm_ic_sigmax
 #endif
   ! INIT=BLOWUP test-problem parameters
   namelist/blowup_params/blowup_delta,blowup_rho0,blowup_p0,blowup_nwave &
@@ -1534,7 +1537,16 @@ subroutine m_read_params(pst)
   s%r%dfmm_ic_shear=dfmm_ic_shear
   s%r%dfmm_ic_pi=dfmm_ic_pi
   s%r%dfmm_ic_drho=dfmm_ic_drho
+  s%r%dfmm_ic_uadv=dfmm_ic_uadv
+  s%r%dfmm_ic_sigmax=dfmm_ic_sigmax
   ! tau_q = tau_Pi / Pr, so a non-positive Prandtl number is meaningless.
+  ! Sxx_ij = sigma_x0^2 delta_ij must be invertible: the phase-space rank
+  ! indicator is the Schur complement Svv - Sxv^T Sxx^-1 Sxv, which is
+  ! undefined for a point packet.
+  if(ndfmm>=33 .and. dfmm_ic_sigmax<=0.0d0)then
+     write(*,*)'DFMM stage 4 requires dfmm_ic_sigmax > 0; got ',dfmm_ic_sigmax
+     call mdl_abort(s%mdl)
+  endif
   if(dfmm_prandtl<=0.0d0)then
      write(*,*)'DFMM requires dfmm_prandtl > 0; got ',dfmm_prandtl
      call mdl_abort(s%mdl)

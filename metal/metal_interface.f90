@@ -996,15 +996,19 @@ module metal_interface
     end subroutine mtl_dfmm_godunov
 
     ! Closure-quality and realizability diagnostics.  dev_q and q_max are
-    ! written only at Stage 2 (ndfmm>=15); they return zero otherwise.
+    ! written only at Stage 2 (ndfmm>=15), defmax and lagerr only at Stage 3
+    ! (ndfmm>=18), grank and nsbad only at Stage 4 (ndfmm>=33); the rest
+    ! return their initialised values.
     subroutine mtl_dfmm_diag(head_idx, num_octs, smallr, smallc2, dx, &
-        tau_pi, tau_q, lam_min, dev_ns, ani_max, nbad, dev_q, q_max) &
+        tau_pi, tau_q, lam_min, dev_ns, ani_max, nbad, dev_q, q_max, &
+        defmax, lagerr, grank, nsbad) &
         bind(C, name="mtl_dfmm_diag")
       import c_int, c_float
       integer(c_int), value :: head_idx, num_octs
       real(c_float),  value :: smallr, smallc2, dx, tau_pi, tau_q
       real(c_float), intent(out) :: lam_min, dev_ns, ani_max, nbad
       real(c_float), intent(out) :: dev_q, q_max
+      real(c_float), intent(out) :: defmax, lagerr, grank, nsbad
     end subroutine mtl_dfmm_diag
 #endif
 

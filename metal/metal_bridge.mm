@@ -90,6 +90,15 @@ static id<MTLComputePipelineState> s_pso_godunov      = nil;
 #ifdef DFMM
 static id<MTLComputePipelineState> s_pso_dfmm_integrator = nil;
 static id<MTLComputePipelineState> s_pso_dfmm_source     = nil;
+#if defined(DFMM) && NDFMM >= 18
+static id<MTLComputePipelineState> s_pso_dfmm_passive    = nil;
+/* Face mass fluxes handed from dfmm_integrator_kernel to
+ * dfmm_passive_kernel: 36 faces per oct (12 per direction), indexed by the
+ * relative subgrid index within a dispatch, exactly like the MHD UCT
+ * face-product buffer. */
+static id<MTLBuffer>               s_dfmm_fmass         = nil;
+#define MR_DFMM_NFACE 36
+#endif
 static id<MTLComputePipelineState> s_pso_dfmm_cmpdt      = nil;
 static id<MTLComputePipelineState> s_pso_dfmm_diag       = nil;
 #endif
@@ -310,6 +319,9 @@ extern "C" void mtl_init(void)
 #ifdef DFMM
     s_pso_dfmm_integrator = make_pso(@"dfmm_integrator_kernel");
     s_pso_dfmm_source     = make_pso(@"dfmm_source_kernel");
+#if NDFMM >= 18
+    s_pso_dfmm_passive    = make_pso(@"dfmm_passive_kernel");
+#endif
     s_pso_dfmm_cmpdt      = make_pso(@"dfmm_cmpdt_kernel");
     s_pso_dfmm_diag       = make_pso(@"dfmm_diag_kernel");
 #endif
@@ -4453,6 +4465,30 @@ extern "C" void mtl_dfmm_godunov(int head_idx, int num_subgrids, int ngridmax,
     MTLSize tg_size   = {64, 1, 1};
     MTLSize grid_size = {(NSUInteger)num_subgrids, 1, 1};
 
+#if NDFMM >= 18
+    /* Grow the face-mass-flux hand-off buffer to this level's oct count.  It
+     * is written by the transport kernel and read by the passive kernel, both
+     * dispatched with one threadgroup per subgrid over the same head_idx, so
+     * the relative index block_idx addresses it consistently. */
+    NSUInteger fmass_bytes =
+        (NSUInteger)num_subgrids * MR_DFMM_NFACE * sizeof(float);
+    if (fmass_bytes > s_device.maxBufferLength) {
+        fprintf(stderr, "[metal] dfmm face-mass buffer exceeds maxBufferLength "
+                        "(%llu bytes)\n", (unsigned long long)fmass_bytes);
+        exit(1);
+    }
+    if (!s_dfmm_fmass || s_dfmm_fmass.length < fmass_bytes) {
+        s_dfmm_fmass = nil;
+        s_dfmm_fmass = [s_device newBufferWithLength:fmass_bytes
+                                            options:MTLResourceStorageModePrivate];
+        if (!s_dfmm_fmass) {
+            fprintf(stderr, "[metal] cannot allocate dfmm face-mass buffer "
+                            "(%llu bytes)\n", (unsigned long long)fmass_bytes);
+            exit(1);
+        }
+    }
+#endif
+
     id<MTLCommandBuffer> cmd = [s_queue commandBuffer];
 
     /* --- transport --- */
@@ -4478,8 +4514,36 @@ extern "C" void mtl_dfmm_godunov(int head_idx, int num_subgrids, int ngridmax,
     [enc setBuffer:s_father     offset:0                 atIndex:17];
     [enc setBuffer:s_f_grav     offset:0                 atIndex:18];
     [enc setBytes:&source_on    length:sizeof(int)       atIndex:19];
+#if NDFMM >= 18
+    [enc setBuffer:s_dfmm_fmass offset:0                 atIndex:20];
+#endif
     [enc dispatchThreadgroups:grid_size threadsPerThreadgroup:tg_size];
     [enc endEncoding];
+
+#if NDFMM >= 18
+    /* --- advection of the mass-like passive tower ---
+     * Must precede the source encoder: the Liouville production terms read
+     * the post-transport Sxx and Sxv out of unew. */
+    enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:s_pso_dfmm_passive];
+    [enc setBuffer:s_grid        offset:0 atIndex:0];
+    [enc setBuffer:s_uold        offset:0 atIndex:1];
+    [enc setBuffer:s_unew        offset:0 atIndex:2];
+    [enc setBuffer:s_nbor        offset:0 atIndex:3];
+    [enc setBuffer:s_dfmm_fmass  offset:0 atIndex:4];
+    [enc setBytes:&head_idx     length:sizeof(int)   atIndex:5];
+    [enc setBytes:&num_subgrids length:sizeof(int)   atIndex:6];
+    [enc setBytes:&ngridmax     length:sizeof(int)   atIndex:7];
+    [enc setBytes:&ilevel       length:sizeof(int)   atIndex:8];
+    [enc setBytes:&levelmin     length:sizeof(int)   atIndex:9];
+    [enc setBytes:&smallr       length:sizeof(float) atIndex:10];
+    [enc setBytes:&dt           length:sizeof(float) atIndex:11];
+    [enc setBytes:&dx           length:sizeof(float) atIndex:12];
+    [enc setBytes:&slope        length:sizeof(int)   atIndex:13];
+    [enc setBuffer:s_father      offset:0            atIndex:14];
+    [enc dispatchThreadgroups:grid_size threadsPerThreadgroup:tg_size];
+    [enc endEncoding];
+#endif
 
     /* --- production terms + exact BGK relaxation ---
      * A second encoder on the same command buffer: Metal orders encoders
@@ -4511,18 +4575,22 @@ extern "C" void mtl_dfmm_diag(int head_idx, int num_octs,
                                float smallr, float smallc2, float dx,
                                float tau_pi, float tau_q,
                                float *lam_min, float *dev_ns, float *ani_max,
-                               float *nbad, float *dev_q, float *q_max)
+                               float *nbad, float *dev_q, float *q_max,
+                               float *defmax, float *lagerr,
+                               float *grank, float *nsbad)
 {
     /* lam_min(P)/p arrives split across two non-negative slots, diag[0] and
      * diag[6]; see the comment on dfmm_diag_kernel for why an offset single
      * slot is wrong here.  Slots 4 and 5 (the heat-flux diagnostics) are
-     * written only at Stage 2. */
+     * written only at Stage 2, 9 and 10 only at Stage 3, 11 and 12 only at
+     * Stage 4; the rest return their initialised values. */
     float big = 1.0e30f;
-    uint32_t h[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
-    memcpy(&h[0], &big, sizeof(float));
+    uint32_t h[13] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    memcpy(&h[0],  &big, sizeof(float));
+    memcpy(&h[11], &big, sizeof(float));
     id<MTLBuffer> diag =
         [s_device newBufferWithBytes:h
-                              length:9 * sizeof(uint32_t)
+                              length:13 * sizeof(uint32_t)
                              options:MTLResourceStorageModeShared];
 
     MTLSize tg_size   = {64, 1, 1};
@@ -4565,5 +4633,11 @@ extern "C" void mtl_dfmm_diag(int head_idx, int num_octs,
     *nbad    = r[3];
     *dev_q   = r[4];
     *q_max   = r[5];
+    *defmax  = r[9];
+    *lagerr  = r[10];
+    /* grank keeps its 1e30 sentinel if no cell wrote it (Stages 1-3); the
+     * caller prints it only at Stage 4. */
+    *grank   = r[11];
+    *nsbad   = r[12];
 }
 #endif /* DFMM */

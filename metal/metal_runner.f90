@@ -432,7 +432,7 @@ end subroutine metal_dfmm_godunov
 !###########################################################
 !###########################################################
 subroutine metal_dfmm_diag(sim, ilevel, lam_min, dev_ns, ani_max, nbad, &
-                           dev_q, q_max)
+                           dev_q, q_max, defmax, lagerr, grank, nsbad)
   use ramses_commons, only: ramses_t
   implicit none
   type(ramses_t), intent(inout) :: sim
@@ -440,9 +440,12 @@ subroutine metal_dfmm_diag(sim, ilevel, lam_min, dev_ns, ani_max, nbad, &
   real(kind=8),   intent(out)   :: lam_min, dev_ns, ani_max
   integer,        intent(out)   :: nbad
   real(kind=8),   intent(out)   :: dev_q, q_max
+  real(kind=8),   intent(out)   :: defmax, lagerr, grank
+  integer,        intent(out)   :: nsbad
 
   real(c_float) :: smallr, smallc2, dx, tau_pi, tau_q
   real(c_float) :: lam_f, dev_f, ani_f, nbad_f, devq_f, qmax_f
+  real(c_float) :: def_f, lag_f, grank_f, nsbad_f
 
   smallr  = real(sim%r%smallr,             c_float)
   smallc2 = real(sim%r%smallc**2,          c_float)
@@ -454,7 +457,8 @@ subroutine metal_dfmm_diag(sim, ilevel, lam_min, dev_ns, ani_max, nbad, &
        int(sim%m%head(ilevel), c_int),    &
        int(sim%m%noct(ilevel), c_int),    &
        smallr, smallc2, dx, tau_pi, tau_q, &
-       lam_f, dev_f, ani_f, nbad_f, devq_f, qmax_f)
+       lam_f, dev_f, ani_f, nbad_f, devq_f, qmax_f, &
+       def_f, lag_f, grank_f, nsbad_f)
 
   lam_min = real(lam_f,  8)
   dev_ns  = real(dev_f,  8)
@@ -462,6 +466,10 @@ subroutine metal_dfmm_diag(sim, ilevel, lam_min, dev_ns, ani_max, nbad, &
   nbad    = nint(real(nbad_f, 8))
   dev_q   = real(devq_f, 8)
   q_max   = real(qmax_f, 8)
+  defmax  = real(def_f,  8)
+  lagerr  = real(lag_f,  8)
+  grank   = real(grank_f, 8)
+  nsbad   = nint(real(nsbad_f, 8))
 
 end subroutine metal_dfmm_diag
 !###########################################################
@@ -498,13 +506,14 @@ subroutine metal_dfmm_report(sim, ilevel)
   integer,        intent(in)    :: ilevel
 
   real(kind=8) :: lam_min, dev_ns, ani_max, dev_q, q_max
-  integer      :: nbad
+  real(kind=8) :: defmax, lagerr, grank, kn_loc
+  integer      :: nbad, nsbad
 
   if(.not. sim%r%dfmm_diag) return
   if(sim%m%noct(ilevel) <= 0) return
 
   call metal_dfmm_diag(sim, ilevel, lam_min, dev_ns, ani_max, nbad, &
-                       dev_q, q_max)
+                       dev_q, q_max, defmax, lagerr, grank, nsbad)
 
   if(sim%g%myid==1)then
      if(sim%r%dfmm_tau > 0.0d0)then
@@ -529,6 +538,35 @@ subroutine metal_dfmm_report(sim, ilevel)
            write(*,'(" dfmm  level=",I2,"    max |q|/(p cs)=",1pe10.3, &
                 & "  max |q-q_CE|/(p cs)=       n/a")') ilevel, q_max
         end if
+     end if
+     ! Stage 3: the accumulated deformation of the Lagrangian label.  defmax
+     ! is max sigma_max(dL/dx), the factor by which the flow has thinned the
+     ! thinnest material direction, so the local Knudsen number of a structure
+     ! that started at the box scale is  Kn = tau c_s defmax / boxlen.  This
+     ! is the blowup note's check 1 as an accumulated quantity rather than an
+     ! instantaneous gradient.  lagerr is max |rho/det(dL/dx) - 1|, which is
+     ! zero identically for a uniform initial density (every dfmm test problem
+     ! has rho0 = 1), so it doubles as the Stage-3 advection gate.
+     if(ndfmm >= 18)then
+        if(sim%r%dfmm_tau > 0.0d0)then
+           kn_loc = sim%r%dfmm_tau*sqrt(5.0d0/3.0d0)*defmax/sim%r%boxlen
+           write(*,'(" dfmm  level=",I2,"    max sig(dL/dx)=",1pe10.3, &
+                & "  Kn_local=",1pe10.3,"  |rho/detJ-1|=",1pe10.3)') &
+                ilevel, defmax, kn_loc, lagerr
+        else
+           write(*,'(" dfmm  level=",I2,"    max sig(dL/dx)=",1pe10.3, &
+                & "  Kn_local=       inf","  |rho/detJ-1|=",1pe10.3)') &
+                ilevel, defmax, lagerr
+        end if
+     end if
+     ! Stage 4: phase-space rank collapse.  g = sqrt(lam_min(Svv^-1 Gamma))
+     ! with Gamma = Svv - Sxv^T Sxx^-1 Sxv the Schur complement; g = 1 means
+     ! position and velocity are uncorrelated, g -> 0 means the packet has
+     ! collapsed onto a phase-space filament and no Gaussian closure can
+     ! represent it.  This is the paper's second closure indicator.
+     if(ndfmm >= 33)then
+        write(*,'(" dfmm  level=",I2,"    min g(rank)=",1pe10.3, &
+             & "  n(Gamma<0)=",I0)') ilevel, grank, nsbad
      end if
   end if
 
