@@ -47,6 +47,12 @@ module amr_commons
      ! Output parameters
      integer::noutput=1          ! Total number of outputs
      integer::foutput=1000000    ! Frequency of outputs
+     ! Land the timestep exactly on the next requested tout, instead of
+     ! letting the output fire on the first step that has already passed it.
+     ! Off by default so no existing setup changes behaviour; turn it on for
+     ! any run whose deliverable is the state at a specific time, which is
+     ! every blowup run -- see doc/incompressible.md and the blowup namelists.
+     logical::tout_exact=.false.
      real(kind=8),dimension(1:MAXOUT)::aout=1.1 ! Output expansion factors
      real(kind=8),dimension(1:MAXOUT)::tout=0.0 ! Output times
      integer::output_mode=0      ! Output mode (for hires runs)

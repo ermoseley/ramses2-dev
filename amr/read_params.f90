@@ -107,6 +107,7 @@ subroutine m_read_params(pst)
   ! Output parameters
   integer::noutput=1          ! Total number of outputs
   integer::foutput=1000000    ! Frequency of outputs
+  logical::tout_exact=.false.  ! Clip dt to land exactly on the next tout
   integer::output_mode=0      ! Output mode (for hires runs)
   logical::gadget_output=.false. ! Output in gadget format
   real(kind=8)::bkp_time_hrs=2   ! Backup file frequency in hours
@@ -621,7 +622,7 @@ subroutine m_read_params(pst)
        & ,static_mesh,static_gas,geom,overload,nsuperoct &
        & ,clump_only
   ! Output parameters
-  namelist/output_params/foutput,aout,tout,output_mode &
+  namelist/output_params/foutput,aout,tout,output_mode,tout_exact &
        & ,tend,delta_tout,aend,delta_aout,gadget_output &
        & ,run_time_hrs,bkp_time_hrs,bkp_last_min,bkp_modulo,nfile &
        & ,output_part,output_grav,output_hydro,output_amr
@@ -1380,6 +1381,7 @@ subroutine m_read_params(pst)
 
   s%r%noutput=noutput
   s%r%foutput=foutput
+  s%r%tout_exact=tout_exact
   s%r%aout=aout
   s%r%tout=tout
   s%r%output_mode=output_mode

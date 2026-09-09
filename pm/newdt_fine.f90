@@ -40,6 +40,7 @@ subroutine m_newdt_fine(pst,ilevel)
   ! This routine also compute the particle kinetic energy.
   !-----------------------------------------------------------
   real(kind=8)::dx,tff,fourpi,threepi2
+  real(kind=8)::dt_to_out
   real(kind=8)::ekin,vmax
   real(kind=8)::dt_gyro, dt_courant, max_b, max_q, cr_c
   type(out_courant_fine_t)::out_courant_fine
@@ -139,6 +140,32 @@ subroutine m_newdt_fine(pst,ilevel)
      call get_cr_courant_dt(r,g,dt_courant,ilevel)
      g%dtnew(ilevel)=MIN(real(g%dtnew(ilevel),kind=8),r%cr_nsubcycle*dt_courant)
   endif
+
+  ! Land exactly on the next requested output time.
+  !
+  ! Without this the output fires on the first step whose t has already PASSED
+  ! tout, so the snapshot overshoots by up to a full dt.  For a study whose
+  ! deliverable is the state at a predicted time -- a blowup time t_star,
+  ! where the realizability and Knudsen indicators change on the timestep
+  ! scale -- a fraction of a step is not an acceptable error bar.
+  !
+  ! The clip overshoots by a relative 1e-12 rather than landing exactly on
+  ! tout, deliberately: the output test is t >= tout, and t + (tout - t) is
+  ! not guaranteed to reach tout in IEEE arithmetic, so an exact clip can
+  ! leave the step a fraction of an ULP short.  That would fail the test, and
+  ! the following step would then be clipped to almost nothing -- a stall
+  ! instead of an output.  A 1e-12 overshoot cannot stall and is twelve orders
+  ! below the overshoot it replaces.  A target already within 1e-10 of a step
+  ! is left alone for the same reason.
+  !
+  ! Applied at the coarse level only: finer levels take dt by subdivision in
+  ! the adaptive condition just below, so they inherit it.
+  if(ilevel==r%levelmin .and. r%tout_exact .and. g%iout<=r%noutput)then
+     dt_to_out = r%tout(g%iout) - g%t
+     if(dt_to_out > 1.0d-10*g%dtnew(ilevel) .and. &
+          dt_to_out < g%dtnew(ilevel)) &
+          g%dtnew(ilevel) = dt_to_out*(1.0d0 + 1.0d-12)
+  end if
 
   ! Adaptive time step condition
   if(ilevel>r%levelmin)then
