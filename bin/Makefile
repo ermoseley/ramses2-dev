@@ -323,7 +323,7 @@ endif
 LIBS += $(LIBMPI) $(LIBFFTW)
 #############################################################################
 # Sources directories are searched in this exact order
-VPATH = $(PATCH):$(GPU_PATH):$(METAL_PATH):../feedback:../sink:../star:../cooling:../turb:../hydro:../pm:../poisson:../amr:../clump:../mdl1:../rt:../cr:../lightcone
+VPATH = $(PATCH):$(GPU_PATH):$(METAL_PATH):../incomp:../feedback:../sink:../star:../cooling:../turb:../hydro:../pm:../poisson:../amr:../clump:../mdl1:../rt:../cr:../lightcone
 #############################################################################
 # Modules
 MODOBJ = amr_parameters.o hydro_parameters.o rt_parameters.o cr_parameters.o oct_commons.o \
@@ -339,7 +339,8 @@ ifeq ($(DO_RTZ),1)
 else
    MODOBJ += neq_cooling_module.o
 endif
-MODOBJ += init_neq_chem.o clfind_commons.o turb_commons.o mdl_commons.o mdl.o \
+MODOBJ += incomp_fft.o incomp_ops.o incomp_solver.o \
+         init_neq_chem.o clfind_commons.o turb_commons.o mdl_commons.o mdl.o \
 	 cross_sections_module.o rt_spectra.o  \
 	 ramses_commons.o call_back.o cache_commons.o cache.o gadgetreadfile.o \
 	 boundaries.o output_hydro.o output_poisson.o output_part.o output_rt.o output_cr.o \
@@ -353,7 +354,7 @@ endif
 ifeq ($(COMPILER),METAL)
    MODOBJ := metal_interface.o metal_bridge.o $(MODOBJ) metal_runner.o
 endif
-MODOBJ +=  multigrid_fine_coarse.o rho_fine.o upload.o init_xion.o \
+MODOBJ +=  incomp_step.o multigrid_fine_coarse.o rho_fine.o upload.o init_xion.o \
 	 rt_flux_module.o rt_godunov_fine.o rt_input_condinit.o rt_init_flow_fine.o rt_units.o  \
 	 rt_condinit.o rt_flag.o rt_upload.o interpol_rt.o rt_godunov_utils.o read_rt_params.o \
 	 cr_flux_module.o cr_godunov_fine.o cr_source_terms.o cr_input_condinit.o cr_init_flow_fine.o  \

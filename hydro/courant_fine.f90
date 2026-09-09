@@ -19,6 +19,7 @@ contains
 !###########################################################
 !###########################################################
 recursive subroutine r_courant_fine(pst,ilevel,input_size,output,output_size)
+  use incomp_step_module, only: incomp_cmpdt
   use mdl_module
   use ramses_commons, only: pst_t
   use mdl_parameters
@@ -40,6 +41,13 @@ recursive subroutine r_courant_fine(pst,ilevel,input_size,output,output_size)
      output%eint=output%eint+next_output%eint
      output%emag=output%emag+next_output%emag
      output%dt=MIN(output%dt,next_output%dt)
+  else if(pst%s%r%incompressible)then
+     ! The incompressible rungs set dt from the advective and viscous limits,
+     ! not the acoustic one (doc/incompressible.md Section 2).  Their stress
+     ! term is either explicit viscosity or a relaxed moment, so there is no
+     ! sound speed in the constraint at all.
+     call incomp_cmpdt(pst%s%r,pst%s%g,pst%s%m,ilevel, &
+          output%mass,output%ekin,output%eint,output%emag,output%dt)
   else
 #ifdef _CUDA
      call gpu_cmpdt(pst%s,ilevel,output%mass,output%ekin,output%eint,output%emag,output%dt)

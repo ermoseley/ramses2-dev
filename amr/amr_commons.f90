@@ -183,14 +183,21 @@ module amr_commons
      real(kind=8),dimension(1:3)::constant_gravity
      integer::inener,ientropy,imetal,iturb,ichem,iecr
 
-#ifdef DFMM
-     ! dfmm moment-scheme parameters (doc/dfmm_3d.md).  tau_pi is the BGK
-     ! relaxation time of the anisotropic pressure, so mu = p*tau_pi; a
-     ! non-positive value means collisionless (no relaxation).  dfmm_prandtl
-     ! sets tau_q = tau_pi/dfmm_prandtl once the heat flux is evolved
-     ! (Stage 2); 2/3 reproduces the hard-sphere value.
+     ! Transport coefficients.  tau is the BGK relaxation time of the
+     ! anisotropic pressure, so mu = p*tau; a non-positive value means
+     ! collisionless (no relaxation).  dfmm_prandtl sets tau_q =
+     ! tau/dfmm_prandtl once the heat flux is evolved (Stage 2); 2/3
+     ! reproduces the hard-sphere value.
+     !
+     ! Deliberately OUTSIDE the DFMM guard, and deliberately not duplicated by
+     ! an incompressible-only viscosity knob: the incompressible
+     ! Navier-Stokes rung takes nu = incomp_p0*dfmm_tau/incomp_rho0, so one
+     ! dfmm_tau means the same physical viscosity in all four rungs
+     ! (doc/incompressible.md Section 0).  A second knob could drift and would
+     ! confound the closure comparison the rungs exist to make.
      real(kind=8)::dfmm_tau=1.0d-3
      real(kind=8)::dfmm_prandtl=0.6666666666666667d0
+#ifdef DFMM
      logical ::dfmm_source=.true.
      logical ::dfmm_diag=.true.
      logical ::dfmm_fatal_realizability=.false.
@@ -223,6 +230,16 @@ module amr_commons
      ! to read them.  blowup_delta is the note's Delta -- the strain at the
      ! origin is S = (1/Delta) diag(-2,-2,4), hence ||S||_op = 4/Delta and a
      ! deformation time t_def = Delta/4 (doc/dfmm_3d.md Section 7, Stage 5).
+     ! Incompressible rungs (doc/incompressible.md).  Kept outside the DFMM
+     ! guard so a DFMM=0 binary can run rung 1.  incomp_p0 is the KINETIC gas
+     ! pressure, not the Lagrange multiplier: it sets mu = incomp_p0*dfmm_tau
+     ! and it is the scale against which Pi is measured, which is what makes
+     ! the blowup note's check 7 well posed in the incompressible setting.
+     logical ::incompressible=.false.
+     real(kind=8)::incomp_p0=1.0d0
+     real(kind=8)::incomp_rho0=1.0d0
+     character(LEN=10)::incomp_stress='viscous'
+     logical ::incomp_diag=.true.
      real(kind=8)::blowup_delta=1.0d-1
      real(kind=8)::blowup_rho0=1.0d0
      real(kind=8)::blowup_p0=1.0d0

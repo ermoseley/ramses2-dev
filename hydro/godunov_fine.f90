@@ -14,6 +14,7 @@ contains
 !###########################################################
 !###########################################################
 recursive subroutine r_godunov_fine(pst,ilevel,input_size)
+  use incomp_step_module, only: incomp_step
   use mdl_module
   use ramses_commons, only: pst_t
   use mdl_parameters
@@ -28,6 +29,13 @@ recursive subroutine r_godunov_fine(pst,ilevel,input_size)
      rID = mdl_send_request(pst%s%mdl,MDL_GODUNOV_FINE,pst%iUpper+1,input_size,0,ilevel)
      call r_godunov_fine(pst%pLower,ilevel,input_size)
      call mdl_get_reply(pst%s%mdl,rID,0)
+  else if(pst%s%r%incompressible)then
+     ! The incompressible rungs replace the hyperbolic step entirely: their
+     ! advection is spectral and their pressure step is the exact Leray
+     ! projector (doc/incompressible.md).  Nothing of the Riemann path is
+     ! reused, deliberately -- its numerical viscosity would confound the
+     ! closure comparison the rungs exist to make.
+     call incomp_step(pst%s, ilevel, pst%s%g%dtnew(ilevel))
   else
 #ifdef _CUDA
      call gpu_godunov(pst%s, ilevel)

@@ -140,6 +140,57 @@ end subroutine r_set_grid_device
 !###########################################################
 !###########################################################
 !###########################################################
+! Uold/unew synchronisation for the incompressible rungs.
+!
+! Those rungs replace the hyperbolic step with a host-side spectral solver
+! (doc/incompressible.md), so the state has to make a round trip: the device
+! holds it between steps, the solver needs it in host memory, and the result
+! has to land in unew because r_set_uold propagates unew -> uold immediately
+! afterwards.  Writing to uold instead would be clobbered by that copy.
+!
+! On Apple Silicon both directions are DRAM memcpys, not PCIe transfers, so
+! the round trip costs a fraction of one FFT and it is not worth the
+! complexity of a device-resident projection.
+subroutine metal_uold_to_host(sim)
+  use ramses_commons, only: ramses_t
+  use amr_parameters, only: twotondim
+  use hydro_parameters, only: nvar
+  implicit none
+  type(ramses_t), intent(inout) :: sim
+
+  call mtl_transfer_grid_host(              &
+       c_loc(sim%m%uold(1,1,1)),            &
+       c_null_ptr,                          &
+       int(sim%m%ngridmax, c_int),          &
+       int(nvar,           c_int),          &
+       int(twotondim,      c_int))
+
+end subroutine metal_uold_to_host
+!###########################################################
+!###########################################################
+!###########################################################
+!###########################################################
+subroutine metal_unew_to_device(sim)
+  use ramses_commons, only: ramses_t
+  use amr_parameters, only: twotondim
+  use hydro_parameters, only: nvar
+  implicit none
+  type(ramses_t), intent(inout) :: sim
+
+  call mtl_set_grid_device(                 &
+       c_loc(sim%m%uold(1,1,1)),            &
+       c_loc(sim%m%unew(1,1,1)),            &
+       c_null_ptr,                          &
+       c_loc(sim%m%grid(1)),                &
+       int(sim%m%ngridmax, c_int),          &
+       int(nvar,           c_int),          &
+       int(twotondim,      c_int))
+
+end subroutine metal_unew_to_device
+!###########################################################
+!###########################################################
+!###########################################################
+!###########################################################
 recursive subroutine r_transfer_grid_host(pst)
   use mdl_module
   use mdl_parameters, only: MDL_TRANSFER_GRID_HOST

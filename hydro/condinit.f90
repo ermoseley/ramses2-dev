@@ -50,6 +50,7 @@ subroutine condinit(r,g,x,q,dx,nn)
 #define COLLAPSE 11
 #define DFMMTEST 12
 #define BLOWUP 13
+#define TAYLORGREEN 14
 
   integer::i
 #if defined(DFMM) && NDFMM>=18
@@ -62,6 +63,9 @@ subroutine condinit(r,g,x,q,dx,nn)
 #if INIT==BLOWUP
   real(kind=8)::kw,cstr,uamp,xx0,yy0,zz0,ck,sk,cx,cy,sx,sy
   real(kind=8)::rho0,p0
+#endif
+#if INIT==TAYLORGREEN
+  real(kind=8)::tgk,tgrho0,tgp0
 #endif
 #if INIT==COEUR
   real(kind=8)::r2,rx,ry,rz,d,p,vx,vy,vz,r_trunc,r2_trunc,c2
@@ -593,6 +597,38 @@ subroutine condinit(r,g,x,q,dx,nn)
         q(i,6) =  2.0d0*p0*r%dfmm_tau*cstr*cx*ck   ! Pi_xx = -2 p tau S_xx
         q(i,7) =  2.0d0*p0*r%dfmm_tau*cstr*cy*ck   ! Pi_yy = -2 p tau S_yy
      endif
+#endif
+  end do
+#endif
+
+#if INIT==TAYLORGREEN
+  ! ------------------------------------------------------------------
+  ! Taylor-Green vortex, the standard verification problem for an
+  ! incompressible solver (doc/incompressible.md Gate 4):
+  !     u = (  sin(k x) cos(k y),  -cos(k x) sin(k y),  0 ) exp(-2 nu k^2 t)
+  ! is an EXACT solution of incompressible Navier-Stokes: it is
+  ! divergence-free, and its nonlinear term (u.grad)u is a pure gradient,
+  ! absorbed entirely by the pressure.  So the solution is pure viscous decay
+  ! at a rate that depends on nothing but nu k^2 -- which makes it a sharp
+  ! test of the viscous term, the projection, and the time integrator at once,
+  ! and a sharp test that the advection scheme correctly recognises a pure
+  ! gradient (otherwise the shape distorts even though the amplitude decays).
+  !
+  ! rho and p are uniform: in the incompressible rungs they are constants of
+  ! the motion, and p carries the KINETIC gas pressure incomp_p0, not the
+  ! multiplier.
+  ! ------------------------------------------------------------------
+  tgk    = 2.0d0*acos(-1.0d0)/r%box_size(1)
+  tgrho0 = r%incomp_rho0
+  tgp0   = r%incomp_p0
+  do i=1,nn
+     q(i,1) =  tgrho0
+     q(i,2) =  sin(tgk*x(i,1))*cos(tgk*x(i,2))
+     q(i,3) = -cos(tgk*x(i,1))*sin(tgk*x(i,2))
+     q(i,4) =  0.0d0
+     q(i,5) =  tgp0
+#if NVAR>5
+     q(i,6:nvar) = 0.0d0
 #endif
   end do
 #endif

@@ -10,6 +10,7 @@ subroutine m_read_params(pst)
   use ramses_commons, only: pst_t
   use mdl_module
   use movie_module, only: set_movie_vars
+  use incomp_step_module, only: incomp_validate
   use rt_params_module
   use cr_params_module
   use constants
@@ -320,10 +321,16 @@ subroutine m_read_params(pst)
   real(kind=8)::smallr=1.d-10
   character(LEN=10)::scheme='muscl'
   character(LEN=10)::riemann='llf'
-#ifdef DFMM
-  ! dfmm moment-scheme parameters (doc/dfmm_3d.md)
+  ! incompressible-rung parameters (doc/incompressible.md)
+  logical ::incompressible=.false.
+  real(kind=8)::incomp_p0=1.0d0
+  real(kind=8)::incomp_rho0=1.0d0
+  character(LEN=10)::incomp_stress='viscous'
+  logical ::incomp_diag=.true.
+  ! Transport coefficients, shared by every rung (see amr_commons.f90)
   real(kind=8)::dfmm_tau=1.0d-3
   real(kind=8)::dfmm_prandtl=0.6666666666666667d0
+#ifdef DFMM
   logical ::dfmm_source=.true.
   logical ::dfmm_diag=.true.
   logical ::dfmm_fatal_realizability=.false.
@@ -675,6 +682,9 @@ subroutine m_read_params(pst)
        & ,slope_type,slope_mag_type,difmag,etamag,gamma_rad &
        & ,dual_energy,T2_fix,induction,entropy,sgs_turb,equilibrium_sgs,riemann,riemann2d,constant_gravity &
        & ,niter_riemann,scheme,switch_llf_dmin,switch_llf_pmin,smagorinsky_lilly_constant
+  ! incompressible-rung parameters
+  namelist/incomp_params/incompressible,incomp_p0,incomp_rho0 &
+       & ,incomp_stress,incomp_diag,dfmm_tau,dfmm_prandtl
 #ifdef DFMM
   ! dfmm solver parameters
   namelist/dfmm_params/dfmm_tau,dfmm_prandtl,dfmm_source,dfmm_diag &
@@ -1048,6 +1058,9 @@ subroutine m_read_params(pst)
 #endif
   read(1,NML=blowup_params,END=1091)
 1091 continue
+  rewind(1)
+  read(1,NML=incomp_params,END=1092)
+1092 continue
   rewind(1)
   read(1,NML=units_params,END=105)
 105 continue
@@ -1511,9 +1524,17 @@ subroutine m_read_params(pst)
      write(*,*)'blowup_delta must be > 0; got ',blowup_delta
      call mdl_abort(s%mdl)
   endif
-#ifdef DFMM
+  ! Transport coefficients and the incompressible-rung selectors are shared
+  ! by every rung, so they sit outside the DFMM guard: rung 1 runs in a
+  ! DFMM=0 binary and must still take nu = incomp_p0*dfmm_tau/incomp_rho0.
   s%r%dfmm_tau=dfmm_tau
   s%r%dfmm_prandtl=dfmm_prandtl
+  s%r%incompressible=incompressible
+  s%r%incomp_p0=incomp_p0
+  s%r%incomp_rho0=incomp_rho0
+  s%r%incomp_stress=incomp_stress
+  s%r%incomp_diag=incomp_diag
+#ifdef DFMM
   s%r%dfmm_source=dfmm_source
   s%r%dfmm_diag=dfmm_diag
   s%r%dfmm_fatal_realizability=dfmm_fatal_realizability
@@ -1726,6 +1747,10 @@ subroutine m_read_params(pst)
   s%r%no_inflow=no_inflow
   s%r%bound_levelmin=bound_levelmin
   s%r%box_size=box_size
+  ! The incompressible rungs impose a configuration (single level, periodic,
+  ! power-of-two grid); reject anything else here rather than approximating it
+  ! silently.  doc/incompressible.md Section 3.
+  call incomp_validate(s%r)
   s%r%box_xmin=box_xmin
   s%r%box_xmax=box_xmax
   s%r%box_ymin=box_ymin
