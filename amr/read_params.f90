@@ -320,6 +320,16 @@ subroutine m_read_params(pst)
   real(kind=8)::smallr=1.d-10
   character(LEN=10)::scheme='muscl'
   character(LEN=10)::riemann='llf'
+#ifdef DFMM
+  ! dfmm moment-scheme parameters (doc/dfmm_3d.md)
+  real(kind=8)::dfmm_tau=1.0d-3
+  real(kind=8)::dfmm_prandtl=0.6666666666666667d0
+  logical ::dfmm_source=.true.
+  logical ::dfmm_diag=.true.
+  logical ::dfmm_fatal_realizability=.false.
+  real(kind=8)::dfmm_ic_shear=0.0d0
+  real(kind=8)::dfmm_ic_pi=0.0d0
+#endif
   character(LEN=10)::riemann2d='none'
   logical ::induction=.false.
   logical ::entropy=.false.
@@ -655,6 +665,12 @@ subroutine m_read_params(pst)
        & ,slope_type,slope_mag_type,difmag,etamag,gamma_rad &
        & ,dual_energy,T2_fix,induction,entropy,sgs_turb,equilibrium_sgs,riemann,riemann2d,constant_gravity &
        & ,niter_riemann,scheme,switch_llf_dmin,switch_llf_pmin,smagorinsky_lilly_constant
+#ifdef DFMM
+  ! dfmm solver parameters
+  namelist/dfmm_params/dfmm_tau,dfmm_prandtl,dfmm_source,dfmm_diag &
+       & ,dfmm_fatal_realizability &
+       & ,dfmm_ic_shear,dfmm_ic_pi
+#endif
   ! Grid refinement parameters
   namelist/refine_params/x_refine,y_refine,z_refine,r_refine &
        & ,a_refine,b_refine,exp_refine,jeans_refine,mass_cut_refine &
@@ -1011,6 +1027,11 @@ subroutine m_read_params(pst)
   rewind(1)
   if(hydro)read(1,NML=hydro_params)
   rewind(1)
+#ifdef DFMM
+  read(1,NML=dfmm_params,END=1090)
+1090 continue
+  rewind(1)
+#endif
   read(1,NML=units_params,END=105)
 105 continue
   rewind(1)
@@ -1463,6 +1484,33 @@ subroutine m_read_params(pst)
   if(riemann=='llf')s%r%riemann=solver_llf
   if(riemann=='hll')s%r%riemann=solver_hll
   if(riemann=='hllc')s%r%riemann=solver_hllc
+#endif
+#ifdef DFMM
+  s%r%dfmm_tau=dfmm_tau
+  s%r%dfmm_prandtl=dfmm_prandtl
+  s%r%dfmm_source=dfmm_source
+  s%r%dfmm_diag=dfmm_diag
+  s%r%dfmm_fatal_realizability=dfmm_fatal_realizability
+  s%r%dfmm_ic_shear=dfmm_ic_shear
+  s%r%dfmm_ic_pi=dfmm_ic_pi
+  ! The ten-moment trace identity tr P = 3p = 2 rho e fixes the adiabatic
+  ! index; any other value makes p and the internal energy inconsistent.
+  if(abs(gamma-5.0d0/3.0d0)>1.0d-12)then
+     write(*,*)'DFMM requires gamma = 5/3 (monatomic); got ',gamma
+     call mdl_abort(s%mdl)
+  endif
+  ! Only HLL and LLF are implemented for the moment system: HLLC's middle
+  ! state has no standard contact reconstruction for the pressure anisotropy.
+  if(riemann/='hll' .and. riemann/='llf')then
+     write(*,*)'DFMM requires riemann=hll or llf; got ',trim(riemann)
+     call mdl_abort(s%mdl)
+  endif
+  ! The Metal kernel hardwires the dfmm block to ivar 6..5+ndfmm, so no other
+  ! extra fields may be configured alongside it at Stage 1.
+  if(nvar/=5+ndfmm)then
+     write(*,*)'DFMM requires NVAR = 5 + NDFMM (no NENER/NPSCAL/NMETAL/NION); got nvar=',nvar
+     call mdl_abort(s%mdl)
+  endif
 #endif
 #ifdef MHD
   if(riemann=='llf')s%r%riemann=solver_llf

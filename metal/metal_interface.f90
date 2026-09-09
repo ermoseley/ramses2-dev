@@ -962,6 +962,47 @@ module metal_interface
       integer(c_int), value :: head_idx, num_parts, ilevel
     end subroutine mtl_debug_xp
 
+#ifdef DFMM
+    ! ---- dfmm (doc/dfmm_3d.md) -------------------------------------------
+
+    ! Anisotropic timestep plus conserved sums.  eani is the volume integral
+    ! of |Pi|_F, a global measure of pressure anisotropy.
+    subroutine mtl_dfmm_cmpdt(head_idx, num_octs, dx, smallr, smallc2, &
+        courant_factor, constant_gravity, mass, etot, eint, eani, dt) &
+        bind(C, name="mtl_dfmm_cmpdt")
+      import c_int, c_float
+      integer(c_int), value :: head_idx, num_octs
+      real(c_float),  value :: dx, smallr, smallc2, courant_factor
+      real(c_float), intent(in)  :: constant_gravity(3)
+      real(c_float), intent(out) :: mass, etot, eint, eani, dt
+    end subroutine mtl_dfmm_cmpdt
+
+    ! Transport then strain production and exact BGK relaxation.
+    subroutine mtl_dfmm_godunov(head_idx, num_subgrids, ngridmax, &
+        ilevel, levelmin, levelmax, smallr, smallc2, dt, dx, &
+        slope, riemann, tau_pi, source_on, constant_gravity) &
+        bind(C, name="mtl_dfmm_godunov")
+      import c_int, c_float
+      integer(c_int), value :: head_idx, num_subgrids, ngridmax
+      integer(c_int), value :: ilevel, levelmin, levelmax
+      real(c_float),  value :: smallr, smallc2, dt, dx
+      integer(c_int), value :: slope, riemann
+      real(c_float),  value :: tau_pi
+      integer(c_int), value :: source_on
+      real(c_float), intent(in) :: constant_gravity(3)
+    end subroutine mtl_dfmm_godunov
+
+    ! Closure-quality and realizability diagnostics.
+    subroutine mtl_dfmm_diag(head_idx, num_octs, smallr, smallc2, dx, &
+        tau_pi, lam_min, dev_ns, ani_max, nbad) &
+        bind(C, name="mtl_dfmm_diag")
+      import c_int, c_float
+      integer(c_int), value :: head_idx, num_octs
+      real(c_float),  value :: smallr, smallc2, dx, tau_pi
+      real(c_float), intent(out) :: lam_min, dev_ns, ani_max, nbad
+    end subroutine mtl_dfmm_diag
+#endif
+
   end interface
 
 end module metal_interface

@@ -183,6 +183,22 @@ module amr_commons
      real(kind=8),dimension(1:3)::constant_gravity
      integer::inener,ientropy,imetal,iturb,ichem,iecr
 
+#ifdef DFMM
+     ! dfmm moment-scheme parameters (doc/dfmm_3d.md).  tau_pi is the BGK
+     ! relaxation time of the anisotropic pressure, so mu = p*tau_pi; a
+     ! non-positive value means collisionless (no relaxation).  dfmm_prandtl
+     ! sets tau_q = tau_pi/dfmm_prandtl once the heat flux is evolved
+     ! (Stage 2); 2/3 reproduces the hard-sphere value.
+     real(kind=8)::dfmm_tau=1.0d-3
+     real(kind=8)::dfmm_prandtl=0.6666666666666667d0
+     logical ::dfmm_source=.true.
+     logical ::dfmm_diag=.true.
+     logical ::dfmm_fatal_realizability=.false.
+     ! INIT=DFMMTEST amplitudes: shear velocity and initial Pi_xx
+     real(kind=8)::dfmm_ic_shear=0.0d0
+     real(kind=8)::dfmm_ic_pi=0.0d0
+#endif
+
      ! Physics parameters
      real(kind=8)::units_density=1.0 ! [g/cm^3]
      real(kind=8)::units_time=1.0    ! [seconds]

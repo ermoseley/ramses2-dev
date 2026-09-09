@@ -30,7 +30,7 @@ end subroutine r_input_hydro_condinit
 !#########################################################################
 subroutine input_hydro_condinit(r,g,m,ilevel)
   use amr_parameters, only: ndim, twotondim, nvector
-  use hydro_parameters, only: nvar, nener
+  use hydro_parameters, only: nvar, nener, ndfmm
   use amr_commons, only: run_t,global_t,mesh_t
   implicit none
   type(run_t)::r
@@ -292,7 +292,7 @@ end subroutine input_hydro_vecpot
 !#########################################################################
 subroutine cons_from_prim(r,g,m,ilevel)
   use amr_parameters, only: ndim, twotondim, nvector
-  use hydro_parameters, only: nvar, nener
+  use hydro_parameters, only: nvar, nener, ndfmm
   use amr_commons, only: run_t,global_t,mesh_t
   implicit none
   type(run_t)::r
@@ -346,8 +346,9 @@ subroutine cons_from_prim(r,g,m,ilevel)
            m%uold(ind,idim+1,igrid)=rr*m%uold(ind,idim+1,igrid)
         end do
 #if NVAR>5+NENER
-        ! Compute passive scalar density
-        do ivar=6+nener,nvar
+        ! Compute passive scalar density.  dfmm moment fields are excluded:
+        ! they are density-like, not mass fractions (doc/dfmm_3d.md Section 2).
+        do ivar=6+nener,nvar-ndfmm
            m%uold(ind,ivar,igrid)=rr*m%uold(ind,ivar,igrid)
         enddo
 #endif
@@ -364,7 +365,7 @@ end subroutine cons_from_prim
 !#########################################################################
 subroutine prim_from_cons(r,g,m,ilevel)
   use amr_parameters, only: ndim, twotondim, nvector
-  use hydro_parameters, only: nvar, nener
+  use hydro_parameters, only: nvar, nener, ndfmm
   use amr_commons, only: run_t, global_t, mesh_t
   implicit none
   type(run_t)::r
@@ -418,8 +419,8 @@ subroutine prim_from_cons(r,g,m,ilevel)
         pp=(r%gamma-1.0)*eint
         m%uold(ind,5,igrid)=pp
 #if NVAR>5+NENER
-        ! Compute passive scalar mass fraction
-        do ivar=6+nener,nvar
+        ! Compute passive scalar mass fraction (dfmm fields excluded, as above)
+        do ivar=6+nener,nvar-ndfmm
            m%uold(ind,ivar,igrid)=m%uold(ind,ivar,igrid)/rr
         enddo
 #endif
@@ -436,7 +437,7 @@ end subroutine prim_from_cons
 !################################################################
 subroutine region_condinit(r,g,x,q,dx,nn)
   use amr_parameters, only: nvector, ndim
-  use hydro_parameters, only: nvar, nener
+  use hydro_parameters, only: nvar, nener, ndfmm
   use amr_commons, only: run_t, global_t
 #ifdef DO_RTZ
   use rtz_module, only: elements, n_elements
@@ -522,7 +523,7 @@ subroutine region_condinit(r,g,x,q,dx,nn)
               enddo
 #endif
 #if NVAR>5+NENER
-              do ivar=6+nener,nvar
+              do ivar=6+nener,nvar-ndfmm
                  q(i,ivar)=r%var_region(k,ivar-5-nener)
               end do
 #ifdef DO_RTZ
@@ -590,7 +591,7 @@ subroutine region_condinit(r,g,x,q,dx,nn)
            enddo
 #endif
 #if NVAR>5+NENER
-           do ivar=6+nener,nvar
+           do ivar=6+nener,nvar-ndfmm
               q(i,ivar)=r%var_region(k,ivar-5-nener)
            end do
 #endif

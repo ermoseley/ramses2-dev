@@ -18,6 +18,7 @@ NENER = 0
 NMETAL = 0
 TURB = 0
 TRCFLX = 0
+DFMM = 0
 N_HYDROGEN_IONS = 0
 N_H2 = 0
 N_HELIUM_IONS = 0
@@ -61,7 +62,15 @@ ifeq ($(DO_CR),1)
    NENER := $(NENER)+$(NCRGRP)
    DEFINES += -DMHD -DDO_CR -DNCRGRP=$(NCRGRP)
 endif
-NVAR := $(NHYDRO)+$(NENER)+$(NPSCAL)+$(NMETAL)+$(NION)
+# dfmm moment fields (see doc/dfmm_3d.md).  Stage 1 = 5 deviatoric pressure
+# components Pi_xx, Pi_yy, Pi_xy, Pi_xz, Pi_yz at ivar 6..10.
+ifeq ($(DFMM),1)
+   NDFMM = 5
+   DEFINES += -DDFMM -DNDFMM=$(NDFMM)
+else
+   NDFMM = 0
+endif
+NVAR := $(NHYDRO)+$(NENER)+$(NPSCAL)+$(NMETAL)+$(NION)+$(NDFMM)
 #############################################################################
 # Collect git version and Makefile options
 GITBRANCH = $(shell git rev-parse --abbrev-ref HEAD)
@@ -245,6 +254,9 @@ ifeq ($(COMPILER),METAL)
    ifeq ($(GRAV),1)
       CXXFLAGS += -DGRAV
    endif
+   ifeq ($(DFMM),1)
+      CXXFLAGS += -DDFMM -DNDFMM=$(NDFMM)
+   endif
    ifeq ($(DEBUG),1)
       CXXFLAGS  += -g -O0
    endif
@@ -262,6 +274,9 @@ ifeq ($(COMPILER),METAL)
    endif
    ifeq ($(MHD),1)
       METALFLAGS += -DMHD
+   endif
+   ifeq ($(DFMM),1)
+      METALFLAGS += -DDFMM -DNDFMM=$(NDFMM)
    endif
    # Link flags: Metal + Foundation frameworks, C++ runtime for the bridge
    LIBS         = -framework Metal -framework Foundation -lstdc++ -lobjc
@@ -388,7 +403,12 @@ cooling.air: $(METAL_KPATH)/cooling.metal $(METAL_PATH)/metal_types.h
 	$(METALC) $(METALFLAGS) -c $< -o $@
 part.air: $(METAL_KPATH)/part.metal $(METAL_PATH)/metal_types.h $(METAL_KPATH)/metal_utils.h
 	$(METALC) $(METALFLAGS) -c $< -o $@
+dfmm.air: $(METAL_KPATH)/dfmm.metal $(METAL_PATH)/metal_types.h $(METAL_KPATH)/metal_utils.h
+	$(METALC) $(METALFLAGS) -c $< -o $@
 METAL_AIR = hydro.air refine.air flag.air scan.air rho.air mg.air cooling.air part.air
+ifeq ($(DFMM),1)
+   METAL_AIR += dfmm.air
+endif
 ramses_kernels.metallib: $(METAL_AIR)
 	$(METALLIB) $^ -o $@
 FORCE:

@@ -1,0 +1,70 @@
+This namelist runs the dfmm Stage-1 verification gates (doc/dfmm_3d.md Sec. 7).
+Compile using:
+  cd bin && make COMPILER=METAL NDIM=3 HYDRO=1 DFMM=1 INIT=DFMMTEST
+
+Uniform rho=1, p=1 with a divergence-free shear layer u_x = V0 sin(2 pi z / L)
+and an optional initial pressure anisotropy Pi_xx = A, Pi_yy = Pi_zz = -A/2.
+
+  Gate 2 (relaxation):    dfmm_ic_shear=0.0  dfmm_ic_pi=0.1  dfmm_tau=0.05
+                          -> |Pi| must decay as exp(-t/tau)
+  Gate 3 (NS limit):      dfmm_ic_shear=0.1  dfmm_ic_pi=0.0  dfmm_tau=1e-4
+                          -> |Pi|/p -> 2 p tau |S0|, and |Pi-Pi_NS| -> 0
+  Gate 4 (collisionless): dfmm_ic_shear=0.5  dfmm_ic_pi=0.0  dfmm_tau=-1.0
+                          -> must stay realizable, min lam(P)/p > 0
+
+&RUN_PARAMS
+hydro=.true.
+ncontrol=1
+nrestart=0
+nremap=0
+nsubcycle=10*1
+verbose=.false.
+nstepmax=12
+nsuperoct=2
+/
+
+&AMR_PARAMS
+levelmin=4
+levelmax=4
+ngridtot=400000
+ncachemax=200000
+nexpand=1
+boxlen=1.0
+/
+
+&INIT_PARAMS
+nregion=1
+region_type(1)='square'
+x_center=0.5
+y_center=0.5
+z_center=0.5
+length_x=10.0
+length_y=10.0
+length_z=10.0
+exp_region=10.0
+d_region=1.0
+u_region=0.0
+v_region=0.0
+w_region=0.0
+p_region=1.0
+/
+
+&OUTPUT_PARAMS
+foutput=0
+tout=0.3
+/
+
+&HYDRO_PARAMS
+gamma=1.6666666666666667
+courant_factor=0.8
+slope_type=1
+riemann='hll'
+/
+
+&DFMM_PARAMS
+dfmm_tau=1e-4
+dfmm_source=.true.
+dfmm_diag=.true.
+dfmm_ic_shear=0.1
+dfmm_ic_pi=0.0
+/

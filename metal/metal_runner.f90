@@ -210,6 +210,12 @@ subroutine metal_set_uold(sim, ilevel)
        int(sim%m%head(ilevel), c_int), &
        int(sim%m%noct(ilevel), c_int))
 
+#ifdef DFMM
+  ! uold now holds the post-step state, so this is the right place to audit
+  ! realizability and closure quality (doc/dfmm_3d.md Section 5).
+  call metal_dfmm_report(sim, ilevel)
+#endif
+
 end subroutine metal_set_uold
 
 !###########################################################
@@ -333,6 +339,165 @@ subroutine metal_godunov(sim, ilevel)
 
 end subroutine metal_godunov
 
+!###########################################################
+!###########################################################
+!###########################################################
+!###########################################################
+#ifdef DFMM
+! dfmm entry points (doc/dfmm_3d.md).  These replace metal_cmpdt and
+! metal_godunov in a DFMM build; the baseline hydro kernels are left
+! untouched and unused.
+subroutine metal_dfmm_cmpdt(sim, ilevel, mass, ekin, eint, eani, dt)
+  use ramses_commons, only: ramses_t
+  implicit none
+  type(ramses_t), intent(inout) :: sim
+  integer,        intent(in)    :: ilevel
+  real(kind=8),   intent(out)   :: mass, ekin, eint, eani, dt
+
+  real(c_float) :: dx, smallr, smallc2, courant_factor
+  real(c_float) :: constant_gravity(3)
+  real(c_float) :: mass_f, etot_f, eint_f, eani_f, dt_f
+
+  dx               = real(sim%r%boxlen / 2**ilevel, c_float)
+  smallr           = real(sim%r%smallr,             c_float)
+  smallc2          = real(sim%r%smallc**2,          c_float)
+  courant_factor   = real(sim%r%courant_factor,     c_float)
+  constant_gravity = real(sim%r%constant_gravity,   c_float)
+
+  call mtl_dfmm_cmpdt(                 &
+       int(sim%m%head(ilevel), c_int), &
+       int(sim%m%noct(ilevel), c_int), &
+       dx, smallr, smallc2,            &
+       courant_factor,                 &
+       constant_gravity,               &
+       mass_f, etot_f, eint_f, eani_f, dt_f)
+
+  mass = real(mass_f, 8)
+  ! RAMSES's "ekin" slot carries the *total* energy integral: update_time.f90
+  ! forms econs from g%ekin_tot alone, so it must be the conserved total.
+  ekin = real(etot_f, 8)
+  eint = real(eint_f, 8)
+  eani = real(eani_f, 8)
+  dt   = real(dt_f,   8)
+
+end subroutine metal_dfmm_cmpdt
+!###########################################################
+!###########################################################
+!###########################################################
+!###########################################################
+subroutine metal_dfmm_godunov(sim, ilevel)
+  use ramses_commons, only: ramses_t
+  implicit none
+  type(ramses_t), intent(inout) :: sim
+  integer,        intent(in)    :: ilevel
+
+  real(c_float)  :: smallr, smallc2, dt, dx, tau_pi
+  real(c_float)  :: constant_gravity(3)
+  integer(c_int) :: source_on
+
+  smallr           = real(sim%r%smallr,             c_float)
+  smallc2          = real(sim%r%smallc**2,          c_float)
+  dt               = real(sim%g%dtnew(ilevel),      c_float)
+  dx               = real(sim%r%boxlen / 2**ilevel, c_float)
+  tau_pi           = real(sim%r%dfmm_tau,           c_float)
+  constant_gravity = real(sim%r%constant_gravity,   c_float)
+  source_on        = merge(int(1, c_int), int(0, c_int), sim%r%dfmm_source)
+
+  if(sim%r%verbose .and. sim%g%myid==1) &
+       write(*,'("   Entering metal_dfmm_godunov for level ",I2)') ilevel
+
+  call mtl_dfmm_godunov(               &
+       int(sim%m%head(ilevel), c_int), &
+       int(sim%m%noct(ilevel), c_int), &
+       int(sim%m%ngridmax,     c_int), &
+       int(ilevel,             c_int), &
+       int(sim%r%levelmin,     c_int), &
+       int(sim%r%nlevelmax,    c_int), &
+       smallr, smallc2, dt, dx,        &
+       int(sim%r%slope_type,   c_int), &
+       int(sim%r%riemann,      c_int), &
+       tau_pi, source_on,              &
+       constant_gravity)
+
+end subroutine metal_dfmm_godunov
+!###########################################################
+!###########################################################
+!###########################################################
+!###########################################################
+subroutine metal_dfmm_diag(sim, ilevel, lam_min, dev_ns, ani_max, nbad)
+  use ramses_commons, only: ramses_t
+  implicit none
+  type(ramses_t), intent(inout) :: sim
+  integer,        intent(in)    :: ilevel
+  real(kind=8),   intent(out)   :: lam_min, dev_ns, ani_max
+  integer,        intent(out)   :: nbad
+
+  real(c_float) :: smallr, smallc2, dx, tau_pi
+  real(c_float) :: lam_f, dev_f, ani_f, nbad_f
+
+  smallr  = real(sim%r%smallr,             c_float)
+  smallc2 = real(sim%r%smallc**2,          c_float)
+  dx      = real(sim%r%boxlen / 2**ilevel, c_float)
+  tau_pi  = real(sim%r%dfmm_tau,           c_float)
+
+  call mtl_dfmm_diag(                  &
+       int(sim%m%head(ilevel), c_int), &
+       int(sim%m%noct(ilevel), c_int), &
+       smallr, smallc2, dx, tau_pi,    &
+       lam_f, dev_f, ani_f, nbad_f)
+
+  lam_min = real(lam_f, 8)
+  dev_ns  = real(dev_f, 8)
+  ani_max = real(ani_f, 8)
+  nbad    = nint(real(nbad_f, 8))
+
+end subroutine metal_dfmm_diag
+!###########################################################
+!###########################################################
+!###########################################################
+!###########################################################
+subroutine metal_dfmm_report(sim, ilevel)
+  use ramses_commons, only: ramses_t
+  implicit none
+  type(ramses_t), intent(inout) :: sim
+  integer,        intent(in)    :: ilevel
+
+  real(kind=8) :: lam_min, dev_ns, ani_max
+  integer      :: nbad
+
+  if(.not. sim%r%dfmm_diag) return
+  if(sim%m%noct(ilevel) <= 0) return
+
+  call metal_dfmm_diag(sim, ilevel, lam_min, dev_ns, ani_max, nbad)
+
+  if(sim%g%myid==1)then
+     if(sim%r%dfmm_tau > 0.0d0)then
+        write(*,'(" dfmm  level=",I2," min lam(P)/p=",1pe10.3, &
+             & "  max |Pi|/p=",1pe10.3,"  max |Pi-Pi_NS|/p=",1pe10.3, &
+             & "  n(lam<0)=",I0)') ilevel, lam_min, ani_max, dev_ns, nbad
+     else
+        ! Pi_NS = -2 p tau S0 is undefined without a collision time, so the
+        ! deviation is reported as n/a rather than as a zero that could be
+        ! misread as "Navier-Stokes is adequate here".
+        write(*,'(" dfmm  level=",I2," min lam(P)/p=",1pe10.3, &
+             & "  max |Pi|/p=",1pe10.3,"  max |Pi-Pi_NS|/p=       n/a", &
+             & "  n(lam<0)=",I0)') ilevel, lam_min, ani_max, nbad
+     end if
+  end if
+
+  ! Realizability is reported, not repaired.  A negative minimum eigenvalue of
+  ! P means the state corresponds to no non-negative distribution function --
+  ! precisely the failure the blowup construction predicts for the Newtonian
+  ! extrapolation -- so it is worth being able to stop on it.
+  if(nbad > 0 .and. sim%r%dfmm_fatal_realizability)then
+     write(*,'(" dfmm FATAL: ",I0," cells at level ",I2, &
+          & " have lam_min(P) < 0 (min lam/p = ",1pe10.3,")")') &
+          nbad, ilevel, lam_min
+     error stop 'dfmm realizability violation'
+  end if
+
+end subroutine metal_dfmm_report
+#endif
 !###########################################################
 !###########################################################
 !###########################################################

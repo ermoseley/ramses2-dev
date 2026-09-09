@@ -4,6 +4,9 @@ module godunov_fine_module
 #endif
 #ifdef _METAL
   use metal_runner, only: metal_godunov, metal_set_unew, metal_set_uold
+#ifdef DFMM
+  use metal_runner, only: metal_dfmm_godunov
+#endif
 #endif
 contains
 !###########################################################
@@ -29,7 +32,11 @@ recursive subroutine r_godunov_fine(pst,ilevel,input_size)
 #ifdef _CUDA
      call gpu_godunov(pst%s, ilevel)
 #elif defined(_METAL)
+#ifdef DFMM
+     call metal_dfmm_godunov(pst%s, ilevel)
+#else
      call metal_godunov(pst%s, ilevel)
+#endif
 #else
      call godunov_fine(pst%s, ilevel)
 #endif

@@ -4,6 +4,9 @@ module courant_fine_module
 #endif
 #ifdef _METAL
   use metal_runner, only: metal_cmpdt
+#ifdef DFMM
+  use metal_runner, only: metal_dfmm_cmpdt
+#endif
 #endif
 
   type :: out_courant_fine_t
@@ -41,7 +44,13 @@ recursive subroutine r_courant_fine(pst,ilevel,input_size,output,output_size)
 #ifdef _CUDA
      call gpu_cmpdt(pst%s,ilevel,output%mass,output%ekin,output%eint,output%emag,output%dt)
 #elif defined(_METAL)
+#ifdef DFMM
+     ! The emag slot carries the volume integral of |Pi|_F in a dfmm build;
+     ! update_time.f90 relabels it accordingly.
+     call metal_dfmm_cmpdt(pst%s,ilevel,output%mass,output%ekin,output%eint,output%emag,output%dt)
+#else
      call metal_cmpdt(pst%s,ilevel,output%mass,output%ekin,output%eint,output%emag,output%dt)
+#endif
 #else
      call courant_fine(pst%s%r,pst%s%g,pst%s%m,ilevel,output%mass,output%ekin,output%eint,output%emag,output%dt)
 #endif

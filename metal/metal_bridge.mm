@@ -87,6 +87,12 @@ static id<MTLComputePipelineState> s_pso_cmpdt    = nil;
 static id<MTLComputePipelineState> s_pso_sync_hydro = nil;
 static id<MTLComputePipelineState> s_pso_grav_hydro = nil;
 static id<MTLComputePipelineState> s_pso_godunov      = nil;
+#ifdef DFMM
+static id<MTLComputePipelineState> s_pso_dfmm_integrator = nil;
+static id<MTLComputePipelineState> s_pso_dfmm_source     = nil;
+static id<MTLComputePipelineState> s_pso_dfmm_cmpdt      = nil;
+static id<MTLComputePipelineState> s_pso_dfmm_diag       = nil;
+#endif
 static id<MTLComputePipelineState> s_pso_uct_velocity = nil;
 static id<MTLComputePipelineState> s_pso_uct_face_product = nil;
 static id<MTLComputePipelineState> s_pso_uct_reuse = nil;
@@ -301,6 +307,12 @@ extern "C" void mtl_init(void)
     s_pso_set_uold     = make_pso(@"set_uold_kernel");
     s_pso_cmpdt        = make_pso(@"cmpdt_kernel");
     s_pso_godunov      = make_pso(@"hydro_integrator_kernel");
+#ifdef DFMM
+    s_pso_dfmm_integrator = make_pso(@"dfmm_integrator_kernel");
+    s_pso_dfmm_source     = make_pso(@"dfmm_source_kernel");
+    s_pso_dfmm_cmpdt      = make_pso(@"dfmm_cmpdt_kernel");
+    s_pso_dfmm_diag       = make_pso(@"dfmm_diag_kernel");
+#endif
 #ifdef MHD
     s_pso_uct_velocity = make_pso(@"uct_velocity_kernel");
     s_pso_uct_face_product = make_pso(@"mhd_uct_face_product_kernel");
@@ -4374,3 +4386,162 @@ extern "C" void mtl_cic_part_medium(
     [enc dispatchThreadgroups:{nb,1,1} threadsPerThreadgroup:{tg,1,1}];
     [enc endEncoding]; [cmd commit]; [cmd waitUntilCompleted];
 }
+
+#ifdef DFMM
+/* ===========================================================================
+ * dfmm dispatch (doc/dfmm_3d.md).  Three entry points:
+ *   mtl_dfmm_cmpdt    anisotropic timestep + conserved sums
+ *   mtl_dfmm_godunov  transport kernel then source/relaxation kernel, in one
+ *                     command buffer so the ordering is guaranteed
+ *   mtl_dfmm_diag     closure-quality and realizability diagnostics
+ * ========================================================================= */
+
+extern "C" void mtl_dfmm_cmpdt(int head_idx, int num_octs,
+                               float dx, float smallr, float smallc2,
+                               float courant_factor, float *constant_gravity,
+                               float *mass, float *etot, float *eint,
+                               float *eani, float *dt)
+{
+    float dt_init = courant_factor * dx / sqrtf(smallc2);
+    uint32_t h_data[5] = {0, 0, 0, 0, 0};
+    memcpy(&h_data[4], &dt_init, sizeof(float));
+    id<MTLBuffer> data_buf =
+        [s_device newBufferWithBytes:h_data
+                              length:5 * sizeof(uint32_t)
+                             options:MTLResourceStorageModeShared];
+
+    float cg[3] = {constant_gravity[0], constant_gravity[1], constant_gravity[2]};
+    NSUInteger total_cells = (NSUInteger)num_octs * 8;
+    MTLSize tg_size   = {1024, 1, 1};
+    MTLSize grid_size = {(total_cells + 1023) / 1024, 1, 1};
+
+    id<MTLCommandBuffer>         cmd = [s_queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:s_pso_dfmm_cmpdt];
+    [enc setBuffer:s_grid   offset:0 atIndex:0];
+    [enc setBuffer:s_uold   offset:0 atIndex:1];
+    [enc setBuffer:data_buf offset:0 atIndex:2];
+    [enc setBytes:&head_idx       length:sizeof(int)       atIndex:3];
+    [enc setBytes:&num_octs       length:sizeof(int)       atIndex:4];
+    [enc setBytes:&dx             length:sizeof(float)     atIndex:5];
+    [enc setBytes:&smallr         length:sizeof(float)     atIndex:6];
+    [enc setBytes:&smallc2        length:sizeof(float)     atIndex:7];
+    [enc setBytes:&courant_factor length:sizeof(float)     atIndex:8];
+    [enc setBytes:cg              length:3 * sizeof(float) atIndex:9];
+    [enc setBuffer:s_f_grav       offset:0                 atIndex:10];
+    [enc dispatchThreadgroups:grid_size threadsPerThreadgroup:tg_size];
+    [enc endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    float *r = (float *)data_buf.contents;
+    *mass = r[0]; *etot = r[1]; *eint = r[2]; *eani = r[3]; *dt = r[4];
+}
+
+extern "C" void mtl_dfmm_godunov(int head_idx, int num_subgrids, int ngridmax,
+                                  int ilevel, int levelmin, int levelmax,
+                                  float smallr, float smallc2,
+                                  float dt, float dx, int slope, int riemann,
+                                  float tau_pi, int source_on,
+                                  float *constant_gravity)
+{
+    float cg[3] = {constant_gravity[0], constant_gravity[1], constant_gravity[2]};
+    MTLSize tg_size   = {64, 1, 1};
+    MTLSize grid_size = {(NSUInteger)num_subgrids, 1, 1};
+
+    id<MTLCommandBuffer> cmd = [s_queue commandBuffer];
+
+    /* --- transport --- */
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:s_pso_dfmm_integrator];
+    [enc setBuffer:s_grid   offset:0 atIndex:0];
+    [enc setBuffer:s_uold   offset:0 atIndex:1];
+    [enc setBuffer:s_unew   offset:0 atIndex:2];
+    [enc setBuffer:s_nbor   offset:0 atIndex:3];
+    [enc setBytes:&head_idx     length:sizeof(int)       atIndex:4];
+    [enc setBytes:&num_subgrids length:sizeof(int)       atIndex:5];
+    [enc setBytes:&ngridmax     length:sizeof(int)       atIndex:6];
+    [enc setBytes:&ilevel       length:sizeof(int)       atIndex:7];
+    [enc setBytes:&levelmin     length:sizeof(int)       atIndex:8];
+    [enc setBytes:&levelmax     length:sizeof(int)       atIndex:9];
+    [enc setBytes:&smallr       length:sizeof(float)     atIndex:10];
+    [enc setBytes:&smallc2      length:sizeof(float)     atIndex:11];
+    [enc setBytes:&dt           length:sizeof(float)     atIndex:12];
+    [enc setBytes:&dx           length:sizeof(float)     atIndex:13];
+    [enc setBytes:&slope        length:sizeof(int)       atIndex:14];
+    [enc setBytes:&riemann      length:sizeof(int)       atIndex:15];
+    [enc setBytes:cg            length:3 * sizeof(float) atIndex:16];
+    [enc setBuffer:s_father     offset:0                 atIndex:17];
+    [enc setBuffer:s_f_grav     offset:0                 atIndex:18];
+    [enc setBytes:&source_on    length:sizeof(int)       atIndex:19];
+    [enc dispatchThreadgroups:grid_size threadsPerThreadgroup:tg_size];
+    [enc endEncoding];
+
+    /* --- strain production + exact BGK relaxation ---
+     * A second encoder on the same command buffer: Metal orders encoders
+     * within a command buffer, so this observes the completed transport. */
+    enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:s_pso_dfmm_source];
+    [enc setBuffer:s_grid   offset:0 atIndex:0];
+    [enc setBuffer:s_uold   offset:0 atIndex:1];
+    [enc setBuffer:s_unew   offset:0 atIndex:2];
+    [enc setBuffer:s_nbor   offset:0 atIndex:3];
+    [enc setBytes:&head_idx     length:sizeof(int)   atIndex:4];
+    [enc setBytes:&num_subgrids length:sizeof(int)   atIndex:5];
+    [enc setBytes:&smallr       length:sizeof(float) atIndex:6];
+    [enc setBytes:&smallc2      length:sizeof(float) atIndex:7];
+    [enc setBytes:&dt           length:sizeof(float) atIndex:8];
+    [enc setBytes:&dx           length:sizeof(float) atIndex:9];
+    [enc setBytes:&tau_pi       length:sizeof(float) atIndex:10];
+    [enc setBytes:&source_on    length:sizeof(int)   atIndex:11];
+    [enc dispatchThreadgroups:grid_size threadsPerThreadgroup:tg_size];
+    [enc endEncoding];
+
+    [cmd commit];
+    [cmd waitUntilCompleted];
+}
+
+extern "C" void mtl_dfmm_diag(int head_idx, int num_octs,
+                               float smallr, float smallc2, float dx,
+                               float tau_pi,
+                               float *lam_min, float *dev_ns, float *ani_max,
+                               float *nbad)
+{
+    /* diag[0] carries lam_min(P)/p + 2 so the bitwise atomic min sees a
+     * positive float; the kernel applies the same offset. */
+    float big = 1.0e30f;
+    uint32_t h[4] = {0, 0, 0, 0};
+    memcpy(&h[0], &big, sizeof(float));
+    id<MTLBuffer> diag =
+        [s_device newBufferWithBytes:h
+                              length:4 * sizeof(uint32_t)
+                             options:MTLResourceStorageModeShared];
+
+    MTLSize tg_size   = {64, 1, 1};
+    MTLSize grid_size = {(NSUInteger)num_octs, 1, 1};
+
+    id<MTLCommandBuffer>         cmd = [s_queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    [enc setComputePipelineState:s_pso_dfmm_diag];
+    [enc setBuffer:s_grid offset:0 atIndex:0];
+    [enc setBuffer:s_uold offset:0 atIndex:1];
+    [enc setBuffer:s_nbor offset:0 atIndex:2];
+    [enc setBuffer:diag   offset:0 atIndex:3];
+    [enc setBytes:&head_idx length:sizeof(int)   atIndex:4];
+    [enc setBytes:&num_octs length:sizeof(int)   atIndex:5];
+    [enc setBytes:&smallr   length:sizeof(float) atIndex:6];
+    [enc setBytes:&smallc2  length:sizeof(float) atIndex:7];
+    [enc setBytes:&dx       length:sizeof(float) atIndex:8];
+    [enc setBytes:&tau_pi   length:sizeof(float) atIndex:9];
+    [enc dispatchThreadgroups:grid_size threadsPerThreadgroup:tg_size];
+    [enc endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+
+    float *r = (float *)diag.contents;
+    *lam_min = r[0] - 2.0f;
+    *dev_ns  = r[1];
+    *ani_max = r[2];
+    *nbad    = r[3];
+}
+#endif /* DFMM */

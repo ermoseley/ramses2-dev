@@ -42,9 +42,13 @@ subroutine condinit(r,g,x,q,dx,nn)
 #define PANCAKE 9
 #define ALFVENWAVE 10
 #define COLLAPSE 11
+#define DFMMTEST 12
 
   integer::i
   real(kind=8)::xx,yy,zz,rr,theta,pi,xcenter,ttmin,ttmax
+#if INIT==DFMMTEST
+  real(kind=8)::twopi_L,shear_amp,pi_amp
+#endif
 #if INIT==COEUR
   real(kind=8)::r2,rx,ry,rz,d,p,vx,vy,vz,r_trunc,r2_trunc,c2
   real(kind=8)::omega_code,AU,Msol,pi,M,sigma,r_min,r2_min,omega_const,r_vortex,invr2_vortex
@@ -453,5 +457,42 @@ subroutine condinit(r,g,x,q,dx,nn)
   endif
 #endif
 
+
+#if INIT==DFMMTEST
+  ! ------------------------------------------------------------------
+  ! dfmm Stage-1 verification initial condition (doc/dfmm_3d.md Sec. 7).
+  !
+  ! Uniform rho = 1, p = 1 with a divergence-free shear layer
+  !     u_x(z) = V0 sin(2 pi z / L),   u_y = u_z = 0
+  ! and an optional initial pressure anisotropy
+  !     Pi_xx = A,  Pi_yy = Pi_zz = -A/2.
+  !
+  ! Two gates use it:
+  !   V0 = 0, A /= 0  -> homogeneous relaxation; Pi must decay as exp(-t/tau)
+  !                      with everything else static.
+  !   V0 /= 0, A = 0  -> shear response; for small tau, Pi_xz must approach
+  !                      the Newtonian value -2 p tau S_xz, i.e.
+  !                      Pi_xz -> -p tau V0 (2 pi / L) cos(2 pi z / L).
+  !
+  ! The second gate is the Navier-Stokes baseline against which the blowup
+  ! deviation diagnostic |Pi - Pi_NS| is measured, so it matters that it is
+  ! exact in the collisional limit.
+  ! ------------------------------------------------------------------
+  twopi_L   = 2.0d0*acos(-1.0d0)/r%box_size(3)
+  shear_amp = r%dfmm_ic_shear
+  pi_amp    = r%dfmm_ic_pi
+  do i=1,nn
+     q(i,1) = 1.0d0
+     q(i,2) = shear_amp*sin(twopi_L*x(i,3))
+     q(i,3) = 0.0d0
+     q(i,4) = 0.0d0
+     q(i,5) = 1.0d0
+     q(i,6) = pi_amp            ! Pi_xx
+     q(i,7) = -0.5d0*pi_amp     ! Pi_yy   (Pi_zz = -(Pi_xx+Pi_yy) = -A/2)
+     q(i,8) = 0.0d0             ! Pi_xy
+     q(i,9) = 0.0d0             ! Pi_xz
+     q(i,10)= 0.0d0             ! Pi_yz
+  end do
+#endif
 
 end subroutine condinit
