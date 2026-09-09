@@ -52,8 +52,12 @@ contains
     end do
     deallocate(w)
 
-    ! The nonlinear product is the only place aliasing is generated, so the
-    ! 2/3 truncation is applied here and nowhere else.
+    ! u x omega is where the VELOCITY equation generates aliasing, so the 2/3
+    ! truncation is applied to it here.  It is not the only place in the
+    ! solver: incomp_advect, incomp_pigrad and incomp_qdiv all truncate their
+    ! inputs before differentiating, for the same reason.  Any new operator
+    ! whose output feeds a product must do the same -- omitting it in
+    ! incomp_pigrad/incomp_qdiv produced a grid-scale instability.
     call incomp_dealias(a,n,boxlen)
 
     allocate(s(3,n,n,n))

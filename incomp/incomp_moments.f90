@@ -124,11 +124,12 @@ contains
     real(kind=8),intent(in)::pi5(5,n,n,n)
     real(kind=8),intent(out)::dpi(6,3,n,n,n)
     complex(kind=8),allocatable::ph(:,:,:),th(:,:,:)
-    real(kind=8)::kv(n),kd
+    real(kind=8)::kv(n),kd,kcut,kmax
     complex(kind=8)::ii
     integer::i,j,k,m,c
     ii = cmplx(0.0d0,1.0d0,kind=8)
     call incomp_wavenumbers(n,boxlen,kv)
+    kmax = maxval(abs(kv)); kcut = 2.0d0/3.0d0*kmax
     allocate(ph(n,n,n),th(n,n,n))
     do m=1,6
        select case(m)
@@ -140,6 +141,21 @@ contains
        case(6); ph = cmplx(pi5(5,:,:,:),0.0d0,kind=8)
        end select
        call fftc(ph,n,-1)
+       ! Truncate before differentiating, exactly as incomp_advect does: dpi
+       ! is multiplied by Pi and by Q below, so an untruncated top third would
+       ! alias back into the retained band.  Omitting this produced a
+       ! grid-scale mode growing 2.9x per step from round-off at level 4,
+       ! K = 1, which reached E_trunc/E = 0.72 and unbounded |Pi| after ~250
+       ! steps.  Every operator in this solver that feeds a product must
+       ! truncate; there is no exception.
+       do k=1,n
+          do j=1,n
+             do i=1,n
+                if(abs(kv(i))>kcut.or.abs(kv(j))>kcut.or.abs(kv(k))>kcut) &
+                     ph(i,j,k)=cmplx(0.0d0,0.0d0,kind=8)
+             end do
+          end do
+       end do
        do c=1,3
           do k=1,n
              do j=1,n
@@ -171,15 +187,25 @@ contains
     real(kind=8),intent(in)::q10(10,n,n,n)
     real(kind=8),intent(out)::dq(6,n,n,n)
     complex(kind=8),allocatable::qh(:,:,:,:),sh(:,:,:)
-    real(kind=8)::kv(n),kc(3)
+    real(kind=8)::kv(n),kc(3),kcut,kmax
     complex(kind=8)::ii,acc
     integer::i,j,k,m,a,b,c
     ii = cmplx(0.0d0,1.0d0,kind=8)
     call incomp_wavenumbers(n,boxlen,kv)
+    kmax = maxval(abs(kv)); kcut = 2.0d0/3.0d0*kmax
     allocate(qh(n,n,n,10),sh(n,n,n))
     do m=1,10
        qh(:,:,:,m) = cmplx(q10(m,:,:,:),0.0d0,kind=8)
        call fftc(qh(:,:,:,m),n,-1)
+       ! Truncate before differentiating -- see the note in incomp_pigrad.
+       do k=1,n
+          do j=1,n
+             do i=1,n
+                if(abs(kv(i))>kcut.or.abs(kv(j))>kcut.or.abs(kv(k))>kcut) &
+                     qh(i,j,k,m)=cmplx(0.0d0,0.0d0,kind=8)
+             end do
+          end do
+       end do
     end do
     do m=1,6
        select case(m)
