@@ -235,7 +235,10 @@ ifeq ($(COMPILER),METAL)
    METAL_PATH   = ../metal
    METAL_KPATH  = ../metal/kernels
    CXX          = xcrun clang++
-   CXXFLAGS     = -std=c++17 -ObjC++ -fobjc-arc -O2 -I$(METAL_PATH)
+   # -fno-objc-msgsend-selector-stubs: the final link is driven by gfortran, whose
+   # bundled ld does not synthesise the objc_msgSend$<selector> stubs that newer
+   # clang emits by default, so ask clang for plain objc_msgSend calls instead.
+   CXXFLAGS     = -std=c++17 -ObjC++ -fobjc-arc -O2 -fno-objc-msgsend-selector-stubs -I$(METAL_PATH)
    ifeq ($(MHD),1)
       CXXFLAGS += -DMHD
    endif
@@ -261,7 +264,7 @@ ifeq ($(COMPILER),METAL)
       METALFLAGS += -DMHD
    endif
    # Link flags: Metal + Foundation frameworks, C++ runtime for the bridge
-   LIBS         = -framework Metal -framework Foundation -lstdc++
+   LIBS         = -framework Metal -framework Foundation -lstdc++ -lobjc
    # metallib must sit next to the executable so the bridge can load it
    METAL_METALLIB = ramses_kernels.metallib
 endif
