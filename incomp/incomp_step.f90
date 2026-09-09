@@ -16,6 +16,8 @@ module incomp_step_module
   !---------------------------------------------------------------------------
   use incomp_ops_module
   use incomp_solver_module
+  use incomp_moments_module
+  use hydro_parameters, only: ndfmm
   implicit none
   private
   public :: incomp_validate, incomp_cmpdt, incomp_step, incomp_nu
@@ -72,24 +74,26 @@ contains
          n, r%incomp_p0, r%incomp_rho0, incomp_nu(r), trim(r%incomp_stress)
   end subroutine incomp_validate
 
-  subroutine incomp_gather(r,m,ilevel,n,u,pi5,want_pi)
+  subroutine incomp_gather(r,m,ilevel,n,u,pi5,want_pi,tower,want_tower)
     ! uold -> uniform lattice, by Cartesian key.  For levelmin == levelmax the
     ! key is a bijection onto the lattice, so this is exact; the caller checks
     ! that every site was written.
     use amr_commons, only: run_t, mesh_t
     use amr_parameters, only: ndim, twotondim
-    use hydro_parameters, only: ipi
+    use hydro_parameters, only: ipi, il
     type(run_t)::r
     type(mesh_t)::m
     integer,intent(in)::ilevel,n
     real(kind=8),intent(out)::u(3,n,n,n)
     real(kind=8),intent(out)::pi5(5,n,n,n)
     logical,intent(in)::want_pi
+    real(kind=8),intent(out)::tower(18,n,n,n)
+    logical,intent(in)::want_tower
     integer::igrid,ind,idim,ic(3),nstride,i,j,k,iv
     integer::nfilled
     real(kind=8)::irho
 
-    u = 0.0d0; pi5 = 0.0d0
+    u = 0.0d0; pi5 = 0.0d0; tower = 0.0d0
     nfilled = 0
     irho = 1.0d0/r%incomp_rho0
     do igrid=m%head(ilevel),m%tail(ilevel)
@@ -111,6 +115,12 @@ contains
                 pi5(iv,i,j,k) = m%uold(ind,ipi+iv-1,igrid)
              end do
           endif
+          if(want_tower)then
+             ! The mass-like tower is stored as rho X, so divide it out.
+             do iv=1,18
+                tower(iv,i,j,k) = m%uold(ind,il+iv-1,igrid)*irho
+             end do
+          endif
           nfilled = nfilled+1
        end do
     end do
@@ -121,7 +131,7 @@ contains
     endif
   end subroutine incomp_gather
 
-  subroutine incomp_scatter(r,m,ilevel,n,u)
+  subroutine incomp_scatter(r,m,ilevel,n,u,pi5,want_pi,tower,want_tower)
     ! Uniform lattice -> unew, restoring the compressible slots to their
     ! incompressible values so that every downstream tool keeps working.
     !
@@ -130,10 +140,15 @@ contains
     ! uold would be clobbered.
     use amr_commons, only: run_t, mesh_t
     use amr_parameters, only: ndim, twotondim
+    use hydro_parameters, only: ipi, il
     type(run_t)::r
     type(mesh_t)::m
     integer,intent(in)::ilevel,n
     real(kind=8),intent(in)::u(3,n,n,n)
+    real(kind=8),intent(in)::pi5(5,n,n,n)
+    logical,intent(in)::want_pi
+    real(kind=8),intent(in)::tower(18,n,n,n)
+    logical,intent(in)::want_tower
     integer::igrid,ind,idim,ic(3),nstride,i,j,k,iv
     real(kind=8)::rho0,p0,ek
 
@@ -152,11 +167,20 @@ contains
           m%unew(ind,3,igrid) = rho0*u(2,i,j,k)
           m%unew(ind,4,igrid) = rho0*u(3,i,j,k)
           m%unew(ind,5,igrid) = ek + 1.5d0*p0
-          ! Everything above ivar 5 is carried through unchanged; the moment
-          ! sector is advanced separately.
-          do iv=6,size(m%unew,2)
-             m%unew(ind,iv,igrid) = m%uold(ind,iv,igrid)
-          end do
+          if(want_pi)then
+             do iv=1,5
+                m%unew(ind,ipi+iv-1,igrid) = pi5(iv,i,j,k)
+             end do
+          else
+             do iv=6,size(m%unew,2)
+                m%unew(ind,iv,igrid) = m%uold(ind,iv,igrid)
+             end do
+          endif
+          if(want_tower)then
+             do iv=1,18
+                m%unew(ind,il+iv-1,igrid) = rho0*tower(iv,i,j,k)
+             end do
+          endif
        end do
     end do
   end subroutine incomp_scatter
@@ -172,12 +196,12 @@ contains
     integer,intent(in)::ilevel
     real(kind=8),intent(out)::mass,ekin,eint,eani,dt
     integer::n
-    real(kind=8),allocatable::u(:,:,:,:),pi5(:,:,:,:)
+    real(kind=8),allocatable::u(:,:,:,:),pi5(:,:,:,:),tw(:,:,:,:)
     real(kind=8)::vol,e
 
     n = incomp_nside(r)
-    allocate(u(3,n,n,n),pi5(5,n,n,n))
-    call incomp_gather(r,m,ilevel,n,u,pi5,.false.)
+    allocate(u(3,n,n,n),pi5(5,n,n,n),tw(18,n,n,n))
+    call incomp_gather(r,m,ilevel,n,u,pi5,.false.,tw,.false.)
     ! Note: the caller is responsible for the host copy being current.  On the
     ! Metal path r_courant_fine runs after r_set_uold, which has just been
     ! followed by incomp_step's own device upload, and the timestep only needs
@@ -189,7 +213,7 @@ contains
     ekin = eint + e*r%boxlen**3
     eani = 0.0d0
     dt   = incomp_dt(u,n,r%boxlen,incomp_nu(r),r%courant_factor)
-    deallocate(u,pi5)
+    deallocate(u,pi5,tw)
   end subroutine incomp_cmpdt
 
   subroutine incomp_step(sim,ilevel,dt)
@@ -200,22 +224,30 @@ contains
     type(ramses_t)::sim
     integer,intent(in)::ilevel
     real(kind=8),intent(in)::dt
-    integer::n
-    logical::use_pi
-    real(kind=8),allocatable::u(:,:,:,:),pi5(:,:,:,:)
-    real(kind=8)::dv,ef
+    integer::n,nbad
+    logical::use_pi,use_tw
+    real(kind=8),allocatable::u(:,:,:,:),pi5(:,:,:,:),tw(:,:,:,:)
+    real(kind=8)::dv,ef,cmin,gmin
 
     n = incomp_nside(sim%r)
     use_pi = (trim(sim%r%incomp_stress)=='moment')
-    allocate(u(3,n,n,n),pi5(5,n,n,n))
+    use_tw = use_pi .and. (ndfmm>=33)
+    allocate(u(3,n,n,n),pi5(5,n,n,n),tw(18,n,n,n))
 #ifdef _METAL
     ! The device holds the state between steps; bring it home first.
     call metal_uold_to_host(sim)
 #endif
-    call incomp_gather(sim%r,sim%m,ilevel,n,u,pi5,use_pi)
+    call incomp_gather(sim%r,sim%m,ilevel,n,u,pi5,use_pi,tw,use_tw)
     call incomp_step_rk2(u,n,sim%r%boxlen,dt,incomp_nu(sim%r),pi5, &
          sim%r%incomp_rho0,use_pi)
-    call incomp_scatter(sim%r,sim%m,ilevel,n,u)
+    ! The moment sector follows the velocity, as in the compressible code:
+    ! sources follow transport, and Pi is advected by the velocity that has
+    ! just been made divergence-free.
+    if(use_pi) &
+         call incomp_moment_step(u,pi5,tw(1:3,:,:,:),tw(4:9,:,:,:), &
+              tw(10:18,:,:,:),n,sim%r%boxlen,dt,sim%r%incomp_p0, &
+              sim%r%incomp_rho0,sim%r%dfmm_tau,use_tw)
+    call incomp_scatter(sim%r,sim%m,ilevel,n,u,pi5,use_pi,tw,use_tw)
 #ifdef _METAL
     call metal_unew_to_device(sim)
 #endif
@@ -225,8 +257,23 @@ contains
        write(*,'(" incomp level=",I2,"  spectral div ",1pe10.3, &
             & "  E_trunc/E ",1pe10.3,"  max|u| ",1pe10.3)') &
             ilevel, dv, ef, maxval(abs(u))
+       if(use_pi)then
+          cmin = incomp_cone_min(pi5,n,sim%r%incomp_p0)
+          if(use_tw)then
+             gmin = incomp_rank_min(pi5,tw(4:9,:,:,:),tw(10:18,:,:,:),n, &
+                  sim%r%incomp_p0,sim%r%incomp_rho0,nbad)
+             write(*,'(" incomp level=",I2,"  min lam(P)/p0 ",1pe10.3, &
+                  & "  max |Pi|/p0 ",1pe10.3,"  min g(rank) ",1pe10.3, &
+                  & "  n(Gamma<0)=",I0)') &
+                  ilevel, cmin, maxval(abs(pi5))/sim%r%incomp_p0, gmin, nbad
+          else
+             write(*,'(" incomp level=",I2,"  min lam(P)/p0 ",1pe10.3, &
+                  & "  max |Pi|/p0 ",1pe10.3)') &
+                  ilevel, cmin, maxval(abs(pi5))/sim%r%incomp_p0
+          endif
+       endif
     endif
-    deallocate(u,pi5)
+    deallocate(u,pi5,tw)
   end subroutine incomp_step
 
 end module incomp_step_module

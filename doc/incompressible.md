@@ -1,8 +1,6 @@
 # Incompressible rungs — implementation ledger
 
-Status: **ledger frozen; the shared spectral infrastructure and the
-incompressible Navier--Stokes rung are implemented and gated. The
-incompressible dfmm rung reuses the same operators.**
+Status: **ledger frozen; both incompressible rungs implemented and gated.**
 
 Branch: `dfmm_3d_metal`. Scope: `NDIM=3`, single rank, `levelmin == levelmax`,
 periodic, uniform grid of `N = 2^L` cells per side. Any other configuration is
@@ -188,15 +186,37 @@ records float32 adequacy for the Stage-4 phase-space sector as *assumed*.
 
 ## 4. Gates
 
-| Gate | Setup | Criterion |
-|---|---|---|
-| 1 FFT | random field, `N = 8, 16, 32` | `ifft(fft(x)) = x` to machine precision; forward transform matches a direct DFT; spectral `d/dx sin(kx) = k cos(kx)` to machine precision |
-| 2 Gather | random `uold`, `levelmin = levelmax` | `scatter(gather(u))` is the identity to the bit; the `ckey` map hits every lattice site exactly once |
-| 3 Projection | random field | `max |k . u_hat| / (|k| |u_hat|)` at machine precision; projector idempotent to machine precision; a field already divergence-free is unchanged |
-| 4 Taylor--Green | `u = (sin x cos y, -cos x sin y, 0)`, exact NS solution decaying as `exp(-2 nu t)` | amplitude and shape follow the analytic solution; error converges under refinement |
-| 5 Energy | smooth field, `nu = 0` | `dE/dt` at truncation level; reported alongside the energy in the dealiased band |
-| 6 CE limit | rung 4 at small `tau`, against rung 1 at `nu = p_0 tau / rho_0` | the two agree as `tau -> 0`; this is the statement that rung 4 reduces to rung 1 |
-| 7 Strain box | rungs 1 and 4 on the blowup initial condition | `lam_min(p_0 I + Pi)` and `Kn_local` against the rung-2/3 values at the same `K` |
+| Gate | Setup | Criterion | Result |
+|---|---|---|---|
+| 1 FFT | random field, `N = 8, 16, 32` | round-trip and a direct DFT | round-trip **1.6e-16**; vs direct DFT **2.1e-14**; spectral `d/dx sin(2kx)` **3.3e-14** against a signal of 12.6 |
+| 2 Gather | `levelmin = levelmax` | the `ckey` map must hit every lattice site exactly once | asserted at runtime: the gather counts the sites it filled and aborts unless it is `n^3` |
+| 3 Projection | random field, `N = 32` | `k . u_hat = 0`, idempotent | spectral divergence **0.776 -> 2.6e-16**; idempotence **2.8e-16** |
+| 4 Taylor--Green | `u = (sin kx cos ky, -cos kx sin ky, 0)`, exact NS solution decaying as `exp(-2 nu k^2 t)`; `nu = 0.02`, `t = 0.101` | amplitude *and* shape, since the nonlinear term is a pure gradient that the projector must absorb exactly | standalone `N = 8/16/32`: relative error **2.3e-5 / 5.3e-6 / 6.8e-7**, i.e. the RK2 rate at `dt ~ dx`. In RAMSES at `N = 32`: `max\|u\|` ratio **1.0000007**, `max\|u - u_exact\|` **6.0e-7**, `u_z` **identically zero**, `rho` uniform to the bit, `div u` **1.3e-15** |
+| 5 Energy | smooth 3D field, `nu = 0`, 50 steps | inviscid rotational form must conserve energy | `E/E_0 - 1 = ` **2.3e-7**; energy in the truncated band **1.6e-29**, i.e. fully resolved |
+| 6 CE limit | rung 4 on Taylor--Green at `tau = 0.02 / 0.002 / 0.0005`, against the rung-1 analytic decay at `nu = p_0 tau/rho_0` | rung 4 must reduce to rung 1 as `tau -> 0` | ratio to the Navier--Stokes answer **1.0295 / 1.00075 / 1.000166** at `max\|Pi\|/p_0 = ` 0.243 / 0.0247 / 0.0062. The 3% deviation at `tau = 0.02` is *the physics*: the evolved stress lags the strain and therefore dissipates less than Newtonian |
+| 7 Strain box | rungs 1 and 4 on the blowup initial condition, Family-B `K = 1`, level 5, one deformation time | the indicators must respond, with `div u` held | rung 4: `min lam(p_0 I + Pi)/p_0 = ` **0.433**, `max\|Pi\|/p_0 = ` 0.567, `min g(rank) = ` 0.717, `n(Gamma<0) = 0`, `div u = ` **1.4e-15**. Rung 1 at the same `tau` decays faster (`max\|u\|` 0.835 vs 0.999) |
+
+**The headline of Gate 7.** At `K = 1` the *compressible* moment run
+(`doc/dfmm_3d.md` Gate 9) gives `min lam(P)/p = 0.655` at
+`max |Pi|/p = 0.584`; the incompressible moment run gives **0.433** at almost
+the same anisotropy, `0.567`. So removing compressibility makes the
+realizability margin *worse* at fixed stress. That is a physically sensible
+reading -- a compressible gas can relieve strain by expanding and can raise
+`p` by viscous heating, both of which widen the cone, and an incompressible
+one can do neither -- and it is exactly the kind of statement the four-rung
+design exists to isolate. It also means the compressible runs were, if
+anything, *optimistic* about check 7.
+
+**Two reporting caveats.**
+
+* `econs` is meaningless in these rungs and should be ignored. The internal
+  energy is pinned at `3 p_0/2` by construction, so viscous dissipation leaves
+  the total-energy budget rather than heating the gas. `mcons` is exactly zero
+  and the kinetic energy is the quantity to watch.
+* Watch `E_trunc/E`. It is `1.7e-16` for rung 1 on the strain box but
+  `2.7e-8` for rung 4, because advecting `Pi` generates finer scales than the
+  velocity carries. That is still fully resolved, but it is the number that
+  will announce under-resolution first as `K` rises.
 
 ---
 

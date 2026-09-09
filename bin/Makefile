@@ -339,7 +339,7 @@ ifeq ($(DO_RTZ),1)
 else
    MODOBJ += neq_cooling_module.o
 endif
-MODOBJ += incomp_fft.o incomp_ops.o incomp_solver.o \
+MODOBJ += incomp_fft.o incomp_ops.o incomp_solver.o incomp_moments.o \
          init_neq_chem.o clfind_commons.o turb_commons.o mdl_commons.o mdl.o \
 	 cross_sections_module.o rt_spectra.o  \
 	 ramses_commons.o call_back.o cache_commons.o cache.o gadgetreadfile.o \
