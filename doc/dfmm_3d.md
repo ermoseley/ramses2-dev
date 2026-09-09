@@ -386,6 +386,50 @@ Three separate mechanisms, in order of preference:
    state, and it is the correct statement of transport positivity for a moment
    system (bound the flux, not the speed).
 
+   **Implemented — with two corrections that are not optional, both found by
+   measurement rather than by inspection.**
+
+   *The enlargement must be capped.* `dt` comes from `dfmm_cmpdt_kernel` using
+   the **un-enlarged** signal speed, so a face flux built with
+   `a > a0/courant_factor` violates the very CFL condition `dt` was chosen to
+   satisfy. An uncapped doubling loop is unconditionally unstable: eight
+   doublings (256x) destroyed a previously exactly-conservative run in a single
+   step. `DF_ABOOST_MAX = 1.25 <= 1/courant_factor`. Where the cap is not
+   enough, the state is allowed to leave the cone and be *reported*, which is
+   the whole point of the instrument.
+
+   *The enlargement must be CONTINUOUS in the state, not a branch.* An
+   oct-boundary face is reconstructed and solved independently by the two
+   threadgroups that own the adjoining octs, and conservation depends on both
+   arriving at the same flux. A discrete "enlarge if inadmissible" test turns a
+   round-off difference in the cone margin into a *finite* difference in the
+   wave speed, hence a non-telescoping flux. Measured: `mcons` went from 0 to
+   -2.3e-2 in two steps on a case that is otherwise exact, at every `tau`, with
+   the source term off, and at every resolution. The implementation therefore
+   computes a smooth margin (`df_cone_margin`) and widens by a continuous ramp
+   `w = 1 + (DF_ABOOST_MAX - 1) clamp(-10 m, 0, 1)`, applied symmetrically to
+   `SL` and `SR`. Verified: Gates 3 and 5 are **bit-for-bit unchanged** — the
+   widening never fires on smooth low-anisotropy flow — and conservation
+   returns to round-off.
+
+2b. **A permanent self-consistency guard on the diagnostic itself.**
+   `P = p I + Pi` with `Pi` traceless, so Weyl's inequality forces
+   `lam_min(P)/p >= 1 - ||Pi||_F/p` cell by cell. `dfmm_diag_kernel` records
+   `max over cells of ((1 - ani) - lam)`, which must be `<= 0`: two flops, and
+   it paid for itself immediately. It exposed a defect in which the
+   realizability report divided by `max(p, 1e-30)` while building `P` from the
+   unfloored `p`, so an empty cell (`rho = smallr`,
+   `p = rho smallc2/gamma = 6e-31`) reported `1/gamma = 0.6` with
+   `||Pi||/p = 0` — a state-independent constant that masked the true minimum
+   in every run. Both now use one pressure. `DFMM_DIAG_RAW=1` dumps the raw
+   accumulator slots and the offending cell.
+
+   The minimum is also **not** carried as a single offset float. The only
+   lock-free float atomics available are min/max on the raw bit pattern, which
+   order IEEE-754 correctly for non-negative values only; minimising
+   `lam/p + 2` silently clips anything below `-2` — invisible in the gate
+   problems, catastrophic here, where `|Pi|/p` reaches order ten.
+
 3. **Diagnostics, not clipping.** `lam_min(P)/p` is recorded per level as a
    minimum (not a maximum of slack — a max is structurally blind to cells at
    the cone boundary). A negative value is reported and, under
