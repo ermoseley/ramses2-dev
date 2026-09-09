@@ -81,8 +81,15 @@ else ifeq ($(strip $(DFMM)),3)
    NDFMM = 18
 else ifeq ($(strip $(DFMM)),4)
    NDFMM = 33
-else
+else ifeq ($(strip $(DFMM)),0)
    NDFMM = 0
+else ifeq ($(strip $(DFMM)),)
+   NDFMM = 0
+else
+   $(error DFMM must be 0, 1, 2, 3 or 4; got '$(DFMM)'. A value with a space \
+in it usually means a shell quoting bug -- zsh does not word-split an \
+unquoted "$$var", so `make $$cfg` with cfg="DFMM=4 INIT=BLOWUP" reaches make \
+as ONE argument and silently selects no dfmm fields.)
 endif
 # Gate on the resulting field count, not on the stage selector: an explicitly
 # empty DFMM= on the command line is not equal to 0 and would otherwise define

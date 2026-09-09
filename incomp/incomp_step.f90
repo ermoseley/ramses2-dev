@@ -69,6 +69,15 @@ contains
             trim(r%incomp_stress)
        stop 1
     endif
+    ! The moment closure reads Pi from the hydro state, so it needs a binary
+    ! that carries those slots.  Without this check a DFMM=0 build reads past
+    ! the end of the variable list and segfaults on the first step, which is
+    ! an unhelpful way to learn that the namelist and the binary disagree.
+    if(trim(r%incomp_stress)=='moment' .and. ndfmm<5)then
+       write(*,*)"incomp_stress='moment' needs the Pi fields; rebuild with", &
+            " DFMM>=1 (this binary has ndfmm = ", ndfmm, ")"
+       stop 1
+    endif
     write(*,'(" incompressible: n=",I5,"  p0=",1pe10.3,"  rho0=",1pe10.3, &
          & "  nu=",1pe10.3,"  stress=",A)') &
          n, r%incomp_p0, r%incomp_rho0, incomp_nu(r), trim(r%incomp_stress)
