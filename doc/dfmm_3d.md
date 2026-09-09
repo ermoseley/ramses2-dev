@@ -1,6 +1,7 @@
 # dfmm in 3D on the Metal backend — implementation ledger
 
-Status: **ledger frozen; Stages 1 and 2 implemented and gated.** This document fixes the
+Status: **ledger frozen; Stages 1-4 implemented and gated -- the dual-frame
+method is complete.** This document fixes the
 equations, field layout, flux ledger, source ledger, realizability rule and
 diagnostics *before* physics code is written, following the practice used for
 the mini-RAMSES multimoment work. Any change to the equations below is a
@@ -122,14 +123,35 @@ work unmodified. Everything dfmm adds sits at index 6 and above.
 | 5 | `E = rho|u|^2/2 + 3p/2` | conserved (`gamma = 5/3`) | base |
 | 6..10 | `Pi_xx, Pi_yy, Pi_xy, Pi_xz, Pi_yz` | density-like, `Pi_zz = -(Pi_xx+Pi_yy)` | **1** |
 | 11..20 | `Q_ijk` (10 comps) | density-like | **2** |
-| 21..23 | `rho L_i` | mass-like | **3** |
+| 21..23 | `rho D_i`, `D_i = L_i - x_i` | mass-like | **3** |
 | 24..29 | `rho Sxx_ij` (6 comps) | mass-like | **4** |
 | 30..38 | `rho Sxv_ij` (9 comps, not symmetric) | mass-like | **4** |
 
 `NVAR` = 10 / 20 / 23 / 38 at the four stages, selected by `DFMM=n` in
-`bin/Makefile` (`NDFMM` = 5 / 15 / 18 / 33). Stage 1 stays selectable as
-`DFMM=1` so its gate results below remain reproducible, and because the `Q`
-sector is expensive enough to be worth switching off when it is not needed.
+`bin/Makefile` (`NDFMM` = 5 / 15 / 18 / 33). Every stage stays selectable so
+its gate results below remain reproducible, and because each sector is
+expensive enough to be worth switching off when it is not needed.
+
+**Why the displacement and not the label.** Stage 3 stores `D_i = L_i - x_i`,
+not `L_i`. On a periodic box a periodic flow satisfies
+`L(x + Lbox e) = L(x) + Lbox e`, so `L` carries a jump of one box length across
+the wrap plane. A centred difference of `L` there reports a deformation tensor
+too large by `Lbox/(2 dx)` -- the whole grid -- and an upwind advection of that
+jump smears it, corrupting a band of cells permanently. `D` is periodic and
+smooth, starts at zero, and stays small, so
+
+```
+d L_i / d x_j = delta_ij + d D_i / d x_j
+```
+
+is clean everywhere and float32 carries `D` at its own magnitude. The price is
+one source term, `D D_i / Dt = -u_i`, which follows from `D L_i / Dt = 0`.
+
+**Why `Sxv` is not symmetrised.** Its antisymmetric part is the phase-space
+packet's angular momentum, which any flow with vorticity generates from an
+isotropic start. Storing 6 instead of 9 would discard physics, not storage.
+The Stage-4 gate below measures the antisymmetric part directly, because that
+is the part the `-Sxv G^T` term generates.
 
 `Q_ijk` component order is
 `xxx, yyy, zzz, xxy, xxz, yyx, yyz, zzx, zzy, xyz`. The kernel carries the
@@ -302,22 +324,105 @@ blowup note's Eq. (16) uses, so the note's coefficients
 `mu/p = (5/4) t_c`, `kappa/(rho c_p) = (3/2) nu` can be matched directly. This
 means `tau = (5/4) t_c` when calibrating against the note.
 
-**Phase-space sector** (Stage 4). With the 6x6 phase-space covariance blocks
-`A = Sxx`, `B = Sxv`, `C = Svv = P/rho`, the Liouville evolution of the local
-phase-space packet under the linearised flow `Jac = [[0, I], [0, -G]]` is
-`d M/dt = Jac M + M Jac^T`, giving
+**Phase-space sector** (Stage 4) -- the second frame. With the 6x6 phase-space
+covariance
+
+```
+M = [[Sxx, Sxv], [Sxv^T, Svv]] ,    Svv = P/rho ,
+```
+
+the Liouville evolution of the local packet under the linearised flow
+`Jac = [[0, I], [0, -G]]` is `D M/Dt = Jac M + M Jac^T`, giving
 
 ```
 D Sxx / Dt = Sxv + Sxv^T
 D Sxv / Dt = Svv - Sxv G^T
-D Svv / Dt = -G Svv - Svv G^T      (already carried by the hydro sector)
+D Svv / Dt = -G Svv - Svv G^T      (already carried by p and Pi)
 ```
 
 1D reduction: `Sxx' = 2 Sxv`, `Sxv' = Svv - Sxv du/dx`, `Svv' = -2 Svv du/dx`,
 matching Eqs. (9)--(11) of the paper.
 
-**Lagrangian coordinate** (Stage 3): no source, `D L_i / Dt = 0`, initialised
-to `L_i = x_i`.
+**Why the covariance and not the Cholesky factors.** The 1D reference
+(`py-1d/dfmm/schemes/cholesky.py`) carries the factors `alpha, beta` of
+`Sigma = L L^T` with `L = [[alpha, 0], [beta, gamma]]`, so that
+
+```
+Sxx = alpha^2 ,  Sxv = alpha beta ,  Svv = beta^2 + gamma^2 ,
+D alpha / Dt = beta ,  D beta / Dt = gamma^2/alpha - (du/dx) beta .
+```
+
+Substituting shows the two formulations are *analytically identical*:
+
+```
+Sxx' = 2 alpha alpha' = 2 alpha beta                    = 2 Sxv
+Sxv' = alpha' beta + alpha beta' = beta^2 + gamma^2 - G alpha beta
+                                                        = Svv - G Sxv
+```
+
+so carrying the covariance directly gives up nothing, and gains three things:
+the system is linear in the evolved variables, there is no `1/alpha` needing a
+floor, and realizability needs no clip anywhere because `gamma` is no longer a
+state variable. `gamma` becomes a pure diagnostic -- Section 5.
+
+**Relaxation.** Collisions randomise velocity, so they destroy the
+position-velocity correlation on the collision time; they do not move
+particles, so `Sxx` is untouched. `Sxv` therefore relaxes with `tau_Pi` under
+the same asymptotic-preserving map as `Pi` and `Q`, and the choice of map
+matters: it gives the collisional equilibrium
+
+```
+Sxv -> tau theta   =>   D Sxx / Dt = 2 tau theta ,
+```
+
+i.e. Brownian spreading with diffusivity `tau theta = nu`. The reference
+applies its exponential decay *after* the explicit source instead, which sends
+`Sxv -> 0` and freezes `Sxx`, losing the diffusive limit entirely. The two
+agree in the collisionless regime the reference's own test problems use.
+Gate 8 measures the diffusive limit directly and recovers `D = 0.0098` against
+`nu = tau theta = 0.01`.
+
+**Time centring is a correctness requirement, not a refinement.** `Sxv` is
+advanced first and `Sxx` then uses the *trapezoidal* average of `Sxv` across
+the step. In a uniform flow the exact solution is `Sxv = theta t`,
+`Sxx = sigma_x0^2 + theta t^2`, so the Schur complement of Section 5 has
+`Gamma/Svv = sigma_x0^2/(sigma_x0^2 + theta t^2) > 0` for all time. Forward
+Euler on `Sxx` gives `Sxx = sigma_x0^2 + theta(t^2 - n dt^2)` instead -- a
+one-signed lag growing linearly in the step count -- so
+
+```
+Gamma/Svv = 1 - t^2 / (sigma_x0^2 + t^2 - n dt^2)
+```
+
+crosses zero once `n dt^2 = sigma_x0^2`. That was measured at step 11 of the
+Stage-4 uniform-flow gate at level 4 before the trapezoid was used, and the
+first six steps matched the formula above to five digits. It is a purely
+numerical rank collapse and it is indistinguishable in a real run from the
+physical one the diagnostic exists to detect. With the trapezoid the
+telescoping sum gives `Sxx_N = sigma_x0^2 + theta t^2` exactly. This is the
+Stormer--Verlet pairing appropriate to a position-velocity pair, and it is
+what replaces the reference's structural guarantee.
+
+**No Berry connection is needed.** The Julia work
+(`src/berry.jl`, `src/cholesky_DD_3d.jl`) parameterises the Cholesky factor as
+`R(theta) diag(alpha)` and carries a Berry 1-form for the gauge freedom of the
+principal-axis frame. That gauge exists only because the factorisation is not
+unique. The covariance `M` is the physical object and has no gauge freedom, so
+in this formulation there is nothing to connect. The Julia files were used as
+a cross-check on the 3D tensor algebra, as Section 0 says, not as an
+architecture.
+
+**Lagrangian displacement** (Stage 3): `D D_i / Dt = -u_i`, initialised to
+zero (Section 2). Applied unconditionally rather than under `dfmm_source`:
+`dfmm_source` selects whether the *closure* is driven -- the strain production
+of `Pi`, the production of `Q` -- which is what the Euler-reduction gate
+switches off. The second frame's evolution is not a closure model but the
+definition of the frame; it has no modelling content to disable, and the tower
+has no feedback whatsoever on the hyperbolic core, so leaving it on cannot
+perturb that gate. The same reasoning applies to the Liouville terms above,
+and it makes `dfmm_source=.false.` a clean manufactured solution: with `Pi`
+and `Q` pinned at zero, `Svv = theta I` exactly and every component of `Sxx`
+and `Sxv` has a closed form. That is Gate 7.
 
 **Operator order per step**, fixed:
 
@@ -443,6 +548,50 @@ Stage-4 phase-space sector inherits that problem and will be handled by a
 Schur-complement eigenvalue audit on `Svv - Sxv^T Sxx^{-1} Sxv`, reported the
 same way.
 
+### Phase-space realizability
+
+`M` is realizable exactly when `Sxx > 0` and the Schur complement
+
+```
+Gamma = Svv - Sxv^T Sxx^-1 Sxv
+```
+
+is positive semidefinite. In 1D, `Gamma = Svv - Sxv^2/Sxx = Svv - beta^2 =
+gamma^2`, so `Gamma` is the direct generalisation of the reference's
+rank-collapse variable, and
+
+```
+g = sqrt( lam_min( Svv^-1 Gamma ) )
+```
+
+generalises its normalised indicator `gamma/sqrt(Svv)`. `g = 1` means position
+and velocity are uncorrelated; `g -> 0` means the packet has collapsed onto a
+phase-space filament, at which point no Gaussian closure can describe it. This
+is the paper's second indicator. It is computed as `lam_min` of
+`chol(Svv)^-1 Gamma chol(Svv)^-T`, a congruence transform with the same
+spectrum as `Svv^-1 Gamma` but symmetric, so the existing closed-form
+eigenvalue routine applies.
+
+Reported as the **minimum** over cells, for the same reason as
+`lam_min(P)/p`: a maximum of the slack is structurally blind to the cells that
+have already collapsed. `lam_min(Gamma) < 0` is counted and reported, and --
+unlike the pressure cone -- it is **never** repaired, because nothing in the
+update requires `Gamma >= 0`. The exact Liouville flow does preserve `M >= 0`
+(it is `M(t) = Phi M(0) Phi^T` with `Phi' = Jac Phi`), but only if all three
+blocks obey the Liouville equations. At Stage 4 `Svv` does not: it additionally
+carries `div Q`, the BGK relaxation of `Pi`, and its own transport. So
+`Gamma < 0` is the statement that the pressure tensor the moment system
+delivers is no longer consistent with any single Gaussian phase-space packet
+-- which is exactly the closure failure the indicator exists to report. Gate 9
+measures it at `K = 3` and confirms it in float64, not as a float32 artifact.
+
+There is one numerical caveat worth stating. `Gamma` is a difference of two
+quantities that approach each other as the packet spreads, so once
+`g^2 < ~1e-6` float32 cannot resolve its sign. In the collisionless limit `g`
+decays as `sigma_x0/(t sqrt(theta))` without bound -- free streaming genuinely
+correlates position and velocity completely -- so a long collisionless run
+will reach that floor. It is a floor on the diagnostic, not on the state.
+
 ### Wave speeds
 
 Along a face normal `n`, with `P_nn = n_i P_ij n_j`:
@@ -479,18 +628,47 @@ so the budget is `32768 / 1152 = 28` fields. Measured cost by stage:
 | 3 | 23 | 26 560 | yes |
 | 4 | 38 | 43 840 | **no** |
 
-Stages 1--3 therefore extend the single-kernel design. Stage 4 splits into two
-kernels, reusing the pattern already present in this repository for MHD UCT
-face reuse (`mtl_godunov` -> `uct_face_product` kernel writes a global face
-buffer -> `uct_reuse` kernel consumes it):
+Stage 4 does not fit, so **Stages 3 and 4 both use a two-kernel split**,
+reusing the pattern already present in this repository for MHD UCT face reuse
+(`mtl_godunov` -> `uct_face_product` kernel writes a global face buffer ->
+`uct_reuse` kernel consumes it). Stage 3 would fit in one kernel, but using
+the same split at both stages means one code path, and it means the Stage-3
+numerics are unchanged when the Stage-4 fields land:
 
-* `dfmm_core_kernel` — the 20-field hyperbolic core, and it writes the face
-  mass fluxes to a global buffer.
-* `dfmm_passive_kernel` — advects the 18-field passive tower using those
-  stored mass fluxes, so `rho X` transport is exactly consistent with `rho`
-  transport by construction rather than by recomputation.
+* `dfmm_integrator_kernel` — the 20-field hyperbolic core, unchanged from
+  Stage 2, plus a writeout of the face mass fluxes to a global buffer. That
+  buffer is 36 floats per oct (12 faces per direction), indexed by the
+  *relative* subgrid index within a dispatch, so it is `num_subgrids` long,
+  not `ngridmax`. Written *after* the fine-face zeroing, so a face hidden
+  behind refinement arrives as an exact zero and the tower inherits the AMR
+  bookkeeping for free.
+* `dfmm_passive_kernel` — advects the mass-like tower using those stored
+  fluxes, so `rho X` transport is exactly consistent with `rho` transport by
+  construction rather than by recomputation.
 
-Field storage inside the kernels is `float f[NDFMM][6][6][6]` indexed by field
+Measured threadgroup cost of the passive kernel, `(4 + DF_NMASS)` stencil
+fields (rho, u_i, then the tower) plus `DF_NMASS` interface fields:
+6976 B at Stage 3, 24256 B at Stage 4. Both fit.
+
+**Upwind, not HLL, for the tower.** Running `rho X` through HLL as an extra
+field gives `F = a_L X_L + a_R X_R` with `a_L + a_R = F[rho]` but `a_R < 0`,
+so a static fluid (`F[rho] = 0`, `S_L = -c`, `S_R = +c`) still produces the
+flux `(c/2)(X_L - X_R)`. That smears `X` at the sound speed where nothing
+moves. `Pi` and `Q` have to accept that -- their fluxes are genuinely
+non-advective, so they must ride the acoustic waves -- but for a field whose
+exact evolution is `D X / Dt = 0` it would destroy `d L_i / d x_j` within a
+sound-crossing time, which is the one thing Stage 3 exists to measure. The
+tower therefore uses
+
+```
+F[rho X] = F[rho] * X_upwind ,   upwind side chosen by sign(F[rho]),
+```
+
+the standard finite-volume treatment of an advected scalar, exact for
+`F[rho] = 0`. It needs no frame rotation, since it is a scalar multiple of a
+lab-frame flux.
+
+Field storage inside the kernels is `float f[N][6][6][6]` indexed by field
 rather than named struct members, so the tensor loops stay compact.
 
 ### Precision
@@ -573,18 +751,56 @@ The 1D reduction against `~/dfmm/py-1d` Sod and cold-sinusoid is *not* yet
 run; it is the one Stage-2 gate outstanding and is recorded as such in
 Section 8.
 
-**Stage 3 — Lagrangian coordinate.** `NVAR=23`. Pure passive advection;
-`d L_i / d x_j` gives the deformation tensor and hence the local compression
-ratio and a properly defined local Knudsen number.
+**Stage 3 — Lagrangian displacement.** `NVAR=23`, `DFMM=3`. **Implemented and
+gated.** Adds `rho D_i` with `D D_i/Dt = -u_i`, so
+`d L_i/d x_j = delta_ij + d D_i/d x_j` gives the deformation tensor, and with
+it the accumulated compression factor `sigma_max(dL/dx)` and a properly
+defined local Knudsen number.
 
-Gate: exact advection in uniform flow; `L_i` deviation from `x_i - u t` at
-round-off.
+**Stage 4 — phase-space covariance.** `NVAR=38`, `DFMM=4`. **Implemented and
+gated.** Adds `rho Sxx_ij` and `rho Sxv_ij`, the Liouville sources, the
+asymptotic-preserving relaxation of `Sxv`, and the Schur-complement rank
+indicator `g`.
 
-**Stage 4 — phase-space covariance.** `NVAR=38`. Two-kernel split. Per-axis
-`gamma` rank-collapse diagnostic.
+Gates, all on an Apple M3 with `COMPILER=METAL NDIM=3 HYDRO=1 DFMM=4`:
 
-Gate: 1D reduction against the reference `alpha`/`beta` trajectories;
-Schur-complement positivity audit.
+| Gate | Setup | Criterion | Result |
+|---|---|---|---|
+| 6 Uniform advection | `dfmm_ic_uadv=0.3`, `tau=-1`, level 4, `t=0.2024` | closed form in a flow with no velocity gradient | `D_i` vs `-u t` to **2.0e-8** (3 ULP); `Sxv = theta t I` to 2.2e-7 with off-diagonals **exactly zero**; `Sxx = sigma_x0^2 + theta t^2` to 6e-8; `g` vs `sigma_x0/sqrt(sigma_x0^2+t^2)` to 2.6e-5; every field uniform to the bit |
+| 7 Frozen shear | `dfmm_ic_shear=0.01`, `dfmm_source=.false.`, `tau=-1`, level 4/5/6 | isolates `-Sxv G^T`: `Sxv_zx = -g theta t^2/2`, `Sxx_xz = -g theta t^3/6` | `Sxv_zx`/exact-discrete = 0.9695 / 0.9957 / **1.00003**, spread 5.4e-2 / 1.6e-2 / **4.2e-3**; `Sxx_xz` = 0.9766 / 0.9973 / **1.00024**, spread 4.2e-2 / 1.1e-2 / **2.3e-3**; `Sxv_xz`, `Sxv_xy`, `Sxx_xy` **exactly zero**; `\|Pi\|/p <= 3e-8` throughout |
+| 8 Diffusive limit | `dfmm_ic_uadv=0.3`, `tau=0.01`, level 4, `t=0.506` (`t/tau=51`) | AP map must give `Sxv -> tau theta` and `Sxx -> sigma_x0^2 + 2 tau theta t` | `Sxv = 0.0099999979` vs `0.01` (**2.1e-7**); `Sxx` to 6.4e-4; implied `D = 0.0098` vs `nu = tau theta = 0.01`; `min g = 0.9951`, `n(Gamma<0) = 0` |
+| 9 Strain box | `INIT=BLOWUP`, Family-B `K = 0.1 / 1 / 3`, level 5, one deformation time | nontrivial 3D advection and deformation; indicators must respond | `mcons = 0`, `econs <= 1.1e-7`; `sigma_max(dL/dx)` = 2.24 / 2.93 / 3.34 so `Kn_local` = 0.051 / 0.212 / 0.418; `min g` = 0.987 / 0.625 / **0.000** with `n(Gamma<0)` = 0 / 0 / **448**; `min lam(P)/p` = 0.957 / 0.655 / 0.365 (K=1 value reproduces the Stage-2 ladder) |
+| 3', 5' Regression | Gates 3 and 5 rerun under a `DFMM=4` binary | the hyperbolic core must be untouched | `max \|Pi\|/p` = 8.975 / 8.926 / 8.899e-5 and `max \|q\|/(p c_s)` = 1.960 / 1.872 / 1.847e-4 at level 4/5/6 -- **bit-for-bit** the Stage-2 values |
+
+Three results worth stating explicitly:
+
+* **Gate 6 found a real defect and the fix is in Section 4.** Before the
+  trapezoidal pairing, the first six printed values of `g` matched
+  `1 - n^2 dt^2/(sigma_x0^2 + n(n-1) dt^2)` to five digits -- confirming the
+  Liouville sector -- and then crossed zero at step 11. The agreement is what
+  made the diagnosis possible: the discrete solution was exactly right, so the
+  scheme was wrong.
+* **`Gamma < 0` at `K = 3` is real, not round-off.** Recomputed from the
+  snapshot in float64, `lam_min(Svv^-1 Gamma)` reaches `-0.141` in 448 of
+  32768 cells (1.4%), with Cauchy--Schwarz saturation 1.14. At `K = 1` the
+  margin is comfortable (`min = 0.390`). So the second indicator fires one
+  rung *after* the first, and before `lam_min(P)` does.
+* **`sigma_max(dL/dx)` and `min g` are resolution-limited peaks, not
+  converged numbers.** At `K = 1` they run 2.29 / 2.93 / 3.44 and
+  0.716 / 0.625 / 0.529 at level 4/5/6: each is an extremum over cells of a
+  quantity that keeps sharpening, so refining finds more of it. `Kn_local` is
+  therefore a *lower bound* that grows with resolution -- which is itself the
+  statement the note's check 1 makes. By contrast `min lam(P)/p` converges
+  cleanly (0.6836 / 0.6554 / 0.6486, differences 2.8e-2 then 0.7e-2), and the
+  Lagrangian residual `|rho/det(dL/dx) - 1|` falls 9.7e-2 / 7.5e-2 / 4.3e-2,
+  so the deformation map itself carries a ~4% error at level 6.
+
+**A build trap worth recording.** `bin/Makefile` does not treat `INIT=` as a
+dependency of `condinit.o`, so changing `INIT=` without `make clean` silently
+relinks the *previous* problem's initial condition. Doing this produced a
+uniform static state for a blowup namelist -- `ekin = eint`, `|Pi|/p = 0` --
+which looks exactly like a broken initial condition. Always `make clean` when
+changing `INIT=`.
 
 **Stage 5 — the blowup problem.** Initial and forcing conditions from the
 construction, run as a compressible gas at prescribed `Kn`, with all three
@@ -605,8 +821,10 @@ Verified in this repository at the time of writing:
   This was a pre-existing break on this toolchain, not caused by dfmm.
 * Threadgroup-memory budget arithmetic in Section 6, from the existing
   `local_subgrid_t` / `interfaces_*_t` declarations.
-* All four Stage-1 gates and all four run Stage-2 gates in Section 7, from
-  fresh runs.
+* All four Stage-1 gates, all four Stage-2 gates, and all five Stage-3/4
+  gates in Section 7, from fresh runs.
+* That the hyperbolic core is untouched by Stages 3 and 4: Gates 3 and 5
+  reproduce their Stage-2 numbers bit-for-bit under a `DFMM=4` binary.
 * That AMR prolongation (`refine.metal` / `interpol_hydro.f90`) and
   restriction (`upload_kernel`) already treat all `NVAR` fields with a
   conservative linear interpolation and a plain volume average, which is the
@@ -637,11 +855,30 @@ Corrected during Stage 2:
   both absent: each is O(1) and they cancel to O(grad theta). The predictor
   uses their analytically combined form so the cancellation is exact there.
 
-Outstanding at Stage 2:
+Corrected during Stages 3 and 4:
+* `Sxx` must use the trapezoidal average of `Sxv` across the step, not its
+  value at the start (Section 4). Found by Gate 6, where the forward-Euler
+  form drove the rank indicator through zero at a predictable step number.
+* The Lagrangian label must be stored as the displacement `L_i - x_i`, not as
+  `L_i` (Section 2), or the periodic wrap poisons the deformation tensor.
+* The tower must be advected by upwinding on the stored face mass flux, not by
+  passing `rho X` through HLL as an extra field (Section 6).
+* `output_hydro.f90` and `cons_from_prim` / `prim_from_cons` now distinguish
+  the density-like block from the mass-like tower, which is why
+  `ndfmm_dens` / `ndfmm_mass` exist in `hydro_parameters.f90`. The Stage-1 fix
+  recorded above ("the loops now stop at `nvar-ndfmm`") was correct only while
+  every dfmm field was density-like.
+
+Outstanding:
 * The 1D reduction against `~/dfmm/py-1d` Sod and cold-sinusoid. The 3D tensor
   algebra has been checked against the reference *analytically* (`R_xxxx =
-  3 P_xx^2/rho`, `CSCOEF`, the `q_i = Q_ijj/2` contraction) but not yet by
-  running the two codes on the same problem.
+  3 P_xx^2/rho`, `CSCOEF`, the `q_i = Q_ijj/2` contraction, and in Section 4
+  the full `alpha`/`beta` <-> `Sxx`/`Sxv` equivalence) but not yet by running
+  the two codes on the same problem. Note that a *quantitative* comparison of
+  the moment sector is not available even in principle: `py-1d` carries
+  `P_perp` with flux `u P_perp`, dropping `Q_yyx`, so it is a reduced model
+  rather than the 1D restriction of the 20-moment system. The dual-frame
+  sector, by contrast, is identical and Section 4 proves it.
 
 Assumed, to be measured:
 * That the Wick closure is adequate through the interesting part of the blowup
@@ -649,7 +886,10 @@ Assumed, to be measured:
   upgrade "validates the framework more than it extends the working range", so
   the expectation is that Wick plus the realizability diagnostic is the right
   instrument, and that the diagnostic firing *is* the result.
-* float32 adequacy for Stage 4 (Section 6).
+* float32 adequacy for Stage 4. Partly measured now: the state variables are
+  fine (Gates 6-8 agree with closed forms to 2e-7), but the *diagnostic*
+  `Gamma` is a cancelling difference and loses its sign below `g^2 ~ 1e-6`
+  (Section 5). Gate 9's violation was confirmed in float64 for that reason.
 
 ---
 
