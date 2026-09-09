@@ -807,6 +807,16 @@ Three results worth stating explicitly:
   problem's initial condition. Doing this produced a uniform static state for
   a blowup namelist -- `ekin = eint`, `|Pi|/p = 0` -- which looks exactly like
   a broken initial condition. Always `make clean` when changing `INIT=`.
+* **Stellar's login node and its GPU nodes are different CPU architectures.**
+  The login node is an Intel Xeon Gold 6248R (Cascade Lake, AVX-512); every
+  node in the `gpu` partition is AMD EPYC (7H12 on `stellar-m01g*`, 7453 on
+  `stellar-k09g1`), which has no AVX-512. NVHPC defaults to `-tp=native`, so a
+  login-node build dies on every GPU node with
+  `Illegal instruction (core dumped)` before printing a single line -- no
+  RAMSES output at all, which reads like a corrupt binary rather than an ISA
+  mismatch. Build inside the job (serial `make`, per the agent guide) or pass
+  an explicit `-tp`. Cost two wasted jobs to identify; pinning to a different
+  GPU node does not help, because they are all AMD.
 * An unrecognised `DFMM=` value used to fall through to `NDFMM = 0` silently.
   This bit a build-verification sweep written in zsh: zsh does **not**
   word-split an unquoted `$var`, so `make ... $cfg` with
@@ -853,6 +863,21 @@ Verified in this repository at the time of writing:
   `DFMM=0/4 INIT=BLOWUP` and `DFMM=0/4 INIT=TAYLORGREEN`, each confirmed to
   carry the intended `-DNDFMM=` rather than only to exit zero. See the second
   build trap in Section 7 for why that last clause is not redundant.
+* That the **CUDA/NVHPC path is unbroken** by the shared-file edits, tested on
+  a Stellar A100 (nvhpc/25.5, `sm_80`, built on the GPU node): the baseline
+  `COMPILER=NVHPC NDIM=3 HYDRO=1` build is clean with zero errors -- including
+  all four `incomp_*` modules, which are therefore nvfortran-clean and not
+  merely gfortran-clean -- and `sedov3d` runs to `Run completed` with
+  `mcons = -6.5e-13`, `econs = 9.7e-9`. `tout_exact` was verified there too:
+  for `tout = 5.0e-6` the snapshot lands at `5.00000000000004e-6` with it and
+  at `5.59473e-6` without, an **11.9%** overshoot -- much worse than the 0.9%
+  measured on Metal, because sedov's `dt` is growing fast at that point.
+* That both new rungs **refuse** under CUDA rather than running silently
+  wrong: `DFMM>0 COMPILER=NVHPC` is a Makefile error, and
+  `incompressible=.true.` stops at startup with exit 1. Neither is ported --
+  the dfmm kernels are Metal-only and `incomp_step`'s device sync is
+  `metal_uold_to_host` / `metal_unew_to_device` -- and both would otherwise
+  have produced plausible-looking wrong answers.
 * That AMR prolongation (`refine.metal` / `interpol_hydro.f90`) and
   restriction (`upload_kernel`) already treat all `NVAR` fields with a
   conservative linear interpolation and a plain volume average, which is the
