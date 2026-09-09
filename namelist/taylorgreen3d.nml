@@ -1,0 +1,170 @@
+The Taylor-Green vortex: the verification problem for the incompressible
+rungs (doc/incompressible.md Gates 4 and 6).
+
+Compile.  ALWAYS 'make clean' when changing INIT= or DFMM=; the Makefile does
+not treat either as a dependency of condinit.o, so a stale condinit.o will
+silently run the PREVIOUS problem's initial condition and hand you a
+plausible-looking wrong answer.
+
+  rung 1, incompressible Navier-Stokes -- Gate 4, the exact-solution test:
+    cd bin && make clean && make COMPILER=METAL NDIM=3 HYDRO=1 DFMM=0 INIT=TAYLORGREEN
+    ... with incomp_stress='viscous'
+
+  rung 4, incompressible dfmm -- Gate 6, the Chapman-Enskog limit:
+    cd bin && make clean && make COMPILER=METAL NDIM=3 HYDRO=1 DFMM=4 INIT=TAYLORGREEN
+    ... with incomp_stress='moment'
+
+As in namelist/incomp_blowup3d.nml the two rungs differ in ONE entry,
+incomp_stress, and share dfmm_tau, so they differ in the closure alone.
+Do not write an ampersand-prefixed group name anywhere in this header:
+gfortran's namelist reader treats it as the start of that group and then fails
+on the surrounding prose.
+
+WHY THIS PROBLEM.  With k = 2 pi/boxlen,
+
+    u = ( sin(kx) cos(ky), -cos(kx) sin(ky), 0 ) * exp(-2 nu k^2 t)
+
+is an EXACT solution of incompressible Navier-Stokes.  It is
+divergence-free, and its nonlinear term (u.grad)u is a pure gradient, so the
+pressure absorbs the advection entirely and the solution is pure viscous
+decay at a rate set by nothing but nu k^2.  That makes it a simultaneous test
+of the viscous term, the Leray projection and the time integrator -- and,
+because the SHAPE must not distort while the amplitude decays, a sharp test
+that the advection scheme recognises a pure gradient.  u_z must stay
+identically zero and rho must stay uniform to the bit.
+
+GATE 4 (rung 1).  nu = incomp_p0*dfmm_tau/incomp_rho0, so the values below
+(dfmm_tau = 0.02, p0 = rho0 = 1) give nu = 0.02 and
+
+    max|u|(t=0.1) / max|u|(0) = exp(-2 nu k^2 t) = 0.8539234976
+
+with 2 nu k^2 = 1.5791367 and a viscous time 1/(2 nu k^2) = 0.6333, i.e.
+t = 0.1 is 0.158 viscous times -- long enough to be a real test of the
+dissipation rate, short enough that the amplitude has not decayed into
+round-off.  Measured at level 5 (32^3): max|u| ratio 1.0000007,
+max|u - u_exact| 6.0e-7, u_z identically zero, div u 1.3e-15.  The standalone
+solver gives 2.3e-5 / 5.3e-6 / 6.8e-7 at N = 8/16/32, which is the RK2 rate at
+dt ~ dx.
+
+GATE 6 (rung 4).  Rebuild at DFMM=4, set incomp_stress='moment', and run the
+same problem at dfmm_tau = 0.02, 0.002, 0.0005.  Rung 4 must reduce to rung 1
+as tau -> 0, since nu = p_0 tau/rho_0 is the Chapman-Enskog viscosity of the
+evolved stress.  The analytic rung-1 answers at t = 0.1 are
+
+    dfmm_tau    nu        max|u|/max|u|(0)     measured ratio    max|Pi|/p_0
+    -----------------------------------------------------------------------
+    0.02        0.02        0.8539234976          1.0295           0.243
+    0.002       0.002       0.9843326629          1.00075          0.0247
+    0.0005      0.0005      0.9960599407          1.000166         0.0062
+
+where "measured ratio" is rung 4's amplitude divided by the analytic value in
+the column to its left.  The convergence is first order in tau, as it must be.
+The 3% excess at tau = 0.02 is NOT an error: the evolved stress lags the
+strain, so it dissipates LESS than the Newtonian stress does, and the flow
+decays more slowly.  That lag is the whole reason the moment rungs exist.  Use
+tau = 0.0005 as the regression value; use tau = 0.02 to see the lag.
+
+Q_ijk is deliberately absent from the incompressible rungs.  The
+Chapman-Enskog heat flux is proportional to grad theta, and theta = p_0/rho_0
+is a constant here, so q_CE vanishes identically -- carrying Q would add ten
+advected fields that are analytically zero.  The dual-frame sector at DFMM=4
+is still carried and still diagnosed.
+
+TWO THINGS THAT WILL MISLEAD YOU IF YOU READ THE LOG NAIVELY.
+  * The 'incomp level=' diagnostic prints the state AFTER the step whose
+    header line precedes it, so the first one is already one step old.  The
+    initial max|u| is not in the log at all.  On a 32^3 collocated grid the
+    discrete maximum of |u| is 0.9904392375, not 1, because no cell centre
+    lands on the continuum extremum -- normalise by that, or better, compare
+    against the analytic field sampled on the SAME cell centres, which is what
+    the numbers above do.  The log prints four significant digits, so it
+    resolves the ratio only to ~1e-4; the 6e-7 above comes from the snapshot.
+  * dfmm_tau lives in both DFMM_PARAMS and INCOMP_PARAMS, and read_params
+    reads INCOMP_PARAMS second (amr/read_params.f90:1063), so the
+    INCOMP_PARAMS value wins.  Set it in one group only.
+
+WHAT TO WATCH IN THE LOG.
+  * div u every step.  It must stay at 1e-15.  Anything larger is a bug, not
+    a tolerance.
+  * mcons exactly zero.  econs is MEANINGLESS in these rungs: eint is pinned
+    at 3 p_0/2, so dissipated kinetic energy leaves the budget instead of
+    heating the gas.
+  * E_trunc/E, the energy in the band the 2/3 dealiasing removes.  1.7e-16 for
+    rung 1 here; it is the diagnostic that announces under-resolution first.
+
+RESOLUTION.  levelmin must equal levelmax and the grid must be a power of
+two; anything else is rejected at startup by incomp_validate.  The solver is
+host-side float64, so cost scales as the FFT: level 5 (32^3) is ~0.2 s/step.
+
+EXACT OUTPUT TIME.  tout_exact=.true. clips the coarse timestep so the
+snapshot lands ON tout instead of on the first step past it.  It matters here
+because the deliverable is an amplitude AT a time compared against
+exp(-2 nu k^2 t): a 0.9% overshoot in t is a 1.4% error in the reference
+value, which would swamp the 6e-7 the solver actually achieves.  With it the
+landing is exact to 2e-14 relative.
+
+&RUN_PARAMS
+hydro=.true.
+ncontrol=1
+nrestart=0
+nremap=0
+nsubcycle=10*1
+verbose=.false.
+nstepmax=100000
+nsuperoct=2
+/
+
+&AMR_PARAMS
+levelmin=5
+levelmax=5
+ngridtot=6000
+ncachemax=3000
+nexpand=1
+boxlen=1.0
+/
+
+&INIT_PARAMS
+nregion=1
+region_type(1)='square'
+x_center=0.5
+y_center=0.5
+z_center=0.5
+length_x=10.0
+length_y=10.0
+length_z=10.0
+exp_region=10.0
+d_region=1.0
+u_region=0.0
+v_region=0.0
+w_region=0.0
+p_region=1.0
+/
+
+&OUTPUT_PARAMS
+foutput=1000000   ! >0 so the tout-driven snapshot fires (amr_step.f90:107)
+tout=0.1
+tout_exact=.true. ! land the snapshot ON tout; the answer is a value AT a time
+/
+
+&HYDRO_PARAMS
+gamma=1.6666666666666667
+courant_factor=0.4
+slope_type=1
+riemann='hll'
+/
+
+&INCOMP_PARAMS
+incompressible=.true.
+incomp_p0=1.0
+incomp_rho0=1.0
+incomp_stress='viscous'   ! rung 1; set 'moment' for rung 4 (needs DFMM=4)
+incomp_diag=.true.
+dfmm_tau=0.02             ! nu = incomp_p0*dfmm_tau/incomp_rho0
+/
+
+&DFMM_PARAMS
+dfmm_prandtl=0.6666666666666667
+dfmm_source=.true.
+dfmm_diag=.false.
+dfmm_ic_sigmax=0.02
+/

@@ -772,6 +772,11 @@ Gates, all on an Apple M3 with `COMPILER=METAL NDIM=3 HYDRO=1 DFMM=4`:
 | 9 Strain box | `INIT=BLOWUP`, Family-B `K = 0.1 / 1 / 3`, level 5, one deformation time | nontrivial 3D advection and deformation; indicators must respond | `mcons = 0`, `econs <= 1.1e-7`; `sigma_max(dL/dx)` = 2.24 / 2.93 / 3.34 so `Kn_local` = 0.051 / 0.212 / 0.418; `min g` = 0.987 / 0.625 / **0.000** with `n(Gamma<0)` = 0 / 0 / **448**; `min lam(P)/p` = 0.957 / 0.655 / 0.365 (K=1 value reproduces the Stage-2 ladder) |
 | 3', 5' Regression | Gates 3 and 5 rerun under a `DFMM=4` binary | the hyperbolic core must be untouched | `max \|Pi\|/p` = 8.975 / 8.926 / 8.899e-5 and `max \|q\|/(p c_s)` = 1.960 / 1.872 / 1.847e-4 at level 4/5/6 -- **bit-for-bit** the Stage-2 values |
 
+Reproduce Gates 6-8 and 3'/5' with `namelist/dfmm_shear3d.nml` and Gate 9
+with `namelist/dfmm_blowup3d.nml`; the incompressible counterparts of
+Gates 6-9 are `namelist/taylorgreen3d.nml` and `namelist/incomp_blowup3d.nml`
+(`doc/incompressible.md` Section 4).
+
 Three results worth stating explicitly:
 
 * **Gate 6 found a real defect and the fix is in Section 4.** Before the
@@ -795,12 +800,22 @@ Three results worth stating explicitly:
   Lagrangian residual `|rho/det(dL/dx) - 1|` falls 9.7e-2 / 7.5e-2 / 4.3e-2,
   so the deformation map itself carries a ~4% error at level 6.
 
-**A build trap worth recording.** `bin/Makefile` does not treat `INIT=` as a
-dependency of `condinit.o`, so changing `INIT=` without `make clean` silently
-relinks the *previous* problem's initial condition. Doing this produced a
-uniform static state for a blowup namelist -- `ekin = eint`, `|Pi|/p = 0` --
-which looks exactly like a broken initial condition. Always `make clean` when
-changing `INIT=`.
+**Two build traps worth recording.**
+
+* `bin/Makefile` does not treat `INIT=` as a dependency of `condinit.o`, so
+  changing `INIT=` without `make clean` silently relinks the *previous*
+  problem's initial condition. Doing this produced a uniform static state for
+  a blowup namelist -- `ekin = eint`, `|Pi|/p = 0` -- which looks exactly like
+  a broken initial condition. Always `make clean` when changing `INIT=`.
+* An unrecognised `DFMM=` value used to fall through to `NDFMM = 0` silently.
+  This bit a build-verification sweep written in zsh: zsh does **not**
+  word-split an unquoted `$var`, so `make ... $cfg` with
+  `cfg="DFMM=4 INIT=BLOWUP"` reaches make as **one** argument, make reads it as
+  `DFMM = "4 INIT=BLOWUP"`, no `ifeq` branch matches, and the build succeeds as
+  a plain-hydro binary. Two sweeps reported "all stages build" while building
+  `NDFMM = 0` every time. The selector now `$(error)`s on any value outside
+  `0..4`, and the sweep greps the recorded `-DNDFMM=` out of the build log
+  rather than trusting the exit code.
 
 **Stage 5 — the blowup problem.** Initial and forcing conditions from the
 construction, run as a compressible gas at prescribed `Kn`, with all three
@@ -825,6 +840,14 @@ Verified in this repository at the time of writing:
   gates in Section 7, from fresh runs.
 * That the hyperbolic core is untouched by Stages 3 and 4: Gates 3 and 5
   reproduce their Stage-2 numbers bit-for-bit under a `DFMM=4` binary.
+* That every stage selector still builds after the shared-file edits that
+  Stages 3, 4 and the incompressible rungs made to `amr_commons.f90`,
+  `read_params.f90`, `bin/Makefile`, `pm/newdt_fine.f90`,
+  `hydro/courant_fine.f90`, `hydro/godunov_fine.f90`, `hydro/condinit.f90` and
+  `hydro/hydro_parameters.f90`: clean builds of `DFMM=1/2/3/4 INIT=DFMMTEST`,
+  `DFMM=0/4 INIT=BLOWUP` and `DFMM=0/4 INIT=TAYLORGREEN`, each confirmed to
+  carry the intended `-DNDFMM=` rather than only to exit zero. See the second
+  build trap in Section 7 for why that last clause is not redundant.
 * That AMR prolongation (`refine.metal` / `interpol_hydro.f90`) and
   restriction (`upload_kernel`) already treat all `NVAR` fields with a
   conservative linear interpolation and a plain volume average, which is the

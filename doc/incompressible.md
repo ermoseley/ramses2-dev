@@ -186,6 +186,17 @@ records float32 adequacy for the Stage-4 phase-space sector as *assumed*.
 
 ## 4. Gates
 
+Reproducers: `namelist/taylorgreen3d.nml` for Gates 4 and 6,
+`namelist/incomp_blowup3d.nml` for Gate 7. Gates 1, 3 and 5 are
+standalone driver tests of the operators, with no namelist.
+
+Gates 4 and 6 were re-run from the committed namelist after it was written, to
+check that the namelist alone reproduces them: Gate 4 gives `max|u|` ratio
+**1.000000668**, `max|u - u_exact|` **5.65e-7**, `u_z` identically zero, `rho`
+uniform to the bit, and `t = 0.100000000000002`; Gate 6 gives
+**1.029621 / 1.000745 / 1.000166** at `max|Pi|/p_0 = ` 0.2435 / 0.0247 /
+0.0062, with `div u <= 1.75e-15` and `n(Gamma<0) = 0` throughout.
+
 | Gate | Setup | Criterion | Result |
 |---|---|---|---|
 | 1 FFT | random field, `N = 8, 16, 32` | round-trip and a direct DFT | round-trip **1.6e-16**; vs direct DFT **2.1e-14**; spectral `d/dx sin(2kx)` **3.3e-14** against a signal of 12.6 |
@@ -206,6 +217,16 @@ reading -- a compressible gas can relieve strain by expanding and can raise
 one can do neither -- and it is exactly the kind of statement the four-rung
 design exists to isolate. It also means the compressible runs were, if
 anything, *optimistic* about check 7.
+
+**A defect Gate 6 exposed, now fixed.** Running `incomp_stress='moment'`
+under a `DFMM=0` binary segfaulted on the first step: the moment closure reads
+`Pi` out of the hydro state, those slots do not exist, and `incomp_validate`
+had no opinion about it. Since the two incompressible rungs are *designed* to
+differ in that one namelist entry, the mismatch is the single most likely user
+error in the whole four-rung setup, and a SIGSEGV is a bad way to report it.
+`incomp_validate` now rejects `incomp_stress='moment'` when `ndfmm < 5` and
+names the build flag to change. Verified: the run stops at startup with
+`incomp_stress='moment' needs the Pi fields; rebuild with DFMM>=1`.
 
 **Two reporting caveats.**
 
