@@ -55,6 +55,19 @@ contains
             r%levelmin, r%nlevelmax
        stop 1
     endif
+#ifdef _CUDA
+    ! incomp_step keeps the state on the host between steps and syncs the
+    ! device around itself, and those sync calls exist for Metal only
+    ! (metal_uold_to_host / metal_unew_to_device).  Under CUDA the state lives
+    ! on the device, so the gather would read a stale host shadow and the run
+    ! would look plausible while evolving the initial condition -- the exact
+    ! failure this rung already hit once on the Metal path.  Refuse instead.
+    write(*,*)'incompressible is not ported to CUDA: the device sync in', &
+         ' incomp_step is Metal-only, so the gather would read a stale host', &
+         ' copy.  Build with COMPILER=METAL, or add gpu_ equivalents of', &
+         ' metal_uold_to_host / metal_unew_to_device.'
+    stop 1
+#endif
     n = incomp_nside(r)
     if(.not.is_pow2(n))then
        write(*,*)'incompressible requires a power-of-two grid; got n = ',n

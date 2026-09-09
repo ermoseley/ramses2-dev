@@ -215,6 +215,17 @@ endif
 #############################################################################
 # NVHPC compiler (optional -gpu=$(CUDA_ARCH),fastmath in FFLAGS and LIBS)
 ifeq ($(COMPILER),NVHPC)
+   # The dfmm sector has Metal kernels only (metal/kernels/dfmm.metal); there
+   # is no gpu_dfmm_godunov.  A DFMM>0 NVHPC build would compile -- the host
+   # side is compiler-agnostic -- and then dispatch to gpu_godunov, which
+   # knows nothing about ivar 6..NVAR, so the dfmm fields would sit unadvected
+   # while the run reported itself as a dfmm run.  Fail instead.
+   ifneq ($(NDFMM),0)
+      $(error DFMM is not ported to CUDA: the kernels are Metal-only, and an \
+NVHPC build would dispatch to gpu_godunov and leave ivar 6..$(NVAR) \
+unadvected.  Build the dfmm rungs with COMPILER=METAL, or port \
+metal/kernels/dfmm.metal to gpu/.)
+   endif
    ifeq ($(PAPER),1)
       DEFINES += -DPAPER
    endif
