@@ -4518,11 +4518,11 @@ extern "C" void mtl_dfmm_diag(int head_idx, int num_octs,
      * slot is wrong here.  Slots 4 and 5 (the heat-flux diagnostics) are
      * written only at Stage 2. */
     float big = 1.0e30f;
-    uint32_t h[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    uint32_t h[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
     memcpy(&h[0], &big, sizeof(float));
     id<MTLBuffer> diag =
         [s_device newBufferWithBytes:h
-                              length:8 * sizeof(uint32_t)
+                              length:9 * sizeof(uint32_t)
                              options:MTLResourceStorageModeShared];
 
     MTLSize tg_size   = {64, 1, 1};
@@ -4542,6 +4542,10 @@ extern "C" void mtl_dfmm_diag(int head_idx, int num_octs,
     [enc setBytes:&dx       length:sizeof(float) atIndex:8];
     [enc setBytes:&tau_pi   length:sizeof(float) atIndex:9];
     [enc setBytes:&tau_q    length:sizeof(float) atIndex:10];
+    float hdbg[16] = {0};
+    id<MTLBuffer> dbgbuf = [s_device newBufferWithBytes:hdbg length:16*sizeof(float)
+                                               options:MTLResourceStorageModeShared];
+    [enc setBuffer:dbgbuf offset:0 atIndex:11];
     [enc dispatchThreadgroups:grid_size threadsPerThreadgroup:tg_size];
     [enc endEncoding];
     [cmd commit];
@@ -4549,9 +4553,13 @@ extern "C" void mtl_dfmm_diag(int head_idx, int num_octs,
 
     float *r = (float *)diag.contents;
     *lam_min = 16.0f - r[7];
-    if (getenv("DFMM_DIAG_RAW"))
-        fprintf(stderr, "[dfmm diag raw] r0=%g r1=%g r2=%g r3=%g r4=%g r5=%g r6=%g r7=%g -> lam=%g\n",
-                r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], 16.0f - r[7]);
+    if (getenv("DFMM_DIAG_RAW")) {
+        float *g = (float *)dbgbuf.contents;
+        fprintf(stderr, "[dfmm raw] lam=%g ani=%g viol=%g | argmin: rho=%g p=%g lam=%g ani=%g "
+                "Pi=(%g %g %g %g %g %g) oct=%g cell=%g\n",
+                16.0f - r[7], r[2], r[8],
+                g[0], g[1], g[2], g[3], g[4], g[5], g[6], g[7], g[8], g[9], g[10], g[11]);
+    }
     *dev_ns  = r[1];
     *ani_max = r[2];
     *nbad    = r[3];

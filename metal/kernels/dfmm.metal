@@ -130,6 +130,13 @@ constant float DF_GM1     = 2.0f / 3.0f;
  * is safe at Stage 1 and correct once Q_ijk is evolved at Stage 2. */
 constant float DF_CSCOEF  = 3.0f + 2.449489742783178f;   /* 3 + sqrt(6) */
 
+/* Offset for the realizability atomic; see dfmm_diag_kernel. */
+constant float DF_LAM_OFF = 16.0f;
+
+/* Largest admissible enlargement of the HLL wave speed, as a multiple of the
+ * signal-speed estimate.  Bounded by 1/courant_factor; see df_hll_flux. */
+constant float DF_ABOOST_MAX = 1.25f;
+
 /* ---------------------------------------------------------------------------
  * Global-buffer accessors.  Fortran column-major uold(cell, ivar, oct).
  * --------------------------------------------------------------------------*/
@@ -402,6 +409,35 @@ static inline void df_phys_flux(thread const float *w, thread float *F) {
 #endif
 }
 
+/* Is a conserved state realizable?  Requires positive density, positive
+ * pressure, and a positive-semidefinite pressure tensor -- the last being the
+ * statement that a^T P a = m Int (a.c)^2 f d3v >= 0 for every direction a.
+ * Pi is density-like, so its conserved and primitive slots coincide. */
+static inline bool df_state_ok(thread const float *U, float smallr) {
+    float rho = U[DI_RHO];
+    if (!(rho > smallr)) return false;
+    float ekin = 0.5f*(U[DI_UX]*U[DI_UX] + U[DI_UY]*U[DI_UY]
+                     + U[DI_UZ]*U[DI_UZ])/rho;
+    float p = DF_GM1*(U[DI_P] - ekin);
+    if (!(p > 0.0f)) return false;
+    float Pm[6]; df_P_sym6(p, &U[DI_PI], Pm);
+    return df_lam_min_sym6(Pm) >= 0.0f;
+}
+
+/* Signed distance of a conserved state from the realizability cone, as
+ * lam_min(P)/p.  Positive inside, negative outside; a smooth function of the
+ * state apart from the density and pressure floors, which is what lets it be
+ * used inside a numerical flux without breaking conservation. */
+static inline float df_cone_margin(thread const float *U, float smallr) {
+    float rho = max(U[DI_RHO], smallr);
+    float ekin = 0.5f*(U[DI_UX]*U[DI_UX] + U[DI_UY]*U[DI_UY]
+                     + U[DI_UZ]*U[DI_UZ])/rho;
+    float p = DF_GM1*(U[DI_P] - ekin);
+    if (!(p > 0.0f)) return -1.0f;
+    float Pm[6]; df_P_sym6(p, &U[DI_PI], Pm);
+    return df_lam_min_sym6(Pm)/p;
+}
+
 /* ===========================================================================
  * HLL / LLF flux for the DF_NV-field state.
  *
@@ -436,12 +472,68 @@ static inline void df_hll_flux(thread float *wl, thread float *wr,
     float FL[DF_NV], FR[DF_NV], UL[DF_NV], UR[DF_NV];
     df_phys_flux(wl, FL);
     df_phys_flux(wr, FR);
+    df_prim_to_cons(wl, UL);
+    df_prim_to_cons(wr, UR);
+
+    /* ------------------------------------------------------------------
+     * Realizability-preserving wave speed (doc/dfmm_3d.md Section 5 item 2).
+     *
+     * Transport is the only place the scheme can leave the realizability
+     * cone, and the correct statement of transport positivity for a moment
+     * system is to bound the FLUX, not the signal speed.  The split states
+     *     V_L = U_L - F_L/a ,   V_R = U_R + F_R/a
+     * are the states whose convex combinations the update forms, so it is
+     * they -- not the cell states -- that must have a positive-semidefinite
+     * pressure tensor.  Enlarge a until both do.  V -> U as a -> infinity, so
+     * this terminates whenever the reconstructed states are themselves
+     * admissible; the bound of eight doublings is a backstop for when they
+     * are not.
+     *
+     * Enlarging a raises the numerical viscosity of that face and nothing
+     * else -- the state is never modified, clipped or projected.
+     *
+     * THE ENLARGEMENT IS CAPPED, and the cap is not a tuning knob.  dt is set
+     * by dfmm_cmpdt_kernel from the UN-enlarged signal speed, so a face flux
+     * built with speed a > a0/courant_factor violates the CFL condition that
+     * dt was chosen to satisfy.  An uncapped doubling loop is therefore
+     * unconditionally unstable: measured on the smooth Delta=1.644, tau=1e-3
+     * case, eight doublings (256x) destroyed a previously exactly-conservative
+     * run in a single step.  DF_ABOOST_MAX must stay at or below
+     * 1/courant_factor; read_params.f90 enforces courant_factor <= 0.8.
+     *
+     * When the cap is not enough, the flux is left at the plain HLL speeds and
+     * the state is allowed to leave the cone, to be REPORTED by
+     * dfmm_diag_kernel.  Silently enlarging further would trade a visible
+     * physical diagnostic for an invisible numerical instability.
+     * ------------------------------------------------------------------ */
+    float a0 = max(max(-SL, SR), 1.0e-20f);
+    {
+        float ia = 1.0f/a0;
+        float VL[DF_NV], VR[DF_NV];
+        for (int k = 0; k < DF_NV; k++) {
+            VL[k] = UL[k] - FL[k]*ia;
+            VR[k] = UR[k] + FR[k]*ia;
+        }
+        /* Signed margin of the worst split state, in units of its own
+         * pressure.  Negative means that state is outside the cone. */
+        float m = min(df_cone_margin(VL, smallr), df_cone_margin(VR, smallr));
+        /* CONTINUOUS widening.  It must be continuous in the state, not a
+         * branch: an oct-boundary face is reconstructed and solved
+         * independently by the two threadgroups that own the adjoining octs,
+         * and conservation depends on both arriving at the same flux.  A
+         * discrete "enlarge if inadmissible" test turns a round-off
+         * difference in the margin into a finite difference in the wave
+         * speed, and hence into a non-telescoping flux: measured, that
+         * destroyed mass and energy conservation (mcons went from 0 to
+         * -2.3e-2 in two steps) on a case that is otherwise exact. */
+        float w = 1.0f + (DF_ABOOST_MAX - 1.0f)*clamp(-m*10.0f, 0.0f, 1.0f);
+        SL -= (w - 1.0f)*a0;
+        SR += (w - 1.0f)*a0;
+    }
 
     if (SL >= 0.0f) { for (int k = 0; k < DF_NV; k++) F[k] = FL[k]; return; }
     if (SR <= 0.0f) { for (int k = 0; k < DF_NV; k++) F[k] = FR[k]; return; }
 
-    df_prim_to_cons(wl, UL);
-    df_prim_to_cons(wr, UR);
     float inv = 1.0f/(SR - SL);
     for (int k = 0; k < DF_NV; k++)
         F[k] = (SR*FL[k] - SL*FR[k] + SL*SR*(UR[k] - UL[k]))*inv;
@@ -1009,8 +1101,6 @@ kernel void dfmm_integrator_kernel(
  */
 constant int DF_CLOSURE_NS = 1;
 
-/* Offset for the realizability atomic; see dfmm_diag_kernel. */
-constant float DF_LAM_OFF = 16.0f;
 
 kernel void dfmm_source_kernel(
     device const oct_t *grid     [[buffer(0)]],
@@ -1429,6 +1519,7 @@ kernel void dfmm_diag_kernel(
     constant float     &dx       [[buffer(8)]],
     constant float     &tau_pi   [[buffer(9)]],
     constant float     &tau_q    [[buffer(10)]],
+    device float       *dbg      [[buffer(11)]],
     uint block_idx      [[threadgroup_position_in_grid]],
     uint thread_idx     [[thread_position_in_threadgroup]],
     uint threads_per_tg [[threads_per_threadgroup]])
@@ -1465,7 +1556,7 @@ kernel void dfmm_diag_kernel(
     float inv2dx = 0.5f/dx;
 
     float lam_min_loc = HUGE_VALF, dev_max = 0.0f, ani_max = 0.0f, nbad = 0.0f;
-    float devq_max = 0.0f, qmax = 0.0f;
+    float devq_max = 0.0f, qmax = 0.0f, viol_max = 0.0f;
 
     for (int cell = int(thread_idx); cell < TWOTONDIM; cell += int(threads_per_tg)) {
         int cell_idx = cell + 1;
@@ -1478,9 +1569,16 @@ kernel void dfmm_diag_kernel(
         float c[DF_NV], w[DF_NV];
         for (int iv = 0; iv < DF_NV; iv++) c[iv] = df_u_get(uold, oct_idx, iv + 1, cell_idx);
         df_cons_to_prim(c, w, smallr, smallc2);
-        float p = max(w[DI_P], 1e-30f);
+        /* ONE pressure, used for both the tensor and the normalisation.
+         * df_cons_to_prim has already floored it at rho*smallc2/gamma > 0, so
+         * no extra floor is needed here -- and an extra floor is exactly the
+         * bug this replaces: dividing by max(p, 1e-30) while building P from
+         * the unfloored p made an empty cell (rho = smallr, p = 6e-31) report
+         * lam = (rho smallc2/gamma)/1e-30 = 1/gamma = 0.6 with ||Pi||/p = 0,
+         * a state-independent constant that masked the real minimum. */
+        float p = w[DI_P];
 
-        float P[6]; df_P_sym6(w[DI_P], &w[DI_PI], P);
+        float P[6]; df_P_sym6(p, &w[DI_PI], P);
         float lam = df_lam_min_sym6(P)/p;
         /* A NaN must count as a violation rather than be swallowed by min/max,
          * whose NaN handling would otherwise report a healthy state for a run
@@ -1493,6 +1591,21 @@ kernel void dfmm_diag_kernel(
         float ani = sqrt(pis[0]*pis[0] + pis[1]*pis[1] + pis[2]*pis[2]
                        + 2.0f*(pis[3]*pis[3] + pis[4]*pis[4] + pis[5]*pis[5]))/p;
         ani_max = max(ani_max, ani);
+
+        /* Self-consistency of the two realizability measures.  P = p I + Pi
+         * with Pi traceless, so Weyl's inequality forces
+         *     lam_min(P)/p >= 1 - ||Pi||_F/p
+         * cell by cell.  viol > 0 is therefore impossible and its appearance
+         * means one of the two is being computed wrongly, not that the state
+         * is unusual.  Kept permanently: it costs two flops and it is the
+         * check that would have caught the offset-atomic clip immediately. */
+        viol_max = max(viol_max, (1.0f - ani) - lam);
+        if (viol_max > 1.0e-3f) {
+            dbg[0] = w[DI_RHO];  dbg[1] = w[DI_P];   dbg[2] = lam;
+            dbg[3] = ani;        dbg[4] = pis[0];    dbg[5] = pis[1];
+            dbg[6] = pis[2];     dbg[7] = pis[3];    dbg[8] = pis[4];
+            dbg[9] = pis[5];     dbg[10] = float(oct_idx); dbg[11] = float(cell);
+        }
 
         bool need_grad = (tau_pi > 0.0f);
 #if DF_HAVE_Q
@@ -1546,10 +1659,11 @@ kernel void dfmm_diag_kernel(
 #endif
     }
 
-    threadgroup float tg[8][32];
+    threadgroup float tg[9][32];
     uint lane = thread_idx % 32u, sg = thread_idx / 32u;
     float a0 = simd_min(max(lam_min_loc, 0.0f));
     float a6 = simd_max(max(-lam_min_loc, 0.0f));
+    float a8 = simd_max(viol_max);
     /* Primary realizability report.  DF_LAM_OFF - lam is positive for every
      * lam < DF_LAM_OFF, so a single positive-float atomic max carries the
      * minimum exactly, with no sign-bit hazard and no clip on the negative
@@ -1566,14 +1680,16 @@ kernel void dfmm_diag_kernel(
         tg[3][sg] = a3; tg[4][sg] = a4; tg[5][sg] = a5;
         tg[6][sg] = a6;
         tg[7][sg] = a7;
+        tg[8][sg] = a8;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (sg == 0 && lane == 0) {
         uint ng = (threads_per_tg + 31u)/32u;
         float b0 = HUGE_VALF, b1 = 0.0f, b2 = 0.0f, b3 = 0.0f;
-        float b4 = 0.0f, b5 = 0.0f, b6 = 0.0f, b0lam = HUGE_VALF;
+        float b4 = 0.0f, b5 = 0.0f, b6 = 0.0f, b0lam = HUGE_VALF, b8 = 0.0f;
         for (uint g = 0; g < ng; g++) {
             b0lam = min(b0lam, tg[7][g]);
+            b8 = max(b8, tg[8][g]);
             b0 = min(b0, tg[0][g]); b1 = max(b1, tg[1][g]);
             b2 = max(b2, tg[2][g]); b3 += tg[3][g];
             b4 = max(b4, tg[4][g]); b5 = max(b5, tg[5][g]);
@@ -1587,6 +1703,7 @@ kernel void dfmm_diag_kernel(
         atomic_max_float     (&diag[4], b4);
         atomic_max_float     (&diag[5], b5);
         atomic_max_float     (&diag[6], b6);
+        atomic_max_float     (&diag[8], b8);
     }
 }
 

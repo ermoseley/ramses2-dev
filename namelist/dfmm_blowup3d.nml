@@ -73,6 +73,14 @@ nonlinear term -[Pi G]^dev saturates the anisotropy that the Newtonian
 extrapolation grows without bound.  Run each rung with dfmm_closure='ns' and
 'evolve' and compare against those two columns.
 
+MEMORY.  Size ngridtot to the level, not generously: a uniform level L needs
+sum_{l<=L} 2^(3l-3) ~ 1.15 * 2^(3L-3) octs, i.e. about 600 (L=4), 4700 (L=5),
+37500 (L=6), 300000 (L=7).  ngridtot drives the allocation directly and a
+DFMM=2 build carries four times the fields of plain hydro, so an
+over-allocation is expensive: ngridtot=2000000 at level 5 measured 2.6 GB of
+resident memory where ngridtot=20000 measured 92 MB, with bit-identical
+results.  The values below are for level 4-5; raise them for level 6+.
+
 Run for one deformation time: tout = Delta/4.  With Delta = 0.4483 that is
 tout = 0.1121; set it per rung.
 
@@ -90,8 +98,8 @@ nsuperoct=2
 &AMR_PARAMS
 levelmin=5
 levelmax=5
-ngridtot=2000000
-ncachemax=1000000
+ngridtot=20000
+ncachemax=10000
 nexpand=1
 boxlen=1.0
 /
