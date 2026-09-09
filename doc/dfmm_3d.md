@@ -1,6 +1,6 @@
 # dfmm in 3D on the Metal backend — implementation ledger
 
-Status: **ledger frozen; Stage 1 implemented and gated.** This document fixes the
+Status: **ledger frozen; Stages 1 and 2 implemented and gated.** This document fixes the
 equations, field layout, flux ledger, source ledger, realizability rule and
 diagnostics *before* physics code is written, following the practice used for
 the mini-RAMSES multimoment work. Any change to the equations below is a
@@ -126,8 +126,24 @@ work unmodified. Everything dfmm adds sits at index 6 and above.
 | 24..29 | `rho Sxx_ij` (6 comps) | mass-like | **4** |
 | 30..38 | `rho Sxv_ij` (9 comps, not symmetric) | mass-like | **4** |
 
-`NVAR` = 10 / 20 / 23 / 38 at the four stages. `Q_ijk` component order is
-`xxx, yyy, zzz, xxy, xxz, yyx, yyz, zzx, zzy, xyz`.
+`NVAR` = 10 / 20 / 23 / 38 at the four stages, selected by `DFMM=n` in
+`bin/Makefile` (`NDFMM` = 5 / 15 / 18 / 33). Stage 1 stays selectable as
+`DFMM=1` so its gate results below remain reproducible, and because the `Q`
+sector is expensive enough to be worth switching off when it is not needed.
+
+`Q_ijk` component order is
+`xxx, yyy, zzz, xxy, xxz, yyx, yyz, zzx, zzy, xyz`. The kernel carries the
+symmetric-index map explicitly (`DF_QIJK`, `DF_QMAP`), so every tensor
+contraction is written once as a loop over the ten packed slots rather than
+component by component.
+
+The contracted heat flux is `q_i = Q_ijj / 2`, i.e.
+
+```
+q_x = (Q_xxx + Q_yyx + Q_zzx)/2
+q_y = (Q_xxy + Q_yyy + Q_zzy)/2
+q_z = (Q_xxz + Q_yyz + Q_zzz)/2
+```
 
 "Density-like" means the transport flux is `u_k X` and AMR restriction is a
 plain volume average (RAMSES's existing conservative average is already
@@ -177,13 +193,18 @@ second-moment flux, which is why index 5 stays compatible:
 F[E]_k = u_k (E + p) + u_i Pi_ik + q_k
 ```
 
-**Anisotropic pressure** (Stage 1; `Q` term is Stage 2):
+**Anisotropic pressure**:
 
 ```
 F[Pi_ij]_k = u_k Pi_ij + Q_ijk - (2/3) delta_ij q_k
 ```
 
-**Third central moment** (Stage 2):
+Contracting on `ij` gives `Q_iik - 2 q_k = 0`, so the flux of the traceless
+block is itself traceless and storing only five components stays consistent:
+the implicit `F[Pi_zz]_k = -(F[Pi_xx]_k + F[Pi_yy]_k)` is exact, and because
+HLL is linear in the fluxes and states it preserves that relation.
+
+**Third central moment**:
 
 ```
 F[Q_ijk]_l = u_l Q_ijk + R_ijkl        (R by Wick, Section 1)
@@ -227,11 +248,11 @@ stress with `mu = p tau_Pi`. This is precisely the extrapolation the blowup
 note audits, so `Pi_NS = -2 p tau_Pi S0` is computed alongside `Pi` as the
 Stage-1 closure diagnostic.
 
-**Third central moment** (Stage 2):
+**Third central moment**:
 
 ```
-S[Q_ijk] = (1/rho) ( P_jk d_l P_li + P_ik d_l P_lj + P_ij d_l P_lk )
-           - [ Q_jkl G_il + Q_ikl G_jl + Q_ijl G_kl ]
+S[Q_ijk] = (1/rho) ( P_jk d_l P_li + P_ik d_l P_lj + P_ij d_l P_lk )    (= T_Q1)
+           - [ Q_jkl G_il + Q_ikl G_jl + Q_ijl G_kl ]                   (= T_Q2)
            - Q_ijk / tau_q
 ```
 
@@ -246,7 +267,30 @@ q_i -> -(5/2) tau_q p d_i theta
 ```
 
 which is the BGK Chapman--Enskog heat flux with `kappa = (5/2) tau p (k_B/m)`
-and hence `Pr = 1`. Two relaxation times are therefore exposed:
+and hence `Pr = 1`.
+
+`T_Q1` and `-d_l R_ijkl` cancel *analytically* down to that temperature
+gradient, and the cancellation is worth writing out because it determines where
+each term may be evaluated. Since `d_l R_ijkl` contains
+`(P_ij d_l P_kl + P_ik d_l P_jl + P_jk d_l P_il)/rho` — exactly `T_Q1` — the
+divergence-of-`P` parts cancel identically, leaving
+
+```
+-d_l R_ijkl + T_Q1 =
+    -(1/rho)   sum_l ( d_l P_ij P_kl + d_l P_ik P_jl + d_l P_jk P_il )
+    +(1/rho^2) sum_l ( P_ij P_kl + P_ik P_jl + P_il P_jk ) d_l rho
+```
+
+which for `P = p I` collapses to
+`-(delta_ij p d_k theta + delta_ik p d_j theta + delta_jk p d_i theta)`. This
+combined form is what the MUSCL predictor uses, so no O(1) term is left
+unbalanced in the reconstruction. In the update itself the two are *not*
+combined: `R` stays in the flux, because it carries the characteristic
+structure that sets the wave speed, and `T_Q1` is a source. Their discrete
+difference is then a truncation error that converges under refinement, which
+Gate 5 measures directly.
+
+Two relaxation times are therefore exposed:
 
 ```
 tau_Pi = tau            (mu = p tau)
@@ -294,27 +338,45 @@ The single physical constraint is `P_ij` positive semidefinite, since
 
 Three separate mechanisms, in order of preference:
 
-1. **Asymptotic-preserving relaxation map.** The strain production and the
-   BGK sink are integrated *together*, as the exact solution of
-   `dPi/dt = T - Pi/tau_Pi` over the step with `T` frozen:
+1. **Asymptotic-preserving relaxation map.** The production terms and the
+   BGK sink are integrated *together*. For `dX/dt = rate - X/tau` with `rate`
+   frozen over the step the exact solution is
 
    ```
-   Pi <- Pi d + tau_Pi T (1 - d),      d = exp(-dt/tau_Pi)
+   X <- X_old d + tau (1 - d) rate,      d = exp(-dt/tau)
    ```
 
-   This is unconditionally stable and asymptotic-preserving: `dt << tau_Pi`
-   gives `Pi + dt T`, and `dt >> tau_Pi` gives `Pi -> tau_Pi T = -2 p tau_Pi S0`,
-   the Navier--Stokes stress. Applying the source explicitly and *then*
-   multiplying by `d` — the naive splitting — instead sends `Pi -> 0` whenever
-   `dt >> tau_Pi`, which would destroy precisely the limit this study has to
-   measure deviations from. `tau_Pi <= 0` means collisionless: no relaxation.
+   and `rate` must be the *whole* non-stiff right-hand side: the production
+   terms `T` **plus the transport rate the Godunov step already applied**,
+   which is recoverable as `(unew - uold)/dt` because `set_unew` copies
+   `uold -> unew` before transport.
 
-   For the same reason the strain production is **not** folded into the MUSCL
-   predictor. It is stiff, and an unrelaxed half-step copy of it overshoots the
-   interface states when `dt >> tau_Pi`. The 1D reference makes the same
-   choice: sources follow the flux update. The flux-derived predictor terms
-   (`-(1/rho) d_k Pi_ik`, `-(2/3) Pi_kl d_l u_k`) are not stiff and are
-   retained, so transport stays second order.
+   This is unconditionally stable and asymptotic-preserving in both terms:
+   `dt << tau` gives `X_transported + dt T`, and `dt >> tau` gives
+   `X -> tau (transport + T)`. Applying the source explicitly and *then*
+   multiplying by `d` — the naive splitting — instead sends `X -> 0` whenever
+   `dt >> tau`, which would destroy precisely the limit this study has to
+   measure deviations from. `tau <= 0` means collisionless: `d = 1` and
+   `tau(1-d) -> dt`, so the map degrades to `X_transported + dt T`, the
+   correct explicit update.
+
+   Including the transport rate is **not optional for `Q`**. Its flux carries
+   the Wick fourth moment `R_ijkl`, which is O(1) and cancels all but a
+   temperature gradient against `T_Q1` (Section 4); relaxing toward `T_Q1`
+   alone whenever `dt >> tau_q` would replace the Fourier heat flux
+   `-(5/2) tau_q p grad theta` by the unrelated quantity `theta grad p`. For
+   `Pi` the same omission is only O(tau^2) — a Burnett-order correction, and
+   indeed Gate 3 is unchanged to the digits printed by including it — but the
+   two blocks are treated identically for uniformity.
+
+   For the same reason the stiff production terms are **not** folded into the
+   MUSCL predictor — `-2 p S0 - [Pi G]^dev` for `Pi`, and `T_Q2` for `Q`. An
+   unrelaxed half-step copy of a stiff term overshoots the interface states
+   when `dt >> tau`. The 1D reference makes the same choice: sources follow the
+   flux update. Everything non-stiff *is* retained, so transport stays second
+   order: `-(1/rho) d_k Pi_ik`, `-(2/3) Pi_kl d_l u_k`, `-(2/3) div q`,
+   `-d_k Q_ijk + (2/3) delta_ij div q`, and the combined
+   `-d_l R_ijkl + T_Q1` of Section 4.
 
 2. **Realizability-preserving numerical flux.** The transport step is the one
    place that can leave the cone. Following the mini-RAMSES result, the HLL
@@ -347,8 +409,9 @@ c_n = sqrt( (3 + sqrt 6) P_nn / rho )
 
 `3 + sqrt 6 ~= 5.449` is the reference scheme's `CSCOEF`, the largest
 characteristic of the Wick-closed four-moment subsystem. It bounds the
-ten-moment value `sqrt(3 P_nn / rho)`, so it is safe at Stage 1 and correct at
-Stage 2. Anisotropy therefore enters the timestep directly, which is intended:
+ten-moment value `sqrt(3 P_nn / rho)`, so it was safe at Stage 1 (a deliberate
+factor 1.35 of margin, chosen so the timestep would not change when `Q` landed)
+and is the correct value at Stage 2. Anisotropy therefore enters the timestep directly, which is intended:
 `Pi` growing along one axis shortens `dt`.
 
 ---
@@ -434,14 +497,37 @@ Two results worth stating explicitly:
   (Navier--Stokes inadequate), on the same flow. This is the quantity the
   blowup study reads.
 
-**Stage 2 — evolved third moment.** `NVAR=20`. Adds `Q_ijk`, the Wick fourth
-moment, `tau_q`, and `‖q - q_CE‖` as the paper's first indicator.
+**Stage 2 — evolved third moment.** `NVAR=20`, `DFMM=2`. **Implemented and
+gated.** Adds `Q_ijk`, the Wick fourth moment, `tau_q`, and `‖q - q_CE‖` as the
+paper's first indicator.
 
-Gates:
-* Reduction to 1D reproduces `~/dfmm/py-1d` Sod and cold-sinusoid results
-  within the tolerance of the differing reconstruction.
-* Small `tau`: `q` matches `-(5/2) tau_q p grad theta`.
-* `Pr_target = 2/3` reproduces the hard-sphere `kappa` of the blowup note.
+Gates, all run on an Apple M3 with `COMPILER=METAL NDIM=3 HYDRO=1 DFMM=2`:
+
+| Gate | Setup | Criterion | Result |
+|---|---|---|---|
+| 5 Fourier limit | isobaric `rho = 1 + 0.1 sin(2 pi z)`, `p = 1`, `tau = 1e-4`, `Pr = 2/3`, level 4/5/6 | `q -> -(5/2) tau_q p grad theta` | `\|q\|`/analytic = **1.093 / 1.022 / 1.002**; `dev_q/\|q\|` = 5.6e-2 / 2.5e-2 / 1.3e-2 |
+| 3' NS limit, restated | shear `V0=0.1`, `tau=1e-4`, level 4/5/6 | unchanged from Stage 1 | `\|Pi\|`/analytic = 1.0100 / 1.0045 / 1.0015; `dev_NS/\|Pi\|` = 7.8e-3 / 4.0e-3 / 1.9e-3 — **identical to Stage 1** |
+| 2' Relaxation | `tau=0.05`, `Pi_xx=0.1`, 40 steps | `exp(-t/tau)` decay | step ratio 0.8671 vs `exp(-dt/tau) = 0.86699`, rel. error 1.3e-4 |
+| 4' Collisionless | shear `V0=0.5`, `tau=-1`, 60 steps | stays realizable | `min lam(P)/p = 0.9475 > 0`, `n(lam<0)=0` |
+
+The Fourier gate is a clean isobaric conduction test: with `p` uniform there is
+no pressure gradient, so the gas stays nearly static (the thermal diffusion
+time `1/chi = 1/(1.5 tau) ~ 6700` is four orders of magnitude beyond the run)
+while `q` relaxes to its Fourier value within the first step. The measured
+amplitude converges to the analytic one at 0.2%, which is the statement that
+`tau_q = tau_Pi / Pr` with `Pr = 2/3` reproduces the note's hard-sphere
+conductivity `kappa/(rho c_p) = (3/2) nu`.
+
+Note on the Stage-2 collisionless result: `\|Pi\|/p` saturates at 0.13 rather
+than the Stage-1 value 0.54 on the same flow, with `\|q\|/(p c_s)` reaching
+0.20. That is not a regression — with the third moment free, collisionless
+anisotropy is partly carried away as heat flux instead of accumulating in
+`Pi`. It is a physical difference between the ten- and twenty-moment
+collisionless response, and the realizability margin is what the gate tests.
+
+The 1D reduction against `~/dfmm/py-1d` Sod and cold-sinusoid is *not* yet
+run; it is the one Stage-2 gate outstanding and is recorded as such in
+Section 8.
 
 **Stage 3 — Lagrangian coordinate.** `NVAR=23`. Pure passive advection;
 `d L_i / d x_j` gives the deformation tensor and hence the local compression
@@ -475,7 +561,8 @@ Verified in this repository at the time of writing:
   This was a pre-existing break on this toolchain, not caused by dfmm.
 * Threadgroup-memory budget arithmetic in Section 6, from the existing
   `local_subgrid_t` / `interfaces_*_t` declarations.
-* All four Stage-1 gates in Section 7, from fresh runs.
+* All four Stage-1 gates and all four run Stage-2 gates in Section 7, from
+  fresh runs.
 * That AMR prolongation (`refine.metal` / `interpol_hydro.f90`) and
   restriction (`upload_kernel`) already treat all `NVAR` fields with a
   conservative linear interpolation and a plain volume average, which is the
@@ -492,6 +579,25 @@ Corrected during Stage 1, recorded so the reasoning is not lost:
 * The strain source must be integrated *together* with the BGK sink
   (Section 5). Naive splitting passed the relaxation gate but silently failed
   the Navier--Stokes limit whenever `dt >> tau`.
+
+Corrected during Stage 2:
+* The asymptotic-preserving map must relax toward the *whole* non-stiff
+  right-hand side, transport rate included (Section 5). The Stage-1 form
+  relaxed only toward the production term. For `Pi` that is an O(tau^2)
+  omission and Gate 3 is unchanged by fixing it; for `Q` it would have
+  replaced the Fourier heat flux by an unrelated quantity, because `R_ijkl`
+  in the `Q` flux is O(1). This is the same class of error as the Stage-1 one
+  and was found by asking what the stiff limit of *each* term is, not by a
+  failing gate.
+* `T_Q1` and `-d_l R_ijkl` must both be present in the MUSCL predictor or
+  both absent: each is O(1) and they cancel to O(grad theta). The predictor
+  uses their analytically combined form so the cancellation is exact there.
+
+Outstanding at Stage 2:
+* The 1D reduction against `~/dfmm/py-1d` Sod and cold-sinusoid. The 3D tensor
+  algebra has been checked against the reference *analytically* (`R_xxxx =
+  3 P_xx^2/rho`, `CSCOEF`, the `q_i = Q_ijj/2` contraction) but not yet by
+  running the two codes on the same problem.
 
 Assumed, to be measured:
 * That the Wick closure is adequate through the interesting part of the blowup

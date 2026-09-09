@@ -989,10 +989,28 @@ kernel void dfmm_integrator_kernel(
  *   Stage 2:  9 * 216 * 4 =  7776 B
  */
 #if DF_HAVE_Q
-#define DF_NSRC 9
+#define DF_NSRC 10        /* u(3), p, Pi(5), theta */
 #else
-#define DF_NSRC 3
+#define DF_NSRC 5         /* u(3), p, theta */
 #endif
+#define DF_ST_P  3
+#define DF_ST_TH 4
+#if DF_HAVE_Q
+#define DF_ST_PI 5
+#endif
+
+/* Closure selector (mirrors read_params.f90).
+ *   0  evolve  -- Pi and Q are evolved with the AP relaxation map below.
+ *   1  ns      -- Pi and Q are OVERWRITTEN each step with their
+ *                 Chapman-Enskog values, which turns the identical flux
+ *                 machinery into compressible Navier-Stokes-Fourier with
+ *                 mu = p tau_Pi and Pr = tau_Pi/tau_q.  See the comment on
+ *                 the branch below for why this is the right comparison run.
+ */
+constant int DF_CLOSURE_NS = 1;
+
+/* Offset for the realizability atomic; see dfmm_diag_kernel. */
+constant float DF_LAM_OFF = 16.0f;
 
 kernel void dfmm_source_kernel(
     device const oct_t *grid     [[buffer(0)]],
@@ -1008,6 +1026,7 @@ kernel void dfmm_source_kernel(
     constant float     &tau_pi   [[buffer(10)]],
     constant int       &source_on[[buffer(11)]],
     constant float     &tau_q    [[buffer(12)]],
+    constant int       &closure  [[buffer(13)]],
     uint block_idx      [[threadgroup_position_in_grid]],
     uint thread_idx     [[thread_position_in_threadgroup]],
     uint threads_per_tg [[threads_per_threadgroup]])
@@ -1035,12 +1054,14 @@ kernel void dfmm_source_kernel(
         st[0][i][j][k] = cc[DI_UX]/rho;
         st[1][i][j][k] = cc[DI_UY]/rho;
         st[2][i][j][k] = cc[DI_UZ]/rho;
-#if DF_HAVE_Q
         float ekin = 0.5f*(cc[DI_UX]*cc[DI_UX] + cc[DI_UY]*cc[DI_UY]
                          + cc[DI_UZ]*cc[DI_UZ])/rho;
-        st[3][i][j][k] = max(DF_GM1*(cc[DI_P] - ekin), rho*smallc2/DF_GAMMA);
+        float pl = max(DF_GM1*(cc[DI_P] - ekin), rho*smallc2/DF_GAMMA);
+        st[DF_ST_P ][i][j][k] = pl;
+        st[DF_ST_TH][i][j][k] = pl/rho;
+#if DF_HAVE_Q
         for (int m = 0; m < 5; m++)
-            st[4+m][i][j][k] = df_u_get(uold, source_idx, 6 + m, cell_idx);
+            st[DF_ST_PI+m][i][j][k] = df_u_get(uold, source_idx, 6 + m, cell_idx);
 #endif
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1084,6 +1105,68 @@ kernel void dfmm_source_kernel(
         df_cons_to_prim(c, w, smallr, smallc2);
         float p = w[DI_P];
 
+        /* ------------------------------------------------------------------
+         * Navier-Stokes-Fourier closure.
+         *
+         * Instead of evolving Pi and Q, overwrite them with their
+         * Chapman-Enskog values every step:
+         *     Pi_ij  = -2 p tau_Pi S0_ij
+         *     Q_ijk  = -tau_q p ( d_jk d_i theta + d_ik d_j theta
+         *                       + d_ij d_k theta )   =>  q = -(5/2) tau_q p grad theta
+         * The flux ledger already carries Pi_ik in the momentum flux and
+         * u_i Pi_ik + q_k in the energy flux, so this turns the SAME kernel
+         * into a compressible Navier-Stokes-Fourier solver with explicit
+         * viscosity mu = p tau_Pi and Prandtl number tau_Pi/tau_q -- not an
+         * inviscid Euler run with numerical viscosity standing in for it.
+         *
+         * This is deliberately the comparison run: identical initial
+         * condition, identical grid, identical Riemann solver, identical
+         * transport coefficients.  The only thing that differs from the
+         * moment run is the closure, which is exactly the variable under
+         * study.  A separately written viscous-flux implementation would
+         * confound the closure with the discretisation.
+         *
+         * Note the price: this branch reintroduces a parabolic stability
+         * constraint dt < dx^2 / (2 ndim D), which dfmm_cmpdt_kernel applies
+         * only when this closure is selected.  The evolved moment system is
+         * hyperbolic and has no such constraint -- one of the practical
+         * reasons for preferring it.
+         * ---------------------------------------------------------------- */
+        if (closure == DF_CLOSURE_NS) {
+            float G[3][3];
+            for (int a = 0; a < 3; a++) {
+                G[a][0] = (st[a][i+1][j][k] - st[a][i-1][j][k])*inv2dx;
+                G[a][1] = (st[a][i][j+1][k] - st[a][i][j-1][k])*inv2dx;
+                G[a][2] = (st[a][i][j][k+1] - st[a][i][j][k-1])*inv2dx;
+            }
+            float divu = G[0][0] + G[1][1] + G[2][2];
+            float c2 = -2.0f*p*max(tau_pi, 0.0f);
+            float S0[3][3];
+            for (int a = 0; a < 3; a++) for (int b = 0; b < 3; b++)
+                S0[a][b] = 0.5f*(G[a][b] + G[b][a]) - ((a == b) ? divu/3.0f : 0.0f);
+
+            df_u_set(unew, oct_idx, 6 + PI_XX, cell_idx, c2*S0[0][0]);
+            df_u_set(unew, oct_idx, 6 + PI_YY, cell_idx, c2*S0[1][1]);
+            df_u_set(unew, oct_idx, 6 + PI_XY, cell_idx, c2*S0[0][1]);
+            df_u_set(unew, oct_idx, 6 + PI_XZ, cell_idx, c2*S0[0][2]);
+            df_u_set(unew, oct_idx, 6 + PI_YZ, cell_idx, c2*S0[1][2]);
+#if DF_HAVE_Q
+            float gth[3] = {
+                (st[DF_ST_TH][i+1][j][k] - st[DF_ST_TH][i-1][j][k])*inv2dx,
+                (st[DF_ST_TH][i][j+1][k] - st[DF_ST_TH][i][j-1][k])*inv2dx,
+                (st[DF_ST_TH][i][j][k+1] - st[DF_ST_TH][i][j][k-1])*inv2dx};
+            float cq = -max(tau_q, 0.0f)*p;
+            for (int m = 0; m < DF_NQ; m++) {
+                int qi = DF_QIJK[m][0], qj = DF_QIJK[m][1], qk = DF_QIJK[m][2];
+                float v = ((qj == qk) ? gth[qi] : 0.0f)
+                        + ((qi == qk) ? gth[qj] : 0.0f)
+                        + ((qi == qj) ? gth[qk] : 0.0f);
+                df_u_set(unew, oct_idx, 11 + m, cell_idx, cq*v);
+            }
+#endif
+            continue;
+        }
+
         float xo[NDFMM], xt[NDFMM], T[NDFMM];
         for (int m = 0; m < NDFMM; m++) {
             xo[m] = df_u_get(uold, oct_idx, 6 + m, cell_idx);
@@ -1124,14 +1207,14 @@ kernel void dfmm_source_kernel(
 #if DF_HAVE_Q
             /* div P from uold: d_l P_li = d_i p + d_l Pi_li */
             float gp[3] = {
-                (st[3][i+1][j][k] - st[3][i-1][j][k])*inv2dx,
-                (st[3][i][j+1][k] - st[3][i][j-1][k])*inv2dx,
-                (st[3][i][j][k+1] - st[3][i][j][k-1])*inv2dx};
+                (st[DF_ST_P][i+1][j][k] - st[DF_ST_P][i-1][j][k])*inv2dx,
+                (st[DF_ST_P][i][j+1][k] - st[DF_ST_P][i][j-1][k])*inv2dx,
+                (st[DF_ST_P][i][j][k+1] - st[DF_ST_P][i][j][k-1])*inv2dx};
             float gpi[3][5];
             for (int m = 0; m < 5; m++) {
-                gpi[0][m] = (st[4+m][i+1][j][k] - st[4+m][i-1][j][k])*inv2dx;
-                gpi[1][m] = (st[4+m][i][j+1][k] - st[4+m][i][j-1][k])*inv2dx;
-                gpi[2][m] = (st[4+m][i][j][k+1] - st[4+m][i][j][k-1])*inv2dx;
+                gpi[0][m] = (st[DF_ST_PI+m][i+1][j][k] - st[DF_ST_PI+m][i-1][j][k])*inv2dx;
+                gpi[1][m] = (st[DF_ST_PI+m][i][j+1][k] - st[DF_ST_PI+m][i][j-1][k])*inv2dx;
+                gpi[2][m] = (st[DF_ST_PI+m][i][j][k+1] - st[DF_ST_PI+m][i][j][k-1])*inv2dx;
             }
             float divP[3];
             divP[0] = gp[0] + gpi[0][PI_XX] + gpi[1][PI_XY] + gpi[2][PI_XZ];
@@ -1195,6 +1278,9 @@ kernel void dfmm_cmpdt_kernel(
     constant float       &courant_factor   [[buffer(8)]],
     constant float       *constant_gravity [[buffer(9)]],
     device const float   *f                [[buffer(10)]],
+    constant float       &tau_pi           [[buffer(11)]],
+    constant float       &tau_q            [[buffer(12)]],
+    constant int         &closure          [[buffer(13)]],
     uint tid  [[thread_position_in_threadgroup]],
     uint bid  [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]],
@@ -1239,6 +1325,25 @@ kernel void dfmm_cmpdt_kernel(
 #endif
             grav = max(grav*dx/(ctot*ctot), 0.0001f);
             dt_loc = dx/ctot*(sqrt(1.0f + 2.0f*courant_factor*grav) - 1.0f)/grav;
+
+            /* Parabolic constraint, needed ONLY under the Navier-Stokes
+             * closure, where Pi and q are algebraic in the gradients and the
+             * momentum/energy fluxes are therefore genuinely diffusive:
+             *     dt <= courant * dx^2 / (2 ndim D),   D = max(nu, chi)
+             * with nu = mu/rho = tau_Pi p/rho and, since
+             * kappa = (5/2) tau_q p (k_B/m) and c_p = (5/2)(k_B/m),
+             * chi = kappa/(rho c_p) = tau_q p/rho.
+             *
+             * The evolved moment system needs no such limit: its transport is
+             * hyperbolic with the finite signal speed used above, and the
+             * relaxation is integrated by an exact exponential map.  That is a
+             * real advantage of the moment formulation and it is worth being
+             * able to see it in the timestep. */
+            if (closure == DF_CLOSURE_NS) {
+                float dif = max(max(tau_pi, tau_q), 0.0f)*w[DI_P]/w[DI_RHO];
+                if (dif > 0.0f)
+                    dt_loc = min(dt_loc, courant_factor*dx*dx/(2.0f*3.0f*dif));
+            }
         }
     }
 
@@ -1273,7 +1378,8 @@ kernel void dfmm_cmpdt_kernel(
  * dfmm_diag_kernel — closure-quality and realizability diagnostics
  *
  * Reported per level (doc/dfmm_3d.md Section 0):
- *   diag[0]  min over cells of lam_min(P)/p           (realizability margin)
+ *   diag[0]  min over cells of max(lam_min(P)/p, 0)   (see below)
+ *   diag[6]  max over cells of max(-lam_min(P)/p, 0)  (see below)
  *   diag[1]  max over cells of ||Pi - Pi_NS||_F / p   (Navier-Stokes deviation)
  *   diag[2]  max over cells of ||Pi||_F / p           (anisotropy amplitude)
  *   diag[3]  count of cells with lam_min(P) < 0       (as a float)
@@ -1288,6 +1394,20 @@ kernel void dfmm_cmpdt_kernel(
  *
  * A minimum is used for the realizability margin deliberately: a maximum of
  * the slack is structurally blind to cells sitting at the cone boundary.
+ *
+ * lam_min(P)/p is reported as a POSITIVE PAIR, not as one offset float.  The
+ * only lock-free float atomics available here are min/max on the raw bit
+ * pattern, which order IEEE-754 correctly for non-negative values only.  The
+ * obvious dodge -- atomically minimising lam/p + 2 -- silently clips anything
+ * below -2, because a negative sum sets the sign bit and its bit pattern then
+ * compares as a huge unsigned.  That clip is invisible in the gate problems,
+ * where |Pi|/p << 1, and catastrophic on the blowup problem, where |Pi|/p
+ * reaches order ten: it would report a floor of -2 for the one quantity the
+ * whole study is about.  Splitting into
+ *     diag[0] = min over cells of max( lam/p, 0)
+ *     diag[6] = max over cells of max(-lam/p, 0)
+ * keeps both atomics on non-negative values and is exact at any magnitude.
+ * The host reconstructs  min lam/p = (diag[6] > 0) ? -diag[6] : diag[0].
  * ========================================================================= */
 
 /* u_x, u_y, u_z, and at Stage 2 also theta = p/rho for grad theta. */
@@ -1362,6 +1482,10 @@ kernel void dfmm_diag_kernel(
 
         float P[6]; df_P_sym6(w[DI_P], &w[DI_PI], P);
         float lam = df_lam_min_sym6(P)/p;
+        /* A NaN must count as a violation rather than be swallowed by min/max,
+         * whose NaN handling would otherwise report a healthy state for a run
+         * that has already failed. */
+        if (!(lam == lam)) { nbad += 1.0f; lam = -HUGE_VALF; }
         lam_min_loc = min(lam_min_loc, lam);
         if (lam < 0.0f) nbad += 1.0f;
 
@@ -1422,9 +1546,16 @@ kernel void dfmm_diag_kernel(
 #endif
     }
 
-    threadgroup float tg[6][32];
+    threadgroup float tg[8][32];
     uint lane = thread_idx % 32u, sg = thread_idx / 32u;
-    float a0 = simd_min(lam_min_loc);
+    float a0 = simd_min(max(lam_min_loc, 0.0f));
+    float a6 = simd_max(max(-lam_min_loc, 0.0f));
+    /* Primary realizability report.  DF_LAM_OFF - lam is positive for every
+     * lam < DF_LAM_OFF, so a single positive-float atomic max carries the
+     * minimum exactly, with no sign-bit hazard and no clip on the negative
+     * side.  Only lam > DF_LAM_OFF saturates, which is the uninteresting
+     * direction (a hugely positive minimum eigenvalue). */
+    float a7 = simd_min(lam_min_loc);
     float a1 = simd_max(dev_max);
     float a2 = simd_max(ani_max);
     float a3 = simd_sum(nbad);
@@ -1433,25 +1564,29 @@ kernel void dfmm_diag_kernel(
     if (lane == 0) {
         tg[0][sg] = a0; tg[1][sg] = a1; tg[2][sg] = a2;
         tg[3][sg] = a3; tg[4][sg] = a4; tg[5][sg] = a5;
+        tg[6][sg] = a6;
+        tg[7][sg] = a7;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (sg == 0 && lane == 0) {
         uint ng = (threads_per_tg + 31u)/32u;
-        float b0 = HUGE_VALF, b1 = 0.0f, b2 = 0.0f, b3 = 0.0f, b4 = 0.0f, b5 = 0.0f;
+        float b0 = HUGE_VALF, b1 = 0.0f, b2 = 0.0f, b3 = 0.0f;
+        float b4 = 0.0f, b5 = 0.0f, b6 = 0.0f, b0lam = HUGE_VALF;
         for (uint g = 0; g < ng; g++) {
+            b0lam = min(b0lam, tg[7][g]);
             b0 = min(b0, tg[0][g]); b1 = max(b1, tg[1][g]);
             b2 = max(b2, tg[2][g]); b3 += tg[3][g];
             b4 = max(b4, tg[4][g]); b5 = max(b5, tg[5][g]);
+            b6 = max(b6, tg[6][g]);
         }
-        /* diag[0] is stored as an offset positive quantity so the bitwise
-         * atomic min is valid: lam_min/p can be negative, and
-         * atomic_min_float_bits only orders positive IEEE-754 floats. */
-        atomic_min_float_bits(&diag[0], b0 + 2.0f);
+        atomic_min_float_bits(&diag[0], b0);
+        atomic_max_float     (&diag[7], max(DF_LAM_OFF - b0lam, 0.0f));
         atomic_max_float     (&diag[1], b1);
         atomic_max_float     (&diag[2], b2);
         atomic_add_float     (&diag[3], b3);
         atomic_max_float     (&diag[4], b4);
         atomic_max_float     (&diag[5], b5);
+        atomic_max_float     (&diag[6], b6);
     }
 }
 

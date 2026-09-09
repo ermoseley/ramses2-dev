@@ -4399,6 +4399,7 @@ extern "C" void mtl_cic_part_medium(
 extern "C" void mtl_dfmm_cmpdt(int head_idx, int num_octs,
                                float dx, float smallr, float smallc2,
                                float courant_factor, float *constant_gravity,
+                               float tau_pi, float tau_q, int closure,
                                float *mass, float *etot, float *eint,
                                float *eani, float *dt)
 {
@@ -4429,6 +4430,9 @@ extern "C" void mtl_dfmm_cmpdt(int head_idx, int num_octs,
     [enc setBytes:&courant_factor length:sizeof(float)     atIndex:8];
     [enc setBytes:cg              length:3 * sizeof(float) atIndex:9];
     [enc setBuffer:s_f_grav       offset:0                 atIndex:10];
+    [enc setBytes:&tau_pi         length:sizeof(float)     atIndex:11];
+    [enc setBytes:&tau_q          length:sizeof(float)     atIndex:12];
+    [enc setBytes:&closure        length:sizeof(int)       atIndex:13];
     [enc dispatchThreadgroups:grid_size threadsPerThreadgroup:tg_size];
     [enc endEncoding];
     [cmd commit];
@@ -4443,7 +4447,7 @@ extern "C" void mtl_dfmm_godunov(int head_idx, int num_subgrids, int ngridmax,
                                   float smallr, float smallc2,
                                   float dt, float dx, int slope, int riemann,
                                   float tau_pi, float tau_q, int source_on,
-                                  float *constant_gravity)
+                                  int closure, float *constant_gravity)
 {
     float cg[3] = {constant_gravity[0], constant_gravity[1], constant_gravity[2]};
     MTLSize tg_size   = {64, 1, 1};
@@ -4495,6 +4499,7 @@ extern "C" void mtl_dfmm_godunov(int head_idx, int num_subgrids, int ngridmax,
     [enc setBytes:&tau_pi       length:sizeof(float) atIndex:10];
     [enc setBytes:&source_on    length:sizeof(int)   atIndex:11];
     [enc setBytes:&tau_q        length:sizeof(float) atIndex:12];
+    [enc setBytes:&closure      length:sizeof(int)   atIndex:13];
     [enc dispatchThreadgroups:grid_size threadsPerThreadgroup:tg_size];
     [enc endEncoding];
 
@@ -4508,15 +4513,16 @@ extern "C" void mtl_dfmm_diag(int head_idx, int num_octs,
                                float *lam_min, float *dev_ns, float *ani_max,
                                float *nbad, float *dev_q, float *q_max)
 {
-    /* diag[0] carries lam_min(P)/p + 2 so the bitwise atomic min sees a
-     * positive float; the kernel applies the same offset.  Slots 4 and 5
-     * (the heat-flux diagnostics) are written only at Stage 2. */
+    /* lam_min(P)/p arrives split across two non-negative slots, diag[0] and
+     * diag[6]; see the comment on dfmm_diag_kernel for why an offset single
+     * slot is wrong here.  Slots 4 and 5 (the heat-flux diagnostics) are
+     * written only at Stage 2. */
     float big = 1.0e30f;
-    uint32_t h[6] = {0, 0, 0, 0, 0, 0};
+    uint32_t h[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     memcpy(&h[0], &big, sizeof(float));
     id<MTLBuffer> diag =
         [s_device newBufferWithBytes:h
-                              length:6 * sizeof(uint32_t)
+                              length:8 * sizeof(uint32_t)
                              options:MTLResourceStorageModeShared];
 
     MTLSize tg_size   = {64, 1, 1};
@@ -4542,7 +4548,10 @@ extern "C" void mtl_dfmm_diag(int head_idx, int num_octs,
     [cmd waitUntilCompleted];
 
     float *r = (float *)diag.contents;
-    *lam_min = r[0] - 2.0f;
+    *lam_min = 16.0f - r[7];
+    if (getenv("DFMM_DIAG_RAW"))
+        fprintf(stderr, "[dfmm diag raw] r0=%g r1=%g r2=%g r3=%g r4=%g r5=%g r6=%g r7=%g -> lam=%g\n",
+                r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], 16.0f - r[7]);
     *dev_ns  = r[1];
     *ani_max = r[2];
     *nbad    = r[3];

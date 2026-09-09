@@ -357,12 +357,15 @@ subroutine metal_dfmm_cmpdt(sim, ilevel, mass, ekin, eint, eani, dt)
   real(c_float) :: dx, smallr, smallc2, courant_factor
   real(c_float) :: constant_gravity(3)
   real(c_float) :: mass_f, etot_f, eint_f, eani_f, dt_f
+  real(c_float) :: tau_pi, tau_q
 
   dx               = real(sim%r%boxlen / 2**ilevel, c_float)
   smallr           = real(sim%r%smallr,             c_float)
   smallc2          = real(sim%r%smallc**2,          c_float)
   courant_factor   = real(sim%r%courant_factor,     c_float)
   constant_gravity = real(sim%r%constant_gravity,   c_float)
+  tau_pi           = real(sim%r%dfmm_tau,           c_float)
+  tau_q            = real(dfmm_tau_q(sim%r),        c_float)
 
   call mtl_dfmm_cmpdt(                 &
        int(sim%m%head(ilevel), c_int), &
@@ -370,6 +373,8 @@ subroutine metal_dfmm_cmpdt(sim, ilevel, mass, ekin, eint, eani, dt)
        dx, smallr, smallc2,            &
        courant_factor,                 &
        constant_gravity,               &
+       tau_pi, tau_q,                  &
+       int(sim%r%dfmm_closure, c_int), &
        mass_f, etot_f, eint_f, eani_f, dt_f)
 
   mass = real(mass_f, 8)
@@ -418,6 +423,7 @@ subroutine metal_dfmm_godunov(sim, ilevel)
        int(sim%r%slope_type,   c_int), &
        int(sim%r%riemann,      c_int), &
        tau_pi, tau_q, source_on,       &
+       int(sim%r%dfmm_closure, c_int), &
        constant_gravity)
 
 end subroutine metal_dfmm_godunov

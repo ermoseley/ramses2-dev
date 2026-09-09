@@ -194,6 +194,12 @@ module amr_commons
      logical ::dfmm_source=.true.
      logical ::dfmm_diag=.true.
      logical ::dfmm_fatal_realizability=.false.
+     ! Closure selector.  0 = evolve Pi (and Q) with the AP relaxation map;
+     ! 1 = overwrite them with their Chapman-Enskog values every step, which
+     ! makes the same solver compressible Navier-Stokes-Fourier with explicit
+     ! viscosity mu = p*dfmm_tau and Pr = dfmm_prandtl.  Selected in the
+     ! namelist as dfmm_closure='evolve' or 'ns'.
+     integer ::dfmm_closure=0
      ! INIT=DFMMTEST amplitudes: shear velocity, initial Pi_xx, and the
      ! isobaric density (hence temperature) perturbation used to drive the
      ! Stage-2 Fourier heat-flux gate.
@@ -201,6 +207,24 @@ module amr_commons
      real(kind=8)::dfmm_ic_pi=0.0d0
      real(kind=8)::dfmm_ic_drho=0.0d0
 #endif
+
+     ! INIT=BLOWUP parameters.  These are deliberately NOT inside #ifdef DFMM:
+     ! the whole point of the test is to run the same initial condition with a
+     ! plain-hydro (DFMM=0) build and with dfmm, so a DFMM=0 binary must be able
+     ! to read them.  blowup_delta is the note's Delta -- the strain at the
+     ! origin is S = (1/Delta) diag(-2,-2,4), hence ||S||_op = 4/Delta and a
+     ! deformation time t_def = Delta/4 (doc/dfmm_3d.md Section 7, Stage 5).
+     real(kind=8)::blowup_delta=1.0d-1
+     real(kind=8)::blowup_rho0=1.0d0
+     real(kind=8)::blowup_p0=1.0d0
+     integer     ::blowup_nwave=1
+     ! .true. initialises Pi at its Navier-Stokes value -2 p tau S, i.e. ON the
+     ! Newtonian manifold; .false. starts from local equilibrium Pi = 0 and lets
+     ! the strain drive it, which is the physical setup and the actual
+     ! measurement.  Setting .true. with Delta < 8 tau initialises a state that
+     ! no distribution function realises, which is the note's check 7 stated as
+     ! an initial condition rather than as a prediction.
+     logical     ::blowup_init_ns=.false.
 
      ! Physics parameters
      real(kind=8)::units_density=1.0 ! [g/cm^3]

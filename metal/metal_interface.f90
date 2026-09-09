@@ -968,19 +968,22 @@ module metal_interface
     ! Anisotropic timestep plus conserved sums.  eani is the volume integral
     ! of |Pi|_F, a global measure of pressure anisotropy.
     subroutine mtl_dfmm_cmpdt(head_idx, num_octs, dx, smallr, smallc2, &
-        courant_factor, constant_gravity, mass, etot, eint, eani, dt) &
+        courant_factor, constant_gravity, tau_pi, tau_q, closure, &
+        mass, etot, eint, eani, dt) &
         bind(C, name="mtl_dfmm_cmpdt")
       import c_int, c_float
       integer(c_int), value :: head_idx, num_octs
       real(c_float),  value :: dx, smallr, smallc2, courant_factor
       real(c_float), intent(in)  :: constant_gravity(3)
+      real(c_float),  value :: tau_pi, tau_q
+      integer(c_int), value :: closure
       real(c_float), intent(out) :: mass, etot, eint, eani, dt
     end subroutine mtl_dfmm_cmpdt
 
     ! Transport then production terms and exact BGK relaxation.
     subroutine mtl_dfmm_godunov(head_idx, num_subgrids, ngridmax, &
         ilevel, levelmin, levelmax, smallr, smallc2, dt, dx, &
-        slope, riemann, tau_pi, tau_q, source_on, constant_gravity) &
+        slope, riemann, tau_pi, tau_q, source_on, closure, constant_gravity) &
         bind(C, name="mtl_dfmm_godunov")
       import c_int, c_float
       integer(c_int), value :: head_idx, num_subgrids, ngridmax
@@ -988,7 +991,7 @@ module metal_interface
       real(c_float),  value :: smallr, smallc2, dt, dx
       integer(c_int), value :: slope, riemann
       real(c_float),  value :: tau_pi, tau_q
-      integer(c_int), value :: source_on
+      integer(c_int), value :: source_on, closure
       real(c_float), intent(in) :: constant_gravity(3)
     end subroutine mtl_dfmm_godunov
 

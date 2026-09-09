@@ -327,10 +327,17 @@ subroutine m_read_params(pst)
   logical ::dfmm_source=.true.
   logical ::dfmm_diag=.true.
   logical ::dfmm_fatal_realizability=.false.
+  character(LEN=10)::dfmm_closure='evolve'
   real(kind=8)::dfmm_ic_shear=0.0d0
   real(kind=8)::dfmm_ic_pi=0.0d0
   real(kind=8)::dfmm_ic_drho=0.0d0
 #endif
+  ! INIT=BLOWUP parameters (available in every build, see amr_commons.f90)
+  real(kind=8)::blowup_delta=1.0d-1
+  real(kind=8)::blowup_rho0=1.0d0
+  real(kind=8)::blowup_p0=1.0d0
+  integer     ::blowup_nwave=1
+  logical     ::blowup_init_ns=.false.
   character(LEN=10)::riemann2d='none'
   logical ::induction=.false.
   logical ::entropy=.false.
@@ -669,9 +676,12 @@ subroutine m_read_params(pst)
 #ifdef DFMM
   ! dfmm solver parameters
   namelist/dfmm_params/dfmm_tau,dfmm_prandtl,dfmm_source,dfmm_diag &
-       & ,dfmm_fatal_realizability &
+       & ,dfmm_fatal_realizability,dfmm_closure &
        & ,dfmm_ic_shear,dfmm_ic_pi,dfmm_ic_drho
 #endif
+  ! INIT=BLOWUP test-problem parameters
+  namelist/blowup_params/blowup_delta,blowup_rho0,blowup_p0,blowup_nwave &
+       & ,blowup_init_ns
   ! Grid refinement parameters
   namelist/refine_params/x_refine,y_refine,z_refine,r_refine &
        & ,a_refine,b_refine,exp_refine,jeans_refine,mass_cut_refine &
@@ -1033,6 +1043,9 @@ subroutine m_read_params(pst)
 1090 continue
   rewind(1)
 #endif
+  read(1,NML=blowup_params,END=1091)
+1091 continue
+  rewind(1)
   read(1,NML=units_params,END=105)
 105 continue
   rewind(1)
@@ -1486,12 +1499,38 @@ subroutine m_read_params(pst)
   if(riemann=='hll')s%r%riemann=solver_hll
   if(riemann=='hllc')s%r%riemann=solver_hllc
 #endif
+  s%r%blowup_delta=blowup_delta
+  s%r%blowup_rho0=blowup_rho0
+  s%r%blowup_p0=blowup_p0
+  s%r%blowup_nwave=blowup_nwave
+  s%r%blowup_init_ns=blowup_init_ns
+  if(blowup_delta<=0.0d0)then
+     write(*,*)'blowup_delta must be > 0; got ',blowup_delta
+     call mdl_abort(s%mdl)
+  endif
 #ifdef DFMM
   s%r%dfmm_tau=dfmm_tau
   s%r%dfmm_prandtl=dfmm_prandtl
   s%r%dfmm_source=dfmm_source
   s%r%dfmm_diag=dfmm_diag
   s%r%dfmm_fatal_realizability=dfmm_fatal_realizability
+  ! 'ns' turns the identical solver into compressible Navier-Stokes-Fourier
+  ! with explicit viscosity mu = p*dfmm_tau: Pi and Q are set to their
+  ! Chapman-Enskog values each step instead of being evolved.  That makes the
+  ! comparison run differ from the moment run in the closure ALONE -- same
+  ! initial condition, grid, Riemann solver and transport coefficients.
+  if(trim(dfmm_closure)=='evolve')then
+     s%r%dfmm_closure=0
+  else if(trim(dfmm_closure)=='ns')then
+     s%r%dfmm_closure=1
+     if(dfmm_tau<=0.0d0)then
+        write(*,*)"dfmm_closure='ns' needs dfmm_tau > 0 (mu = p*dfmm_tau)"
+        call mdl_abort(s%mdl)
+     endif
+  else
+     write(*,*)"dfmm_closure must be 'evolve' or 'ns'; got ",trim(dfmm_closure)
+     call mdl_abort(s%mdl)
+  endif
   s%r%dfmm_ic_shear=dfmm_ic_shear
   s%r%dfmm_ic_pi=dfmm_ic_pi
   s%r%dfmm_ic_drho=dfmm_ic_drho
