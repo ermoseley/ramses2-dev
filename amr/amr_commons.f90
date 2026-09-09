@@ -194,9 +194,12 @@ module amr_commons
      logical ::dfmm_source=.true.
      logical ::dfmm_diag=.true.
      logical ::dfmm_fatal_realizability=.false.
-     ! INIT=DFMMTEST amplitudes: shear velocity and initial Pi_xx
+     ! INIT=DFMMTEST amplitudes: shear velocity, initial Pi_xx, and the
+     ! isobaric density (hence temperature) perturbation used to drive the
+     ! Stage-2 Fourier heat-flux gate.
      real(kind=8)::dfmm_ic_shear=0.0d0
      real(kind=8)::dfmm_ic_pi=0.0d0
+     real(kind=8)::dfmm_ic_drho=0.0d0
 #endif
 
      ! Physics parameters

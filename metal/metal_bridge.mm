@@ -4442,7 +4442,7 @@ extern "C" void mtl_dfmm_godunov(int head_idx, int num_subgrids, int ngridmax,
                                   int ilevel, int levelmin, int levelmax,
                                   float smallr, float smallc2,
                                   float dt, float dx, int slope, int riemann,
-                                  float tau_pi, int source_on,
+                                  float tau_pi, float tau_q, int source_on,
                                   float *constant_gravity)
 {
     float cg[3] = {constant_gravity[0], constant_gravity[1], constant_gravity[2]};
@@ -4477,7 +4477,7 @@ extern "C" void mtl_dfmm_godunov(int head_idx, int num_subgrids, int ngridmax,
     [enc dispatchThreadgroups:grid_size threadsPerThreadgroup:tg_size];
     [enc endEncoding];
 
-    /* --- strain production + exact BGK relaxation ---
+    /* --- production terms + exact BGK relaxation ---
      * A second encoder on the same command buffer: Metal orders encoders
      * within a command buffer, so this observes the completed transport. */
     enc = [cmd computeCommandEncoder];
@@ -4494,6 +4494,7 @@ extern "C" void mtl_dfmm_godunov(int head_idx, int num_subgrids, int ngridmax,
     [enc setBytes:&dx           length:sizeof(float) atIndex:9];
     [enc setBytes:&tau_pi       length:sizeof(float) atIndex:10];
     [enc setBytes:&source_on    length:sizeof(int)   atIndex:11];
+    [enc setBytes:&tau_q        length:sizeof(float) atIndex:12];
     [enc dispatchThreadgroups:grid_size threadsPerThreadgroup:tg_size];
     [enc endEncoding];
 
@@ -4503,18 +4504,19 @@ extern "C" void mtl_dfmm_godunov(int head_idx, int num_subgrids, int ngridmax,
 
 extern "C" void mtl_dfmm_diag(int head_idx, int num_octs,
                                float smallr, float smallc2, float dx,
-                               float tau_pi,
+                               float tau_pi, float tau_q,
                                float *lam_min, float *dev_ns, float *ani_max,
-                               float *nbad)
+                               float *nbad, float *dev_q, float *q_max)
 {
     /* diag[0] carries lam_min(P)/p + 2 so the bitwise atomic min sees a
-     * positive float; the kernel applies the same offset. */
+     * positive float; the kernel applies the same offset.  Slots 4 and 5
+     * (the heat-flux diagnostics) are written only at Stage 2. */
     float big = 1.0e30f;
-    uint32_t h[4] = {0, 0, 0, 0};
+    uint32_t h[6] = {0, 0, 0, 0, 0, 0};
     memcpy(&h[0], &big, sizeof(float));
     id<MTLBuffer> diag =
         [s_device newBufferWithBytes:h
-                              length:4 * sizeof(uint32_t)
+                              length:6 * sizeof(uint32_t)
                              options:MTLResourceStorageModeShared];
 
     MTLSize tg_size   = {64, 1, 1};
@@ -4533,6 +4535,7 @@ extern "C" void mtl_dfmm_diag(int head_idx, int num_octs,
     [enc setBytes:&smallc2  length:sizeof(float) atIndex:7];
     [enc setBytes:&dx       length:sizeof(float) atIndex:8];
     [enc setBytes:&tau_pi   length:sizeof(float) atIndex:9];
+    [enc setBytes:&tau_q    length:sizeof(float) atIndex:10];
     [enc dispatchThreadgroups:grid_size threadsPerThreadgroup:tg_size];
     [enc endEncoding];
     [cmd commit];
@@ -4543,5 +4546,7 @@ extern "C" void mtl_dfmm_diag(int head_idx, int num_octs,
     *dev_ns  = r[1];
     *ani_max = r[2];
     *nbad    = r[3];
+    *dev_q   = r[4];
+    *q_max   = r[5];
 }
 #endif /* DFMM */

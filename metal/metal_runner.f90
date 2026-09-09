@@ -391,7 +391,7 @@ subroutine metal_dfmm_godunov(sim, ilevel)
   type(ramses_t), intent(inout) :: sim
   integer,        intent(in)    :: ilevel
 
-  real(c_float)  :: smallr, smallc2, dt, dx, tau_pi
+  real(c_float)  :: smallr, smallc2, dt, dx, tau_pi, tau_q
   real(c_float)  :: constant_gravity(3)
   integer(c_int) :: source_on
 
@@ -400,6 +400,7 @@ subroutine metal_dfmm_godunov(sim, ilevel)
   dt               = real(sim%g%dtnew(ilevel),      c_float)
   dx               = real(sim%r%boxlen / 2**ilevel, c_float)
   tau_pi           = real(sim%r%dfmm_tau,           c_float)
+  tau_q            = real(dfmm_tau_q(sim%r),        c_float)
   constant_gravity = real(sim%r%constant_gravity,   c_float)
   source_on        = merge(int(1, c_int), int(0, c_int), sim%r%dfmm_source)
 
@@ -416,7 +417,7 @@ subroutine metal_dfmm_godunov(sim, ilevel)
        smallr, smallc2, dt, dx,        &
        int(sim%r%slope_type,   c_int), &
        int(sim%r%riemann,      c_int), &
-       tau_pi, source_on,              &
+       tau_pi, tau_q, source_on,       &
        constant_gravity)
 
 end subroutine metal_dfmm_godunov
@@ -424,51 +425,80 @@ end subroutine metal_dfmm_godunov
 !###########################################################
 !###########################################################
 !###########################################################
-subroutine metal_dfmm_diag(sim, ilevel, lam_min, dev_ns, ani_max, nbad)
+subroutine metal_dfmm_diag(sim, ilevel, lam_min, dev_ns, ani_max, nbad, &
+                           dev_q, q_max)
   use ramses_commons, only: ramses_t
   implicit none
   type(ramses_t), intent(inout) :: sim
   integer,        intent(in)    :: ilevel
   real(kind=8),   intent(out)   :: lam_min, dev_ns, ani_max
   integer,        intent(out)   :: nbad
+  real(kind=8),   intent(out)   :: dev_q, q_max
 
-  real(c_float) :: smallr, smallc2, dx, tau_pi
-  real(c_float) :: lam_f, dev_f, ani_f, nbad_f
+  real(c_float) :: smallr, smallc2, dx, tau_pi, tau_q
+  real(c_float) :: lam_f, dev_f, ani_f, nbad_f, devq_f, qmax_f
 
   smallr  = real(sim%r%smallr,             c_float)
   smallc2 = real(sim%r%smallc**2,          c_float)
   dx      = real(sim%r%boxlen / 2**ilevel, c_float)
   tau_pi  = real(sim%r%dfmm_tau,           c_float)
+  tau_q   = real(dfmm_tau_q(sim%r),        c_float)
 
-  call mtl_dfmm_diag(                  &
-       int(sim%m%head(ilevel), c_int), &
-       int(sim%m%noct(ilevel), c_int), &
-       smallr, smallc2, dx, tau_pi,    &
-       lam_f, dev_f, ani_f, nbad_f)
+  call mtl_dfmm_diag(                     &
+       int(sim%m%head(ilevel), c_int),    &
+       int(sim%m%noct(ilevel), c_int),    &
+       smallr, smallc2, dx, tau_pi, tau_q, &
+       lam_f, dev_f, ani_f, nbad_f, devq_f, qmax_f)
 
-  lam_min = real(lam_f, 8)
-  dev_ns  = real(dev_f, 8)
-  ani_max = real(ani_f, 8)
+  lam_min = real(lam_f,  8)
+  dev_ns  = real(dev_f,  8)
+  ani_max = real(ani_f,  8)
   nbad    = nint(real(nbad_f, 8))
+  dev_q   = real(devq_f, 8)
+  q_max   = real(qmax_f, 8)
 
 end subroutine metal_dfmm_diag
 !###########################################################
 !###########################################################
 !###########################################################
 !###########################################################
+function dfmm_tau_q(r) result(tau_q)
+  ! Relaxation time of the third central moment.  BGK with a single tau gives
+  ! Pr = 1; separating tau_q = tau_Pi / Pr reproduces any target Prandtl
+  ! number, and Pr = 2/3 is the hard-sphere value used by the blowup note
+  ! (doc/dfmm_3d.md Section 4).  A non-positive tau_Pi means collisionless,
+  ! which is passed straight through so that neither block relaxes.
+  use amr_commons, only: run_t
+  implicit none
+  type(run_t), intent(in) :: r
+  real(kind=8) :: tau_q
+
+  if(r%dfmm_tau > 0.0d0)then
+     tau_q = r%dfmm_tau / r%dfmm_prandtl
+  else
+     tau_q = r%dfmm_tau
+  endif
+
+end function dfmm_tau_q
+!###########################################################
+!###########################################################
+!###########################################################
+!###########################################################
 subroutine metal_dfmm_report(sim, ilevel)
   use ramses_commons, only: ramses_t
+  use hydro_parameters, only: ndfmm
   implicit none
   type(ramses_t), intent(inout) :: sim
   integer,        intent(in)    :: ilevel
 
-  real(kind=8) :: lam_min, dev_ns, ani_max
+  real(kind=8) :: lam_min, dev_ns, ani_max, dev_q, q_max
   integer      :: nbad
 
   if(.not. sim%r%dfmm_diag) return
   if(sim%m%noct(ilevel) <= 0) return
 
-  call metal_dfmm_diag(sim, ilevel, lam_min, dev_ns, ani_max, nbad)
+  call metal_dfmm_diag(sim, ilevel, lam_min, dev_ns, ani_max, nbad, &
+                       dev_q, q_max)
 
   if(sim%g%myid==1)then
      if(sim%r%dfmm_tau > 0.0d0)then
@@ -482,6 +512,17 @@ subroutine metal_dfmm_report(sim, ilevel)
         write(*,'(" dfmm  level=",I2," min lam(P)/p=",1pe10.3, &
              & "  max |Pi|/p=",1pe10.3,"  max |Pi-Pi_NS|/p=       n/a", &
              & "  n(lam<0)=",I0)') ilevel, lam_min, ani_max, nbad
+     end if
+     ! Stage 2: the evolved heat flux against its Fourier extrapolation
+     ! q_CE = -(5/2) tau_q p grad theta, the paper's first closure indicator.
+     if(ndfmm >= 15)then
+        if(sim%r%dfmm_tau > 0.0d0)then
+           write(*,'(" dfmm  level=",I2,"    max |q|/(p cs)=",1pe10.3, &
+                & "  max |q-q_CE|/(p cs)=",1pe10.3)') ilevel, q_max, dev_q
+        else
+           write(*,'(" dfmm  level=",I2,"    max |q|/(p cs)=",1pe10.3, &
+                & "  max |q-q_CE|/(p cs)=       n/a")') ilevel, q_max
+        end if
      end if
   end if
 

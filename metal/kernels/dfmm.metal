@@ -1,20 +1,27 @@
 /*
  * metal/kernels/dfmm.metal
  *
- * dfmm (dual-frame moment method) in 3D — Stage 1: ten-moment Gaussian
- * closure.  See doc/dfmm_3d.md for the frozen equation, flux, source and
- * realizability ledger; this file implements Sections 3, 4 and 5 of it.
+ * dfmm (dual-frame moment method) in 3D.  See doc/dfmm_3d.md for the frozen
+ * equation, flux, source and realizability ledger; this file implements
+ * Sections 3, 4 and 5 of it.
+ *
+ * Two stages are selectable at compile time via NDFMM (bin/Makefile DFMM=n):
+ *   NDFMM=5   Stage 1, ten-moment Gaussian closure: Pi_ij evolved, Q_ijk = 0.
+ *   NDFMM=15  Stage 2, adds the third central moment Q_ijk with the Wick
+ *             fourth moment R_ijkl = (P_ij P_kl + P_ik P_jl + P_il P_jk)/rho.
  *
  * Scope: NDIM=3, float32, HLL (or LLF) numerical flux only.  HLLC is not
  * provided: its middle-state construction is defined for the Euler system and
  * has no standard contact reconstruction for the anisotropic pressure, and the
  * 1D reference implementation this generalises is HLL.
  *
- * State (NVAR = 5 + NDFMM, NDFMM = 5):
- *   ivar 1     rho
- *   ivar 2..4  rho u_i
- *   ivar 5     E = rho|u|^2/2 + 3p/2          (gamma = 5/3 enforced)
- *   ivar 6..10 Pi_xx, Pi_yy, Pi_xy, Pi_xz, Pi_yz   with Pi_zz = -(Pi_xx+Pi_yy)
+ * State (NVAR = 5 + NDFMM):
+ *   ivar 1      rho
+ *   ivar 2..4   rho u_i
+ *   ivar 5      E = rho|u|^2/2 + 3p/2         (gamma = 5/3 enforced)
+ *   ivar 6..10  Pi_xx, Pi_yy, Pi_xy, Pi_xz, Pi_yz  with Pi_zz = -(Pi_xx+Pi_yy)
+ *   ivar 11..20 Q_xxx Q_yyy Q_zzz Q_xxy Q_xxz Q_yyx Q_yyz Q_zzx Q_zzy Q_xyz
+ *               (Stage 2 only)
  *
  * This is a self-contained translation unit: it deliberately does not include
  * hydro.metal, so the baseline hydro kernels cannot be perturbed by anything
@@ -31,9 +38,10 @@
  *                     [17]=father
  *   dfmm_source:      [0]=grid [1]=uold [2]=unew [3]=nbor [4]=head_idx
  *                     [5]=num_octs [6]=smallr [7]=smallc2 [8]=dt [9]=dx
- *                     [10]=tau_pi [11]=source_on
+ *                     [10]=tau_pi [11]=source_on [12]=tau_q
  *   dfmm_diag:        [0]=grid [1]=uold [2]=nbor [3]=diag [4]=head_idx
  *                     [5]=num_octs [6]=smallr [7]=smallc2 [8]=dx [9]=tau_pi
+ *                     [10]=tau_q
  */
 
 #include <metal_stdlib>
@@ -73,6 +81,36 @@ using namespace metal;
 #define PI_XZ 3
 #define PI_YZ 4
 
+/* Third central moment Q_ijk (Stage 2).  Ten independent components in the
+ * packing order fixed by doc/dfmm_3d.md Section 2:
+ *   0 xxx  1 yyy  2 zzz  3 xxy  4 xxz  5 yyx  6 yyz  7 zzx  8 zzy  9 xyz  */
+#if NDFMM >= 15
+#define DF_HAVE_Q 1
+#define DF_NQ     10
+#define DI_Q      (DI_PI + 5)
+#else
+#define DF_HAVE_Q 0
+#define DF_NQ     0
+#endif
+
+#if DF_HAVE_Q
+/* (i,j,k) of each packed slot, and the packed slot of an arbitrary (i,j,k)
+ * addressed as 9i + 3j + k.  Q is fully symmetric, so DF_QMAP is invariant
+ * under every permutation of its three indices. */
+constant int DF_QIJK[DF_NQ][3] = {
+    {0,0,0}, {1,1,1}, {2,2,2},
+    {0,0,1}, {0,0,2}, {1,1,0}, {1,1,2}, {2,2,0}, {2,2,1},
+    {0,1,2}};
+constant int DF_QMAP[27] = {
+    0,3,4,  3,5,9,  4,9,7,
+    3,5,9,  5,1,6,  9,6,8,
+    4,9,7,  9,6,8,  7,8,2};
+#define DF_QS(i,j,k) (DF_QMAP[9*(i) + 3*(j) + (k)])
+
+/* sym6 slot of (a,b) for the (xx,yy,zz,xy,xz,yz) packing. */
+constant int DF_S6[3][3] = {{0,3,4},{3,1,5},{4,5,2}};
+#endif
+
 constant int   TWOTONDIM = 8;
 constant int   NSUBGRID  = 1;
 constant int   NSUBGRIDP2 = 3;   /* NSUBGRID + 2 */
@@ -107,9 +145,11 @@ static inline int df_u_flat(int oct_1, int ivar_1, int cell_1) {
 
 /* ---------------------------------------------------------------------------
  * Threadgroup storage.  Budget (doc/dfmm_3d.md Section 6):
- *   subgrid    DF_NV * 6^3 * 4 B = 8640 B   (+ 64 B refined)
- *   interfaces 6 * DF_NV * 12 * 4 B = 2880 B
- *   total                            11584 B  of the 32768 B Apple limit.
+ *   subgrid    DF_NV * 6^3 * 4 B        (+ 64 B refined)
+ *   interfaces 6 * DF_NV * 12 * 4 B
+ *   total      DF_NV * 1152 B + 64 B  =  11584 B at Stage 1 (DF_NV = 10)
+ *                                        23104 B at Stage 2 (DF_NV = 20)
+ * against the 32768 B Apple per-threadgroup limit.
  * --------------------------------------------------------------------------*/
 struct df_subgrid_t {
     float v[DF_NV][6][6][6];
@@ -141,6 +181,22 @@ static inline void df_P_sym6(float p, thread const float *pi, thread float *P) {
     df_pi_to_sym6(pi, P);
     P[0] += p; P[1] += p; P[2] += p;
 }
+
+/* Expand sym6 to a row-major 3x3 addressed as M[3*a + b]. */
+static inline void df_mat_from_sym6(thread const float *s, thread float *M) {
+    M[0] = s[0]; M[1] = s[3]; M[2] = s[4];
+    M[3] = s[3]; M[4] = s[1]; M[5] = s[5];
+    M[6] = s[4]; M[7] = s[5]; M[8] = s[2];
+}
+
+#if DF_HAVE_Q
+/* Contracted heat flux q_i = Q_ijj / 2. */
+static inline void df_heat_flux(thread const float *Q, thread float *qv) {
+    qv[0] = 0.5f*(Q[0] + Q[5] + Q[7]);   /* Q_xxx + Q_xyy + Q_xzz */
+    qv[1] = 0.5f*(Q[3] + Q[1] + Q[8]);   /* Q_yxx + Q_yyy + Q_yzz */
+    qv[2] = 0.5f*(Q[4] + Q[6] + Q[2]);   /* Q_zxx + Q_zyy + Q_zzz */
+}
+#endif
 
 /* Normal component P_nn for n = x, y, z (idim = 0, 1, 2). */
 static inline float df_P_nn(float p, thread const float *pi, int idim) {
@@ -203,6 +259,22 @@ static inline void df_rotate_fwd(thread float *w, int idim) {
         w[DI_PI+PI_XZ] = e;    /* Pi'_x'z' = Pi_zy */
         w[DI_PI+PI_YZ] = c;    /* Pi'_y'z' = Pi_xy */
     }
+#if DF_HAVE_Q
+    /* Q is a fully symmetric rank-3 tensor, so the same axis map applies to
+     * all three of its indices:  Q'_abc = Q_{s(a) s(b) s(c)}, with s the
+     * primed -> unprimed map used above for the velocity. */
+    {
+        int sg[3];
+        if (idim == 1) { sg[0] = 1; sg[1] = 2; sg[2] = 0; }
+        else           { sg[0] = 2; sg[1] = 0; sg[2] = 1; }
+        float Qo[DF_NQ];
+        for (int m = 0; m < DF_NQ; m++) Qo[m] = w[DI_Q+m];
+        for (int m = 0; m < DF_NQ; m++) {
+            int qi = DF_QIJK[m][0], qj = DF_QIJK[m][1], qk = DF_QIJK[m][2];
+            w[DI_Q+m] = Qo[DF_QS(sg[qi], sg[qj], sg[qk])];
+        }
+    }
+#endif
 }
 
 /* Rotate a flux vector from the x-normal frame back to the lab frame.  The
@@ -232,6 +304,23 @@ static inline void df_rotate_flux_back(thread float *w, int idim) {
         w[DI_PI+PI_YZ] = g3;
         w[DI_PI+PI_XY] = g4;
     }
+#if DF_HAVE_Q
+    /* Inverse of the forward Q permutation: the flux slot of the primed
+     * component Q'_abc is the flux slot of Q_{s(a) s(b) s(c)}.  s is a
+     * permutation and DF_QMAP is symmetric, so this hits each of the ten
+     * packed slots exactly once. */
+    {
+        int sg[3];
+        if (idim == 1) { sg[0] = 1; sg[1] = 2; sg[2] = 0; }
+        else           { sg[0] = 2; sg[1] = 0; sg[2] = 1; }
+        float Fo[DF_NQ];
+        for (int m = 0; m < DF_NQ; m++) Fo[m] = w[DI_Q+m];
+        for (int m = 0; m < DF_NQ; m++) {
+            int qi = DF_QIJK[m][0], qj = DF_QIJK[m][1], qk = DF_QIJK[m][2];
+            w[DI_Q + DF_QS(sg[qi], sg[qj], sg[qk])] = Fo[m];
+        }
+    }
+#endif
 }
 
 /* ===========================================================================
@@ -267,8 +356,13 @@ static inline void df_prim_to_cons(thread const float *w, thread float *c) {
  *   F[mx]    = rho ux ux + p + Pi_xx
  *   F[my]    = rho uy ux + Pi_xy
  *   F[mz]    = rho uz ux + Pi_xz
- *   F[E]     = ux (E + p) + (ux Pi_xx + uy Pi_xy + uz Pi_xz)      [+ q_x at Stage 2]
- *   F[Pi_ij] = ux Pi_ij                                          [+ Q_ijx - (2/3)d_ij q_x]
+ *   F[E]     = ux (E + p) + (ux Pi_xx + uy Pi_xy + uz Pi_xz) + q_x
+ *   F[Pi_ij] = ux Pi_ij + Q_ijx - (2/3) d_ij q_x
+ *   F[Q_ijk] = ux Q_ijk + R_ijkx                       (Stage 2, Wick R)
+ *
+ * The Q and q terms vanish identically at Stage 1.  Contracting F[Pi_ij] on
+ * ij gives Q_iix - 2 q_x = 0, so the flux of the traceless Pi block stays
+ * traceless and the two-component storage remains consistent.
  * ========================================================================= */
 static inline void df_phys_flux(thread const float *w, thread float *F) {
     float rho = w[DI_RHO], ux = w[DI_UX], uy = w[DI_UY], uz = w[DI_UZ], p = w[DI_P];
@@ -281,6 +375,31 @@ static inline void df_phys_flux(thread const float *w, thread float *F) {
     F[DI_UZ]  = rho*uz*ux + pxz;
     F[DI_P]   = ux*(E + p) + (ux*pxx + uy*pxy + uz*pxz);
     for (int m = 0; m < NDFMM; m++) F[DI_PI+m] = ux*w[DI_PI+m];
+
+#if DF_HAVE_Q
+    thread const float *Q = &w[DI_Q];
+    float qv[3];
+    df_heat_flux(Q, qv);
+
+    F[DI_P] += qv[0];
+
+    float tq = (2.0f/3.0f)*qv[0];
+    F[DI_PI+PI_XX] += Q[DF_QS(0,0,0)] - tq;
+    F[DI_PI+PI_YY] += Q[DF_QS(1,1,0)] - tq;
+    F[DI_PI+PI_XY] += Q[DF_QS(0,1,0)];
+    F[DI_PI+PI_XZ] += Q[DF_QS(0,2,0)];
+    F[DI_PI+PI_YZ] += Q[DF_QS(1,2,0)];
+
+    float Ps[6]; df_P_sym6(p, &w[DI_PI], Ps);
+    float PM[9]; df_mat_from_sym6(Ps, PM);
+    float irho = 1.0f/rho;
+    for (int m = 0; m < DF_NQ; m++) {
+        int qi = DF_QIJK[m][0], qj = DF_QIJK[m][1], qk = DF_QIJK[m][2];
+        F[DI_Q+m] += (PM[3*qi+qj]*PM[3*qk+0]
+                    + PM[3*qi+qk]*PM[3*qj+0]
+                    + PM[3*qi+0 ]*PM[3*qj+qk])*irho;
+    }
+#endif
 }
 
 /* ===========================================================================
@@ -398,17 +517,30 @@ static void df_load_subgrid(
  * doc/dfmm_3d.md Sections 3-4:
  *   velocity:  -(1/rho) d_k Pi_ik           (from the momentum flux term Pi_ik)
  *   pressure:  -(2/3) Pi_kl d_l u_k         (from the energy flux term u_i Pi_ik)
+ *              -(2/3) div q                 (from the energy flux term q_k)
  *   Pi_ij:     -u.grad Pi_ij - Pi_ij div u  (transport, density-like)
- *              -2 p S0_ij - [Pi_ik G_jk + Pi_jk G_ik]^dev   (strain production)
+ *              -d_k Q_ijk + (2/3) d_ij div q          (from the Pi_ij flux)
+ *   Q_ijk:     -u.grad Q_ijk - Q_ijk div u  (transport, density-like)
+ *              -d_l R_ijkl + T_Q1                     (see below)
  *
- * The first two are *flux*-derived and are handled conservatively by the
- * Riemann solve; they appear here only because the predictor works in
- * primitive variables.  The strain production is a genuine source and is
- * applied over the full step by dfmm_source_kernel; including it at half
- * weight here only sharpens the interface states.
+ * All of these are *flux*-derived or non-stiff, and are handled
+ * conservatively by the Riemann solve; they appear here only because the
+ * predictor works in primitive variables.
  *
- * BGK relaxation is deliberately absent from the predictor: it is applied as
- * an exact exponential map, mirroring the 1D reference.
+ * What is deliberately absent, in both cases because it is stiff and must be
+ * integrated together with its own relaxation sink (dfmm_source_kernel does
+ * that exactly):
+ *   Pi_ij:  -2 p S0_ij - [Pi_ik G_jk + Pi_jk G_ik]^dev  and  -Pi_ij/tau_Pi
+ *   Q_ijk:  -[Q_jkl G_il + Q_ikl G_jl + Q_ijl G_kl]     and  -Q_ijk/tau_q
+ * An unrelaxed half-step copy of a stiff production term overshoots the
+ * interface states whenever dt >> tau.  The 1D reference makes the same
+ * choice: sources follow the flux update.
+ *
+ * T_Q1 = (1/rho)(P_jk d_l P_li + P_ik d_l P_lj + P_ij d_l P_lk) is *not*
+ * stiff, and it is kept here because it very nearly cancels d_l R_ijkl: the
+ * divergence-of-P parts cancel analytically, leaving only a temperature
+ * gradient (doc/dfmm_3d.md Section 4).  Dropping one of the pair would leave
+ * an O(1) unbalanced term in the reconstruction.
  */
 static void df_trace(
     threadgroup df_subgrid_t &ls, int thread_idx, uint threads_per_tg,
@@ -487,6 +619,67 @@ static void df_trace(
              * folded into the reconstruction.
              * `divu` is retained above only for the flux-derived terms. */
             (void)divu;
+
+#if DF_HAVE_Q
+            thread const float * const sl[3] = { sx, sy, sz };
+
+            /* div q from the half-slopes:  d_k q_k = (1/2) d_k Q_kll */
+            float divq = 0.0f;
+            for (int kk = 0; kk < 3; kk++)
+                for (int ll = 0; ll < 3; ll++)
+                    divq += 0.5f*sl[kk][DI_Q + DF_QS(kk,ll,ll)];
+
+            /* d_k Q_ijk for the five stored (ij) */
+            float dQ[5];
+            dQ[PI_XX] = sx[DI_Q+DF_QS(0,0,0)] + sy[DI_Q+DF_QS(0,0,1)] + sz[DI_Q+DF_QS(0,0,2)];
+            dQ[PI_YY] = sx[DI_Q+DF_QS(1,1,0)] + sy[DI_Q+DF_QS(1,1,1)] + sz[DI_Q+DF_QS(1,1,2)];
+            dQ[PI_XY] = sx[DI_Q+DF_QS(0,1,0)] + sy[DI_Q+DF_QS(0,1,1)] + sz[DI_Q+DF_QS(0,1,2)];
+            dQ[PI_XZ] = sx[DI_Q+DF_QS(0,2,0)] + sy[DI_Q+DF_QS(0,2,1)] + sz[DI_Q+DF_QS(0,2,2)];
+            dQ[PI_YZ] = sx[DI_Q+DF_QS(1,2,0)] + sy[DI_Q+DF_QS(1,2,1)] + sz[DI_Q+DF_QS(1,2,2)];
+
+            src[DI_PI+PI_XX] -= dQ[PI_XX] - (2.0f/3.0f)*divq;
+            src[DI_PI+PI_YY] -= dQ[PI_YY] - (2.0f/3.0f)*divq;
+            src[DI_PI+PI_XY] -= dQ[PI_XY];
+            src[DI_PI+PI_XZ] -= dQ[PI_XZ];
+            src[DI_PI+PI_YZ] -= dQ[PI_YZ];
+            src[DI_P]        -= (2.0f/3.0f)*divq;
+
+            /* -d_l R_ijkl + T_Q1, with the div P terms already cancelled:
+             *   -(1/rho)  sum_l ( d_l P_ij P_kl + d_l P_ik P_jl + d_l P_jk P_il )
+             *   +(1/rho^2)sum_l ( P_ij P_kl + P_ik P_jl + P_il P_jk ) d_l rho
+             * For P = p I this collapses to
+             *   -( d_ij p d_k theta + d_ik p d_j theta + d_jk p d_i theta ),
+             * i.e. exactly the term that drives the Fourier heat flux. */
+            float PM[9];
+            {
+                float Ps[6];
+                df_P_sym6(p, &w[DI_PI], Ps);
+                df_mat_from_sym6(Ps, PM);
+            }
+            float sP[3][6];
+            for (int l = 0; l < 3; l++) {
+                df_pi_to_sym6(&sl[l][DI_PI], sP[l]);
+                sP[l][0] += sl[l][DI_P];
+                sP[l][1] += sl[l][DI_P];
+                sP[l][2] += sl[l][DI_P];
+            }
+            float dr[3]  = { sx[DI_RHO], sy[DI_RHO], sz[DI_RHO] };
+            float irho2  = irho*irho;
+            for (int m = 0; m < DF_NQ; m++) {
+                int qi = DF_QIJK[m][0], qj = DF_QIJK[m][1], qk = DF_QIJK[m][2];
+                float acc = 0.0f;
+                for (int l = 0; l < 3; l++) {
+                    float t1 = sP[l][DF_S6[qi][qj]]*PM[3*qk+l]
+                             + sP[l][DF_S6[qi][qk]]*PM[3*qj+l]
+                             + sP[l][DF_S6[qj][qk]]*PM[3*qi+l];
+                    float t2 = PM[3*qi+qj]*PM[3*qk+l]
+                             + PM[3*qi+qk]*PM[3*qj+l]
+                             + PM[3*qi+l ]*PM[3*qj+qk];
+                    acc += -t1*irho + t2*dr[l]*irho2;
+                }
+                src[DI_Q+m] += acc;
+            }
+#endif
         }
 
         for (int iv = 0; iv < DF_NV; iv++) q[iv] = w[iv] + dtdx*src[iv];
@@ -762,14 +955,45 @@ kernel void dfmm_integrator_kernel(
 }
 
 /* ===========================================================================
- * dfmm_source_kernel — strain production and exact BGK relaxation
+ * dfmm_source_kernel — production terms and exact BGK relaxation
  *
  * Operator order (doc/dfmm_3d.md Section 4): this runs after transport and
- * before uold is overwritten.  Velocity gradients are taken from uold, not
- * unew: set_unew zeroes unew in virtual boundaries, so unew's neighbour data
- * is not valid for a centred difference.  This mirrors the 1D reference, which
- * evaluates du/dx on the pre-update state.
+ * before uold is overwritten.  Gradients are taken from uold, not unew:
+ * set_unew only copies uold -> unew for octs at ilevel, so unew's neighbour
+ * data is not valid for a centred difference.  This mirrors the 1D reference,
+ * which evaluates du/dx on the pre-update state.
+ *
+ * Both moment blocks are advanced by the same asymptotic-preserving map.  For
+ * dX/dt = rate - X/tau with `rate` frozen over the step the exact solution is
+ *
+ *     X <- X_old d + tau (1 - d) rate,        d = exp(-dt/tau),
+ *
+ * and `rate` must be the *whole* non-stiff right-hand side: the production
+ * terms T plus the transport rate the Godunov step already applied, which is
+ * recoverable as (unew - uold)/dt.
+ *
+ * Including the transport rate is not optional for Q.  Its flux carries the
+ * Wick fourth moment R_ijkl, which is O(1) and cancels all but a temperature
+ * gradient against T_Q1; dropping it whenever dt >> tau_q would replace the
+ * Fourier heat flux -(5/2) tau_q p grad theta by an unrelated quantity.  For
+ * Pi the same omission is only O(tau^2), a Burnett-order correction, but the
+ * two blocks are treated identically here for uniformity.
+ *
+ * tau <= 0 means collisionless: d = 1 and tau(1-d) -> dt, so the map degrades
+ * to X_new = X_transported + dt T, which is the correct explicit update.
  * ========================================================================= */
+
+/* Stage 1 needs only the velocity stencil.  Stage 2 additionally needs p and
+ * the five stored Pi components, to form div P for the Q production term.
+ *   Stage 1:  3 * 216 * 4 =  2592 B of threadgroup memory
+ *   Stage 2:  9 * 216 * 4 =  7776 B
+ */
+#if DF_HAVE_Q
+#define DF_NSRC 9
+#else
+#define DF_NSRC 3
+#endif
+
 kernel void dfmm_source_kernel(
     device const oct_t *grid     [[buffer(0)]],
     device const float *uold     [[buffer(1)]],
@@ -783,14 +1007,14 @@ kernel void dfmm_source_kernel(
     constant float     &dx       [[buffer(9)]],
     constant float     &tau_pi   [[buffer(10)]],
     constant int       &source_on[[buffer(11)]],
+    constant float     &tau_q    [[buffer(12)]],
     uint block_idx      [[threadgroup_position_in_grid]],
     uint thread_idx     [[thread_position_in_threadgroup]],
     uint threads_per_tg [[threads_per_threadgroup]])
 {
     if (int(block_idx) >= num_octs) return;
 
-    /* 6x6x6 velocity stencil (only three fields: 3*216*4 = 2592 B). */
-    threadgroup float uu[3][6][6][6];
+    threadgroup float st[DF_NSRC][6][6][6];
 
     const int work_size  = 6;
     const int total_work = work_size*work_size*work_size;
@@ -804,33 +1028,46 @@ kernel void dfmm_source_kernel(
         index_1Dto3D(cell_idx - 1, 2, 2, ib, jb, kb);
         int i = ib + 2*i_sg, j = jb + 2*j_sg, k = kb + 2*k_sg;
 
-        float rho = max(df_u_get(uold, source_idx, 1, cell_idx), smallr);
-        uu[0][i][j][k] = df_u_get(uold, source_idx, 2, cell_idx)/rho;
-        uu[1][i][j][k] = df_u_get(uold, source_idx, 3, cell_idx)/rho;
-        uu[2][i][j][k] = df_u_get(uold, source_idx, 4, cell_idx)/rho;
+        float cc[5];
+        for (int iv = 0; iv < 5; iv++)
+            cc[iv] = df_u_get(uold, source_idx, iv + 1, cell_idx);
+        float rho = max(cc[DI_RHO], smallr);
+        st[0][i][j][k] = cc[DI_UX]/rho;
+        st[1][i][j][k] = cc[DI_UY]/rho;
+        st[2][i][j][k] = cc[DI_UZ]/rho;
+#if DF_HAVE_Q
+        float ekin = 0.5f*(cc[DI_UX]*cc[DI_UX] + cc[DI_UY]*cc[DI_UY]
+                         + cc[DI_UZ]*cc[DI_UZ])/rho;
+        st[3][i][j][k] = max(DF_GM1*(cc[DI_P] - ekin), rho*smallc2/DF_GAMMA);
+        for (int m = 0; m < 5; m++)
+            st[4+m][i][j][k] = df_u_get(uold, source_idx, 6 + m, cell_idx);
+#endif
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     int oct_idx = head_idx + int(block_idx);
     float inv2dx = 0.5f/dx;
+    float invdt  = 1.0f/dt;
 
-    /* Exact solution of  dPi/dt = T - Pi/tau  over dt with T frozen:
-     *     Pi <- Pi*d + tau*T*(1 - d),      d = exp(-dt/tau).
-     * This is asymptotic-preserving.  For dt << tau it reduces to
-     * Pi + dt*T; for dt >> tau it gives Pi -> tau*T, which is the
-     * Navier-Stokes stress -2 p tau S0.  Naive "add dt*T then multiply by d"
-     * instead sends Pi -> 0 for dt >> tau and would destroy exactly the
-     * limit the blowup study has to measure against.
-     * tau <= 0 means collisionless: no relaxation at all. */
-    bool collisional = (tau_pi > 0.0f);
-    float decay = 1.0f, tau_omd = dt;
-    if (collisional) {
-        float xr = dt/tau_pi;
-        float omd;
-        if (xr < 1.0e-4f) { omd = xr*(1.0f - 0.5f*xr); decay = 1.0f - omd; }
-        else              { decay = exp(-xr);          omd = 1.0f - decay; }
-        tau_omd = tau_pi*omd;     /* -> dt for small xr, -> tau for large xr */
+    /* Relaxation weights: `decay` = exp(-dt/tau), `tau_omd` = tau(1 - decay).
+     * The series form below the cutoff keeps tau_omd -> dt to float32
+     * accuracy, where exp(-x) - 1 loses all of its significant digits. */
+    float decay_pi = 1.0f, tomd_pi = dt;
+    if (tau_pi > 0.0f) {
+        float xr = dt/tau_pi, omd;
+        if (xr < 1.0e-4f) { omd = xr*(1.0f - 0.5f*xr); decay_pi = 1.0f - omd; }
+        else              { decay_pi = exp(-xr);       omd = 1.0f - decay_pi; }
+        tomd_pi = tau_pi*omd;
     }
+#if DF_HAVE_Q
+    float decay_q = 1.0f, tomd_q = dt;
+    if (tau_q > 0.0f) {
+        float xr = dt/tau_q, omd;
+        if (xr < 1.0e-4f) { omd = xr*(1.0f - 0.5f*xr); decay_q = 1.0f - omd; }
+        else              { decay_q = exp(-xr);        omd = 1.0f - decay_q; }
+        tomd_q = tau_q*omd;
+    }
+#endif
 
     for (int cell = int(thread_idx); cell < TWOTONDIM; cell += int(threads_per_tg)) {
         int cell_idx = cell + 1;
@@ -840,50 +1077,102 @@ kernel void dfmm_source_kernel(
         index_1Dto3D(cell, 2, 2, ib, jb, kb);
         int i = ib + 2, j = jb + 2, k = kb + 2;   /* centre 2x2x2 of the stencil */
 
-        /* Post-transport state of this cell */
+        /* Post-transport state of this cell, and the pre-transport moments so
+         * that the transport rate (xt - xo)/dt can be recovered. */
         float c[DF_NV], w[DF_NV];
         for (int iv = 0; iv < DF_NV; iv++) c[iv] = df_u_get(unew, oct_idx, iv + 1, cell_idx);
         df_cons_to_prim(c, w, smallr, smallc2);
         float p = w[DI_P];
 
-        float pi[NDFMM];
-        for (int m = 0; m < NDFMM; m++) pi[m] = w[DI_PI+m];
+        float xo[NDFMM], xt[NDFMM], T[NDFMM];
+        for (int m = 0; m < NDFMM; m++) {
+            xo[m] = df_u_get(uold, oct_idx, 6 + m, cell_idx);
+            xt[m] = w[DI_PI+m];
+            T[m]  = 0.0f;
+        }
 
         if (source_on != 0) {
             /* G_ij = d_j u_i, centred, from uold */
             float G[3][3];
             for (int a = 0; a < 3; a++) {
-                G[a][0] = (uu[a][i+1][j][k] - uu[a][i-1][j][k])*inv2dx;
-                G[a][1] = (uu[a][i][j+1][k] - uu[a][i][j-1][k])*inv2dx;
-                G[a][2] = (uu[a][i][j][k+1] - uu[a][i][j][k-1])*inv2dx;
+                G[a][0] = (st[a][i+1][j][k] - st[a][i-1][j][k])*inv2dx;
+                G[a][1] = (st[a][i][j+1][k] - st[a][i][j-1][k])*inv2dx;
+                G[a][2] = (st[a][i][j][k+1] - st[a][i][j][k-1])*inv2dx;
             }
 
-            float pis[6]; df_pi_to_sym6(pi, pis);
-            float PI[3][3] = {{pis[0], pis[3], pis[4]},
-                              {pis[3], pis[1], pis[5]},
-                              {pis[4], pis[5], pis[2]}};
+            float pis[6]; df_pi_to_sym6(xt, pis);
+            float PIm[9]; df_mat_from_sym6(pis, PIm);
 
-            float T[3][3];
+            /* S[Pi_ij] = -2 p S0_ij - [Pi_ik G_jk + Pi_jk G_ik]^dev */
+            float TP[3][3];
             for (int a = 0; a < 3; a++) for (int b = 0; b < 3; b++) {
-                float S = 0.5f*(G[a][b] + G[b][a]);
+                float S  = 0.5f*(G[a][b] + G[b][a]);
                 float PG = 0.0f;
-                for (int cc = 0; cc < 3; cc++) PG += PI[a][cc]*G[b][cc] + PI[b][cc]*G[a][cc];
-                T[a][b] = -2.0f*p*S - PG;
+                for (int cc = 0; cc < 3; cc++)
+                    PG += PIm[3*a+cc]*G[b][cc] + PIm[3*b+cc]*G[a][cc];
+                TP[a][b] = -2.0f*p*S - PG;
             }
-            float trT = (T[0][0] + T[1][1] + T[2][2])/3.0f;
-            T[0][0] -= trT; T[1][1] -= trT; T[2][2] -= trT;
+            float trT = (TP[0][0] + TP[1][1] + TP[2][2])/3.0f;
+            TP[0][0] -= trT; TP[1][1] -= trT; TP[2][2] -= trT;
 
-            pi[PI_XX] = pi[PI_XX]*decay + tau_omd*T[0][0];
-            pi[PI_YY] = pi[PI_YY]*decay + tau_omd*T[1][1];
-            pi[PI_XY] = pi[PI_XY]*decay + tau_omd*T[0][1];
-            pi[PI_XZ] = pi[PI_XZ]*decay + tau_omd*T[0][2];
-            pi[PI_YZ] = pi[PI_YZ]*decay + tau_omd*T[1][2];
-        } else {
-            /* No strain production: pure relaxation toward isotropy. */
-            for (int m = 0; m < NDFMM; m++) pi[m] *= decay;
+            T[PI_XX] = TP[0][0];
+            T[PI_YY] = TP[1][1];
+            T[PI_XY] = TP[0][1];
+            T[PI_XZ] = TP[0][2];
+            T[PI_YZ] = TP[1][2];
+
+#if DF_HAVE_Q
+            /* div P from uold: d_l P_li = d_i p + d_l Pi_li */
+            float gp[3] = {
+                (st[3][i+1][j][k] - st[3][i-1][j][k])*inv2dx,
+                (st[3][i][j+1][k] - st[3][i][j-1][k])*inv2dx,
+                (st[3][i][j][k+1] - st[3][i][j][k-1])*inv2dx};
+            float gpi[3][5];
+            for (int m = 0; m < 5; m++) {
+                gpi[0][m] = (st[4+m][i+1][j][k] - st[4+m][i-1][j][k])*inv2dx;
+                gpi[1][m] = (st[4+m][i][j+1][k] - st[4+m][i][j-1][k])*inv2dx;
+                gpi[2][m] = (st[4+m][i][j][k+1] - st[4+m][i][j][k-1])*inv2dx;
+            }
+            float divP[3];
+            divP[0] = gp[0] + gpi[0][PI_XX] + gpi[1][PI_XY] + gpi[2][PI_XZ];
+            divP[1] = gp[1] + gpi[0][PI_XY] + gpi[1][PI_YY] + gpi[2][PI_YZ];
+            divP[2] = gp[2] + gpi[0][PI_XZ] + gpi[1][PI_YZ]
+                    - (gpi[2][PI_XX] + gpi[2][PI_YY]);
+
+            /* P and Q of the post-transport state */
+            float Ps[6]; df_P_sym6(p, xt, Ps);
+            float PM[9]; df_mat_from_sym6(Ps, PM);
+            thread const float *Qc = &xt[5];
+
+            /* S[Q_ijk] = (1/rho)( P_jk d_l P_li + P_ik d_l P_lj + P_ij d_l P_lk )
+             *            - ( Q_jkl G_il + Q_ikl G_jl + Q_ijl G_kl )
+             * The -d_l R_ijkl companion of the first term is carried by the
+             * flux and enters here through the transport rate. */
+            for (int m = 0; m < DF_NQ; m++) {
+                int qi = DF_QIJK[m][0], qj = DF_QIJK[m][1], qk = DF_QIJK[m][2];
+                float prod = (PM[3*qj+qk]*divP[qi]
+                            + PM[3*qi+qk]*divP[qj]
+                            + PM[3*qi+qj]*divP[qk])/w[DI_RHO];
+                float dist = 0.0f;
+                for (int l = 0; l < 3; l++)
+                    dist += Qc[DF_QS(qj,qk,l)]*G[qi][l]
+                          + Qc[DF_QS(qi,qk,l)]*G[qj][l]
+                          + Qc[DF_QS(qi,qj,l)]*G[qk][l];
+                T[5+m] = prod - dist;
+            }
+#endif
         }
 
-        for (int m = 0; m < NDFMM; m++) df_u_set(unew, oct_idx, 6 + m, cell_idx, pi[m]);
+        for (int m = 0; m < 5; m++) {
+            float rate = (xt[m] - xo[m])*invdt + T[m];
+            df_u_set(unew, oct_idx, 6 + m, cell_idx, xo[m]*decay_pi + tomd_pi*rate);
+        }
+#if DF_HAVE_Q
+        for (int m = 5; m < NDFMM; m++) {
+            float rate = (xt[m] - xo[m])*invdt + T[m];
+            df_u_set(unew, oct_idx, 6 + m, cell_idx, xo[m]*decay_q + tomd_q*rate);
+        }
+#endif
     }
 }
 
@@ -984,14 +1273,30 @@ kernel void dfmm_cmpdt_kernel(
  * dfmm_diag_kernel — closure-quality and realizability diagnostics
  *
  * Reported per level (doc/dfmm_3d.md Section 0):
- *   diag[0]  min over cells of lam_min(P)/p          (realizability margin)
- *   diag[1]  max over cells of ||Pi - Pi_NS||_F / p  (Navier-Stokes deviation)
- *   diag[2]  max over cells of ||Pi||_F / p          (anisotropy amplitude)
- *   diag[3]  count of cells with lam_min(P) < 0      (as a float)
+ *   diag[0]  min over cells of lam_min(P)/p           (realizability margin)
+ *   diag[1]  max over cells of ||Pi - Pi_NS||_F / p   (Navier-Stokes deviation)
+ *   diag[2]  max over cells of ||Pi||_F / p           (anisotropy amplitude)
+ *   diag[3]  count of cells with lam_min(P) < 0       (as a float)
+ *   diag[4]  max over cells of ||q - q_CE|| / (p c_s) (Fourier deviation)
+ *   diag[5]  max over cells of ||q|| / (p c_s)        (heat-flux amplitude)
+ *
+ * Slots 4 and 5 are written only at Stage 2, where q is a primary variable;
+ * at Stage 1 they stay at their initialised zero and the host does not print
+ * them.  Pi_NS = -2 p tau_Pi S0 and q_CE = -(5/2) tau_q p grad theta are the
+ * Newtonian and Fourier extrapolations the blowup note audits, so the two
+ * deviations are the quantities the study reads.
  *
  * A minimum is used for the realizability margin deliberately: a maximum of
  * the slack is structurally blind to cells sitting at the cone boundary.
  * ========================================================================= */
+
+/* u_x, u_y, u_z, and at Stage 2 also theta = p/rho for grad theta. */
+#if DF_HAVE_Q
+#define DF_NDIAG 4
+#else
+#define DF_NDIAG 3
+#endif
+
 kernel void dfmm_diag_kernel(
     device const oct_t *grid     [[buffer(0)]],
     device const float *uold     [[buffer(1)]],
@@ -1003,13 +1308,14 @@ kernel void dfmm_diag_kernel(
     constant float     &smallc2  [[buffer(7)]],
     constant float     &dx       [[buffer(8)]],
     constant float     &tau_pi   [[buffer(9)]],
+    constant float     &tau_q    [[buffer(10)]],
     uint block_idx      [[threadgroup_position_in_grid]],
     uint thread_idx     [[thread_position_in_threadgroup]],
     uint threads_per_tg [[threads_per_threadgroup]])
 {
     if (int(block_idx) >= num_octs) return;
 
-    threadgroup float uu[3][6][6][6];
+    threadgroup float st[DF_NDIAG][6][6][6];
     for (int wi = int(thread_idx); wi < 216; wi += int(threads_per_tg)) {
         int i_sg, j_sg, k_sg;
         index_1Dto3D(wi/8, 3, 3, i_sg, j_sg, k_sg);
@@ -1019,10 +1325,19 @@ kernel void dfmm_diag_kernel(
         int ib, jb, kb;
         index_1Dto3D(cell_idx - 1, 2, 2, ib, jb, kb);
         int i = ib + 2*i_sg, j = jb + 2*j_sg, k = kb + 2*k_sg;
-        float rho = max(df_u_get(uold, source_idx, 1, cell_idx), smallr);
-        uu[0][i][j][k] = df_u_get(uold, source_idx, 2, cell_idx)/rho;
-        uu[1][i][j][k] = df_u_get(uold, source_idx, 3, cell_idx)/rho;
-        uu[2][i][j][k] = df_u_get(uold, source_idx, 4, cell_idx)/rho;
+
+        float cc[5];
+        for (int iv = 0; iv < 5; iv++)
+            cc[iv] = df_u_get(uold, source_idx, iv + 1, cell_idx);
+        float rho = max(cc[DI_RHO], smallr);
+        st[0][i][j][k] = cc[DI_UX]/rho;
+        st[1][i][j][k] = cc[DI_UY]/rho;
+        st[2][i][j][k] = cc[DI_UZ]/rho;
+#if DF_HAVE_Q
+        float ekin = 0.5f*(cc[DI_UX]*cc[DI_UX] + cc[DI_UY]*cc[DI_UY]
+                         + cc[DI_UZ]*cc[DI_UZ])/rho;
+        st[3][i][j][k] = max(DF_GM1*(cc[DI_P] - ekin), rho*smallc2/DF_GAMMA)/rho;
+#endif
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -1030,6 +1345,7 @@ kernel void dfmm_diag_kernel(
     float inv2dx = 0.5f/dx;
 
     float lam_min_loc = HUGE_VALF, dev_max = 0.0f, ani_max = 0.0f, nbad = 0.0f;
+    float devq_max = 0.0f, qmax = 0.0f;
 
     for (int cell = int(thread_idx); cell < TWOTONDIM; cell += int(threads_per_tg)) {
         int cell_idx = cell + 1;
@@ -1054,44 +1370,78 @@ kernel void dfmm_diag_kernel(
                        + 2.0f*(pis[3]*pis[3] + pis[4]*pis[4] + pis[5]*pis[5]))/p;
         ani_max = max(ani_max, ani);
 
+        bool need_grad = (tau_pi > 0.0f);
+#if DF_HAVE_Q
+        need_grad = need_grad || (tau_q > 0.0f);
+#endif
+        float G[3][3];
+        if (need_grad) {
+            for (int a = 0; a < 3; a++) {
+                G[a][0] = (st[a][i+1][j][k] - st[a][i-1][j][k])*inv2dx;
+                G[a][1] = (st[a][i][j+1][k] - st[a][i][j-1][k])*inv2dx;
+                G[a][2] = (st[a][i][j][k+1] - st[a][i][j][k-1])*inv2dx;
+            }
+        }
+
         /* Pi_NS = -2 p tau S0, the Newtonian extrapolation the blowup note
          * audits.  dev = ||Pi - Pi_NS||_F / p is the Stage-1 closure
          * indicator: small means Navier-Stokes is an adequate description. */
         if (tau_pi > 0.0f) {
-            float G[3][3];
-            for (int a = 0; a < 3; a++) {
-                G[a][0] = (uu[a][i+1][j][k] - uu[a][i-1][j][k])*inv2dx;
-                G[a][1] = (uu[a][i][j+1][k] - uu[a][i][j-1][k])*inv2dx;
-                G[a][2] = (uu[a][i][j][k+1] - uu[a][i][j][k-1])*inv2dx;
-            }
             float divu = G[0][0] + G[1][1] + G[2][2];
             float dsum = 0.0f;
-            float PIm[3][3] = {{pis[0], pis[3], pis[4]},
-                               {pis[3], pis[1], pis[5]},
-                               {pis[4], pis[5], pis[2]}};
+            float PIm[9]; df_mat_from_sym6(pis, PIm);
             for (int a = 0; a < 3; a++) for (int b = 0; b < 3; b++) {
                 float S0 = 0.5f*(G[a][b] + G[b][a]) - ((a == b) ? divu/3.0f : 0.0f);
-                float d = PIm[a][b] - (-2.0f*p*tau_pi*S0);
+                float d = PIm[3*a+b] - (-2.0f*p*tau_pi*S0);
                 dsum += d*d;
             }
             dev_max = max(dev_max, sqrt(dsum)/p);
         }
+
+#if DF_HAVE_Q
+        /* q_CE = -(5/2) tau_q p grad theta is the Fourier heat flux of the
+         * BGK Chapman-Enskog expansion (doc/dfmm_3d.md Section 4).  Both
+         * measures are normalised by p c_s, the natural heat-flux scale. */
+        {
+            float qv[3]; df_heat_flux(&w[DI_Q], qv);
+            float nrm = 1.0f/(p*sqrt(DF_GAMMA*p/w[DI_RHO]));
+            qmax = max(qmax, sqrt(qv[0]*qv[0] + qv[1]*qv[1] + qv[2]*qv[2])*nrm);
+            if (tau_q > 0.0f) {
+                float gth[3] = {
+                    (st[3][i+1][j][k] - st[3][i-1][j][k])*inv2dx,
+                    (st[3][i][j+1][k] - st[3][i][j-1][k])*inv2dx,
+                    (st[3][i][j][k+1] - st[3][i][j][k-1])*inv2dx};
+                float dsum = 0.0f;
+                for (int d = 0; d < 3; d++) {
+                    float e = qv[d] + 2.5f*tau_q*p*gth[d];
+                    dsum += e*e;
+                }
+                devq_max = max(devq_max, sqrt(dsum)*nrm);
+            }
+        }
+#endif
     }
 
-    threadgroup float tg[4][32];
+    threadgroup float tg[6][32];
     uint lane = thread_idx % 32u, sg = thread_idx / 32u;
     float a0 = simd_min(lam_min_loc);
     float a1 = simd_max(dev_max);
     float a2 = simd_max(ani_max);
     float a3 = simd_sum(nbad);
-    if (lane == 0) { tg[0][sg] = a0; tg[1][sg] = a1; tg[2][sg] = a2; tg[3][sg] = a3; }
+    float a4 = simd_max(devq_max);
+    float a5 = simd_max(qmax);
+    if (lane == 0) {
+        tg[0][sg] = a0; tg[1][sg] = a1; tg[2][sg] = a2;
+        tg[3][sg] = a3; tg[4][sg] = a4; tg[5][sg] = a5;
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (sg == 0 && lane == 0) {
         uint ng = (threads_per_tg + 31u)/32u;
-        float b0 = HUGE_VALF, b1 = 0.0f, b2 = 0.0f, b3 = 0.0f;
+        float b0 = HUGE_VALF, b1 = 0.0f, b2 = 0.0f, b3 = 0.0f, b4 = 0.0f, b5 = 0.0f;
         for (uint g = 0; g < ng; g++) {
             b0 = min(b0, tg[0][g]); b1 = max(b1, tg[1][g]);
             b2 = max(b2, tg[2][g]); b3 += tg[3][g];
+            b4 = max(b4, tg[4][g]); b5 = max(b5, tg[5][g]);
         }
         /* diag[0] is stored as an offset positive quantity so the bitwise
          * atomic min is valid: lam_min/p can be negative, and
@@ -1100,6 +1450,8 @@ kernel void dfmm_diag_kernel(
         atomic_max_float     (&diag[1], b1);
         atomic_max_float     (&diag[2], b2);
         atomic_add_float     (&diag[3], b3);
+        atomic_max_float     (&diag[4], b4);
+        atomic_max_float     (&diag[5], b5);
     }
 }
 

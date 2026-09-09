@@ -24,13 +24,17 @@ module hydro_parameters
   ! dfmm moment fields (doc/dfmm_3d.md).  These are density-like, not passive
   ! scalars: their transport flux is u_k X, so they must NOT be multiplied by
   ! rho when converting between primitive and conserved form.  They occupy
-  ! ivar ipi .. ipi+ndfmm-1, which the Metal kernel hardwires to 6..10.
+  ! ivar ipi .. ipi+ndfmm-1, which the Metal kernel hardwires to 6..5+ndfmm:
+  !   ndfmm =  5   Pi_ij at ivar 6..10                        (Stage 1)
+  !   ndfmm = 15   Pi_ij at ivar 6..10, Q_ijk at ivar 11..20   (Stage 2)
 #ifdef DFMM
   integer,parameter::ndfmm=NDFMM
   integer,parameter::ipi=6
+  integer,parameter::iq=11
 #else
   integer,parameter::ndfmm=0
   integer,parameter::ipi=0
+  integer,parameter::iq=0
 #endif
 
 #ifdef NION

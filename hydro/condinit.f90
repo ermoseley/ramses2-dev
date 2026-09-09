@@ -47,7 +47,7 @@ subroutine condinit(r,g,x,q,dx,nn)
   integer::i
   real(kind=8)::xx,yy,zz,rr,theta,pi,xcenter,ttmin,ttmax
 #if INIT==DFMMTEST
-  real(kind=8)::twopi_L,shear_amp,pi_amp
+  real(kind=8)::twopi_L,shear_amp,pi_amp,drho_amp
 #endif
 #if INIT==COEUR
   real(kind=8)::r2,rx,ry,rz,d,p,vx,vy,vz,r_trunc,r2_trunc,c2
@@ -462,36 +462,43 @@ subroutine condinit(r,g,x,q,dx,nn)
   ! ------------------------------------------------------------------
   ! dfmm Stage-1 verification initial condition (doc/dfmm_3d.md Sec. 7).
   !
-  ! Uniform rho = 1, p = 1 with a divergence-free shear layer
-  !     u_x(z) = V0 sin(2 pi z / L),   u_y = u_z = 0
-  ! and an optional initial pressure anisotropy
-  !     Pi_xx = A,  Pi_yy = Pi_zz = -A/2.
+  ! Uniform p = 1 with a divergence-free shear layer
+  !     u_x(z) = V0 sin(2 pi z / L),   u_y = u_z = 0,
+  ! an optional initial pressure anisotropy
+  !     Pi_xx = A,  Pi_yy = Pi_zz = -A/2,
+  ! and an optional isobaric density perturbation
+  !     rho(z) = 1 + D sin(2 pi z / L)   =>  theta = p/rho varies, grad p = 0.
   !
-  ! Two gates use it:
+  ! Four gates use it:
   !   V0 = 0, A /= 0  -> homogeneous relaxation; Pi must decay as exp(-t/tau)
   !                      with everything else static.
   !   V0 /= 0, A = 0  -> shear response; for small tau, Pi_xz must approach
   !                      the Newtonian value -2 p tau S_xz, i.e.
   !                      Pi_xz -> -p tau V0 (2 pi / L) cos(2 pi z / L).
+  !   V0 large, tau<0 -> collisionless; must stay realizable.
+  !   D /= 0, rest 0  -> Fourier response.  There is no pressure gradient, so
+  !                      the gas stays nearly static while q relaxes to
+  !                      q_z -> -(5/2) tau_q p d_z theta   (Stage 2 only).
   !
-  ! The second gate is the Navier-Stokes baseline against which the blowup
-  ! deviation diagnostic |Pi - Pi_NS| is measured, so it matters that it is
-  ! exact in the collisional limit.
+  ! The shear and Fourier gates are the Navier-Stokes and Fourier baselines
+  ! against which the blowup deviation diagnostics |Pi - Pi_NS| and |q - q_CE|
+  ! are measured, so it matters that they are exact in the collisional limit.
   ! ------------------------------------------------------------------
   twopi_L   = 2.0d0*acos(-1.0d0)/r%box_size(3)
   shear_amp = r%dfmm_ic_shear
   pi_amp    = r%dfmm_ic_pi
+  drho_amp  = r%dfmm_ic_drho
   do i=1,nn
-     q(i,1) = 1.0d0
+     q(i,1) = 1.0d0 + drho_amp*sin(twopi_L*x(i,3))
      q(i,2) = shear_amp*sin(twopi_L*x(i,3))
      q(i,3) = 0.0d0
      q(i,4) = 0.0d0
      q(i,5) = 1.0d0
+     ! Zero the whole dfmm block, then set Pi.  At Stage 2 this also zeroes
+     ! the ten components of Q_ijk at ivar 11..20.
+     q(i,6:nvar) = 0.0d0
      q(i,6) = pi_amp            ! Pi_xx
      q(i,7) = -0.5d0*pi_amp     ! Pi_yy   (Pi_zz = -(Pi_xx+Pi_yy) = -A/2)
-     q(i,8) = 0.0d0             ! Pi_xy
-     q(i,9) = 0.0d0             ! Pi_xz
-     q(i,10)= 0.0d0             ! Pi_yz
   end do
 #endif
 

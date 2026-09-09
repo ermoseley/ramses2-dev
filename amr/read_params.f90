@@ -329,6 +329,7 @@ subroutine m_read_params(pst)
   logical ::dfmm_fatal_realizability=.false.
   real(kind=8)::dfmm_ic_shear=0.0d0
   real(kind=8)::dfmm_ic_pi=0.0d0
+  real(kind=8)::dfmm_ic_drho=0.0d0
 #endif
   character(LEN=10)::riemann2d='none'
   logical ::induction=.false.
@@ -669,7 +670,7 @@ subroutine m_read_params(pst)
   ! dfmm solver parameters
   namelist/dfmm_params/dfmm_tau,dfmm_prandtl,dfmm_source,dfmm_diag &
        & ,dfmm_fatal_realizability &
-       & ,dfmm_ic_shear,dfmm_ic_pi
+       & ,dfmm_ic_shear,dfmm_ic_pi,dfmm_ic_drho
 #endif
   ! Grid refinement parameters
   namelist/refine_params/x_refine,y_refine,z_refine,r_refine &
@@ -1493,6 +1494,12 @@ subroutine m_read_params(pst)
   s%r%dfmm_fatal_realizability=dfmm_fatal_realizability
   s%r%dfmm_ic_shear=dfmm_ic_shear
   s%r%dfmm_ic_pi=dfmm_ic_pi
+  s%r%dfmm_ic_drho=dfmm_ic_drho
+  ! tau_q = tau_Pi / Pr, so a non-positive Prandtl number is meaningless.
+  if(dfmm_prandtl<=0.0d0)then
+     write(*,*)'DFMM requires dfmm_prandtl > 0; got ',dfmm_prandtl
+     call mdl_abort(s%mdl)
+  endif
   ! The ten-moment trace identity tr P = 3p = 2 rho e fixes the adiabatic
   ! index; any other value makes p and the internal energy inconsistent.
   if(abs(gamma-5.0d0/3.0d0)>1.0d-12)then

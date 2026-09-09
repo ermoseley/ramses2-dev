@@ -977,29 +977,31 @@ module metal_interface
       real(c_float), intent(out) :: mass, etot, eint, eani, dt
     end subroutine mtl_dfmm_cmpdt
 
-    ! Transport then strain production and exact BGK relaxation.
+    ! Transport then production terms and exact BGK relaxation.
     subroutine mtl_dfmm_godunov(head_idx, num_subgrids, ngridmax, &
         ilevel, levelmin, levelmax, smallr, smallc2, dt, dx, &
-        slope, riemann, tau_pi, source_on, constant_gravity) &
+        slope, riemann, tau_pi, tau_q, source_on, constant_gravity) &
         bind(C, name="mtl_dfmm_godunov")
       import c_int, c_float
       integer(c_int), value :: head_idx, num_subgrids, ngridmax
       integer(c_int), value :: ilevel, levelmin, levelmax
       real(c_float),  value :: smallr, smallc2, dt, dx
       integer(c_int), value :: slope, riemann
-      real(c_float),  value :: tau_pi
+      real(c_float),  value :: tau_pi, tau_q
       integer(c_int), value :: source_on
       real(c_float), intent(in) :: constant_gravity(3)
     end subroutine mtl_dfmm_godunov
 
-    ! Closure-quality and realizability diagnostics.
+    ! Closure-quality and realizability diagnostics.  dev_q and q_max are
+    ! written only at Stage 2 (ndfmm>=15); they return zero otherwise.
     subroutine mtl_dfmm_diag(head_idx, num_octs, smallr, smallc2, dx, &
-        tau_pi, lam_min, dev_ns, ani_max, nbad) &
+        tau_pi, tau_q, lam_min, dev_ns, ani_max, nbad, dev_q, q_max) &
         bind(C, name="mtl_dfmm_diag")
       import c_int, c_float
       integer(c_int), value :: head_idx, num_octs
-      real(c_float),  value :: smallr, smallc2, dx, tau_pi
+      real(c_float),  value :: smallr, smallc2, dx, tau_pi, tau_q
       real(c_float), intent(out) :: lam_min, dev_ns, ani_max, nbad
+      real(c_float), intent(out) :: dev_q, q_max
     end subroutine mtl_dfmm_diag
 #endif
 

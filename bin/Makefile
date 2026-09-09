@@ -62,13 +62,20 @@ ifeq ($(DO_CR),1)
    NENER := $(NENER)+$(NCRGRP)
    DEFINES += -DMHD -DDO_CR -DNCRGRP=$(NCRGRP)
 endif
-# dfmm moment fields (see doc/dfmm_3d.md).  Stage 1 = 5 deviatoric pressure
-# components Pi_xx, Pi_yy, Pi_xy, Pi_xz, Pi_yz at ivar 6..10.
+# dfmm moment fields (see doc/dfmm_3d.md).  DFMM selects the stage:
+#   DFMM=1  NDFMM=5   Pi_xx, Pi_yy, Pi_xy, Pi_xz, Pi_yz            at ivar 6..10
+#   DFMM=2  NDFMM=15  the above plus the 10 components of Q_ijk     at ivar 11..20
+# Keeping stage 1 selectable makes its gate results reproducible, and the Q
+# sector is expensive enough to be worth switching off when it is not needed.
 ifeq ($(DFMM),1)
    NDFMM = 5
-   DEFINES += -DDFMM -DNDFMM=$(NDFMM)
+else ifeq ($(DFMM),2)
+   NDFMM = 15
 else
    NDFMM = 0
+endif
+ifneq ($(DFMM),0)
+   DEFINES += -DDFMM -DNDFMM=$(NDFMM)
 endif
 NVAR := $(NHYDRO)+$(NENER)+$(NPSCAL)+$(NMETAL)+$(NION)+$(NDFMM)
 #############################################################################
@@ -254,7 +261,7 @@ ifeq ($(COMPILER),METAL)
    ifeq ($(GRAV),1)
       CXXFLAGS += -DGRAV
    endif
-   ifeq ($(DFMM),1)
+   ifneq ($(DFMM),0)
       CXXFLAGS += -DDFMM -DNDFMM=$(NDFMM)
    endif
    ifeq ($(DEBUG),1)
@@ -275,7 +282,7 @@ ifeq ($(COMPILER),METAL)
    ifeq ($(MHD),1)
       METALFLAGS += -DMHD
    endif
-   ifeq ($(DFMM),1)
+   ifneq ($(DFMM),0)
       METALFLAGS += -DDFMM -DNDFMM=$(NDFMM)
    endif
    # Link flags: Metal + Foundation frameworks, C++ runtime for the bridge
@@ -406,7 +413,7 @@ part.air: $(METAL_KPATH)/part.metal $(METAL_PATH)/metal_types.h $(METAL_KPATH)/m
 dfmm.air: $(METAL_KPATH)/dfmm.metal $(METAL_PATH)/metal_types.h $(METAL_KPATH)/metal_utils.h
 	$(METALC) $(METALFLAGS) -c $< -o $@
 METAL_AIR = hydro.air refine.air flag.air scan.air rho.air mg.air cooling.air part.air
-ifeq ($(DFMM),1)
+ifneq ($(DFMM),0)
    METAL_AIR += dfmm.air
 endif
 ramses_kernels.metallib: $(METAL_AIR)

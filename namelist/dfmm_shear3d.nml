@@ -1,9 +1,11 @@
-This namelist runs the dfmm Stage-1 verification gates (doc/dfmm_3d.md Sec. 7).
+This namelist runs the dfmm verification gates (doc/dfmm_3d.md Sec. 7).
 Compile using:
-  cd bin && make COMPILER=METAL NDIM=3 HYDRO=1 DFMM=1 INIT=DFMMTEST
+  cd bin && make COMPILER=METAL NDIM=3 HYDRO=1 DFMM=1 INIT=DFMMTEST   (stage 1)
+  cd bin && make COMPILER=METAL NDIM=3 HYDRO=1 DFMM=2 INIT=DFMMTEST   (stage 2)
 
-Uniform rho=1, p=1 with a divergence-free shear layer u_x = V0 sin(2 pi z / L)
-and an optional initial pressure anisotropy Pi_xx = A, Pi_yy = Pi_zz = -A/2.
+Uniform p=1 with a divergence-free shear layer u_x = V0 sin(2 pi z / L), an
+optional initial pressure anisotropy Pi_xx = A, Pi_yy = Pi_zz = -A/2, and an
+optional isobaric density perturbation rho = 1 + D sin(2 pi z / L).
 
   Gate 2 (relaxation):    dfmm_ic_shear=0.0  dfmm_ic_pi=0.1  dfmm_tau=0.05
                           -> |Pi| must decay as exp(-t/tau)
@@ -11,6 +13,10 @@ and an optional initial pressure anisotropy Pi_xx = A, Pi_yy = Pi_zz = -A/2.
                           -> |Pi|/p -> 2 p tau |S0|, and |Pi-Pi_NS| -> 0
   Gate 4 (collisionless): dfmm_ic_shear=0.5  dfmm_ic_pi=0.0  dfmm_tau=-1.0
                           -> must stay realizable, min lam(P)/p > 0
+  Gate 5 (Fourier limit,  dfmm_ic_drho=0.1   dfmm_tau=1e-4
+          stage 2 only)   dfmm_prandtl=0.6666666666666667
+                          -> q_z -> -(5/2) tau_q p d_z theta with
+                             tau_q = tau/Pr, and |q-q_CE| -> 0
 
 &RUN_PARAMS
 hydro=.true.
@@ -63,8 +69,10 @@ riemann='hll'
 
 &DFMM_PARAMS
 dfmm_tau=1e-4
+dfmm_prandtl=0.6666666666666667
 dfmm_source=.true.
 dfmm_diag=.true.
 dfmm_ic_shear=0.1
 dfmm_ic_pi=0.0
+dfmm_ic_drho=0.0
 /
