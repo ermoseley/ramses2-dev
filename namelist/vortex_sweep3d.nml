@@ -82,6 +82,25 @@ Read that as "not applicable", not as a passing check: it is the
 pressure-gauge argument of doc/incompressible.md Section 0 appearing in the
 output.  Check 7 cannot be asked of rung 1, which is why rung 4 exists.
 
+CLOSURE ORDER.  Build this namelist with EITHER
+    DFMM=1  ->  NVAR=10, ten-moment    (rho, rho u, P_ij)
+    DFMM=4  ->  NVAR=38, twenty-moment + dual frame
+Use DFMM=1 for any published number.  The twenty-moment system is NOT
+hyperbolic on the states this problem visits -- it loses hyperbolicity inside
+the realizability cone, in a Q-dependent region -- so its runs diverge under
+refinement (level 5 at K=3, level 6 at K=2 and 3) and cannot answer check 7.
+The ten-moment system is hyperbolic wherever P > 0 (Levermore), converges, and
+reaches max|Pi|/p = 1.62 without trouble.  See doc/incompressible.md Sec. 4d
+and 4e.
+
+RUNG 4 CARRIES AN EXTRA PARAMETER.  incomp_p0 sets the Mach number, and the
+rung-4 answer to check 7 depends on it: at K=2 level 4, incomp_p0 = 0.25 and
+1.0 cross the cone while 4.0 survives to t_star, at essentially identical
+max|u|.  Pi scales with p0 and so does the -div Pi force in the momentum
+equation, so |Pi|/p0 is not invariant under rescaling p0.  Always report
+incomp_p0, and Mach-match it to the compressible rung being compared: at K=2
+the compressible rung reaches Ma = 1.497 and incomp_p0 = 1 reaches 1.502.
+
 RESOLUTION.  levelmin = levelmax = 4 (16^3) is the low-resolution sweep --
 cheap enough to run 24 configurations, and adequate for the ORDERING of the
 indicators.  It is NOT adequate for their converged values: doc/dfmm_3d.md

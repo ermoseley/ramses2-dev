@@ -389,26 +389,43 @@ Minimum of `lam_min(P)/p` over the run -- the note's check 7:
 | rung 4 incomp + moment | 0.920 | 0.829 | 0.714 | *diverges* | *diverges* | *diverges* |
 
 `n(lam<0)` cells rises 0 / 0 / 0 / 0 / **336** / **1504** for rung 2 and is
-**0 everywhere** for rung 3 *at this level*. The last clause is essential:
-Section 4d refines the ladder and rung 3's zero does **not** survive.
+**0 everywhere** for rung 3 *at this level and this closure order*. Both
+qualifiers are essential: Section 4d refines the ladder and rung 3's zero does
+**not** survive at twenty moments, while Section 4e shows it does survive, and
+converges, at ten.
 
-**The headline of the sweep, as it stands after Section 4d.** Rung 2 tracks
-the Newtonian prediction `1-K` closely and crosses zero between `K = 1` and
-`K = 2`, exactly where the note says the extrapolation must fail; that half
-is resolution-converged and is the solid result. Rung 3 is realizable on this
-grid, but that is **a property of level 4, not of the closure** -- refining to
-level 5 and 6 makes rung 3 fail too. The defensible statement is therefore
-narrower than the one first recorded here:
+**The headline of the sweep, as it stands after Sections 4d and 4e.** Rung 2
+tracks the Newtonian prediction `1-K` closely and crosses zero between `K = 1`
+and `K = 2`, exactly where the note says the extrapolation must fail; that half
+is resolution-converged and is the solid result.
 
-> The moment closure delays the negative-variance state that Navier--Stokes
-> reaches immediately, and it does so by a wide margin in `K`; it does not
-> prevent it.
+Rung 3's zero on this grid went through two corrections. It is **not** a
+property of level 4 alone, but neither is it a property of "the moment
+closure":
+
+1. At the **twenty**-moment order used for this table, rung 3's zero is a
+   level-4 artifact -- refining to levels 5 and 6 makes it diverge, because the
+   twenty-moment system is not hyperbolic on the states this flow visits
+   (Section 4d).
+2. At **ten**-moment order, where the system *is* hyperbolic wherever `P > 0`,
+   rung 3 runs clean at every level tested and `min lam(P)/p` **converges** to
+   0.39 at `K = 2` and 0.31 at `K = 3` (Section 4e). So the zero is real, once
+   the closure is one whose initial-value problem is well posed.
+
+The statement the data supports is therefore neither the original nor the
+intermediate retraction, but a sharper one:
+
+> An evolved moment closure removes the negative-variance state that
+> Navier--Stokes produces -- but only in a **compressible** gas, and only at
+> ten-moment order. Hold the density fixed (rung 4) and the same closure
+> crosses at the same `K` as Navier--Stokes; go to twenty moments and the
+> system stops being well posed before it can answer.
 
 The mechanism first offered for the zero -- that the nonlinear `-[Pi G]^dev`
 term limits the anisotropy the Newtonian extrapolation grows without bound --
-is still what produces the delay, and rung 3's `max|Pi|/p` really is a factor
-~3 below rung 2's at every `K`. It is not what produces a bound. Section 4d
-gives the actual obstruction.
+is real and is why rung 3's `max|Pi|/p` sits a factor ~3 below rung 2's at
+every `K`. But it is not sufficient on its own: Section 4e shows the cone has
+to be *growing* too, which is what compression supplies.
 
 Rung 1 is marked *n/a*, not 1.000. It carries no `Pi`, so
 `min lam(p_0 I + Pi)/p_0` is identically 1 and the diagnostic is vacuous --
@@ -663,10 +680,29 @@ Two opposite behaviours, and the contrast is the whole point.
 **Rung 2 converges.** `min lam(P)/p` tightens monotonically onto the Newtonian
 prediction `1 - K`: -0.875 / -0.968 / -0.992 toward -1 at `K = 2`, and
 -1.812 / -1.952 / -1.988 toward -2 at `K = 3`. `max|Pi|/p` converges too
-(2.322 / 2.421 / 2.443). The violation appears at step 1 at every level and
-`n(lam<0)` scales like the cell count (336 / 2912 / 23264 is 8.7x then 8.0x
-for 8x the cells), i.e. it is a *fixed fraction of the volume*, not a
-grid-scale artifact. So the Navier--Stokes closure's negative-variance state
+(2.322 / 2.421 / 2.443). The violation appears at step 1 at every level.
+
+`n(lam<0)` grows slightly *faster* than the cell count -- 336 / 2912 / 23264
+is 8.7x then 8.0x for 8x the cells -- so the violating **volume fraction rises
+with refinement** rather than staying fixed: at `K = 3`, 1.17% / 1.81% / 2.17%
+of cells at L4 / L5 / L6, with decreasing increments (0.64, 0.36 percentage
+points) consistent with converging to a couple of per cent. An earlier version
+of this section called it "a fixed fraction of the volume"; that was wrong, and
+the direction matters. A grid-scale or shock-capturing artifact confined to a
+fixed physical surface would give `n(lam<0) ~ n_side^2`, hence a volume
+fraction *shrinking* like `1/n_side`. The measured fraction grows, so the
+violation is a genuine volume-filling property of the closure, not a surface
+artifact -- which is the conclusion the original phrasing was reaching for, by
+a route that did not support it.
+
+Where those cells sit is worth recording too, since it bounds how much of this
+is shock physics. Taking the largest relative pressure jump to the six face
+neighbours as a shock indicator, the rung-2 violating cells sit at the
+96th-100th percentile of that indicator at L5 and L6 (median 98.8) -- i.e.
+concentrated in the strongest pressure-gradient region, which is where the
+strain is largest and so exactly where Newtonian stress should fail first.
+Their absolute jump is only 0.15-0.22 though, far from the order-unity jump of
+a strong shock. So the Navier--Stokes closure's negative-variance state
 is a converged, resolution-independent, quantitatively predicted property.
 **This is the solid result of the study** and it does not depend on anything
 in this section.
@@ -794,6 +830,122 @@ deliberately does **not** divide the density-like block (`Pi_ij`, `Q_ijk`) by
 `rho`, while it does divide the mass-like tower (`rho L_i`, `rho Sxx`,
 `rho Sxv`). So snapshot slots 6..20 hold `Pi` and `Q` themselves, and slots
 21..38 hold `L`, `Sxx`, `Sxv` per unit mass.
+
+---
+
+## 4e. Closing the 2x2 at ten-moment order, and what it actually shows
+
+Section 4d ended with the recommendation to close the 2x2 at `DFMM=1`, since
+the ten-moment system is hyperbolic wherever `P > 0` and the twenty-moment one
+is not. Done: `DFMM=1 INIT=BLOWUP` (NVAR = 10, NDFMM = 5), same namelists,
+same `K` calibration, levels 4-6.
+
+### Rung 3, ten-moment: converges, and never leaves the cone
+
+| run | min `lam(P)/p` | max `\|Pi\|/p` | `n(lam<0)` | completed |
+|---|---|---|---|---|
+| K=2, L4 | 0.4400 | 1.166 | 0 | yes |
+| K=2, L5 | 0.4039 | 1.337 | 0 | yes |
+| K=2, L6 | **0.3935** | 1.388 | 0 | yes |
+| K=3, L4 | 0.3530 | 1.379 | 0 | yes |
+| K=3, L5 | 0.3168 | 1.570 | 0 | yes |
+| K=3, L6 | **0.3076** | 1.623 | 0 | yes |
+
+Compare the twenty-moment column of Section 4d, which diverged at L5 for
+`K = 3` and at L6 for both. At ten moments every run completes, `n(lam<0)` is
+zero throughout, and `min lam(P)/p` **converges** -- increments of -0.036 then
+-0.010 at `K = 2`, and -0.036 then -0.009 at `K = 3`. `max|Pi|/p` converges
+too, and note it reaches **1.62**, further from equilibrium than the
+twenty-moment runs ever got (1.15) before failing. That is Levermore's theorem
+doing its job: with only ten moments, staying inside the cone is sufficient for
+hyperbolicity, so the system can be driven far from equilibrium without the
+integration losing meaning.
+
+**This is the resolution-converged form of the claim Section 4a originally
+made, and at ten-moment order it holds.** It also settles a question 4d could
+not: the twenty-moment failure is specifically the `Q` sector, not a defect in
+the shared transport or source machinery, because the identical setup with `Q`
+removed runs clean at every level tested.
+
+### Rung 4, ten-moment: crosses between K = 1 and K = 2
+
+| run | min `lam(P)/p_0` | max `\|Pi\|/p_0` | outcome |
+|---|---|---|---|
+| K=1, L4 | 0.4648 | 1.310 | survives to `t_star` |
+| K=1, L5 | 0.4323 | 1.390 | survives to `t_star` |
+| K=2, L4 | **-0.0064** | 1.006 | **crosses** |
+| K=2, L5 | **-0.0047** | 1.004 | **crosses** |
+| K=3, L4 | **-0.0044** | 1.003 | **crosses** |
+
+The crossings all occur at `max|Pi|/p_0 ~ 1.005`, which is structural rather
+than coincidental: in the incompressible rung `P = p_0 I + Pi` with `p_0`
+constant, so `lam_min(P)/p_0 = 1 + lam_min(Pi)/p_0` and the cone boundary sits
+at `|Pi|/p_0 = 1` exactly. The new guard (Section 4c) catches these at
+`lam/p_0 = -0.006` instead of letting them run to `|Pi|/p_0 = 105`, so the
+crossing is now a measurement.
+
+### The 2x2 finally pays off: both ingredients are load-bearing
+
+With all four cells well posed:
+
+| rung | closure | crosses check 7? |
+|---|---|---|
+| 1 incompressible + Newtonian | *not askable* -- carries no `Pi` (Section 0) |
+| 2 compressible + Newtonian | **yes**, between `K = 1` and 2, converging to `1-K` |
+| 3 compressible + moments (10) | **no**, converged, `min lam/p = 0.31` at `K = 3` |
+| 4 incompressible + moments (10) | **yes**, between `K = 1` and 2 |
+
+Read along the rows and columns:
+
+* changing **only the closure** (rung 2 -> rung 3) removes the violation;
+* changing **only the compressibility** (rung 3 -> rung 4) puts it back.
+
+So neither ingredient alone is the answer, and the original framing -- "the
+moment closure does not produce the negative-variance state" -- was picking out
+one of two necessary conditions. The statement the data supports is:
+
+> The evolved moment closure removes the negative-variance state **only in a
+> compressible gas**. Compression raises `p`, which enlarges the realizability
+> cone faster than the evolved `Pi` grows into it. Hold the density fixed and
+> the cone stops growing, and the same closure crosses at the same `K` as
+> Navier--Stokes.
+
+**The rung-3/rung-4 contrast is Mach-matched, which is what makes it a
+controlled comparison.** At `K = 2` the compressible rung attains a maximum
+local Mach number of 1.4970 and the incompressible rung at `incomp_p0 = 1`
+attains 1.502 -- 0.3% apart, both close to the construction's `Ma = 1.1 sqrt(K)
+= 1.556`. Same `K`, same Mach number, same closure order, same initial
+condition; the only difference is whether the gas may compress, and that alone
+flips check 7.
+
+### Caveat that must travel with any rung-4 number: it depends on `incomp_p0`
+
+Rung 4 has a free parameter the compressible rungs do not. Scanning it at
+`K = 2`, L4, with the velocity field unchanged:
+
+| `incomp_p0` | `c_s` | max `\|u\|` | `Ma` | outcome |
+|---|---|---|---|---|
+| 0.25 | 0.6455 | 1.944 | 3.01 | crosses, `lam/p_0 = -0.058` |
+| 1.0 | 1.2910 | 1.939 | 1.50 | crosses, `lam/p_0 = -0.006` |
+| 4.0 | 2.5820 | 1.934 | 0.75 | **survives to `t_star`** |
+
+`max|u|` is the same to 0.5% in all three, so this is not the velocity field
+changing -- it is the Mach number. The mechanism: `Pi` relaxes toward
+`-2 p_0 tau S0`, so `Pi ~ p_0`, and the momentum equation feels it through
+`-(1/rho_0) d_j Pi_ij`, a force that therefore also scales with `p_0`. The
+back-reaction of stress on velocity strengthens with `p_0`, damps the strain,
+and limits `Pi`. So `|Pi|/p_0` is **not** invariant under rescaling `p_0`, and
+
+> a rung-4 answer to check 7 is a statement at one Mach number, not a
+> gauge-free statement.
+
+This matters because rung 4 exists precisely to ask check 7 of an
+incompressible flow, which Section 0's pressure-gauge argument says cannot be
+asked of incompressible Navier--Stokes. Rung 4 does make the question
+*well posed* -- `p_0` is a genuine thermodynamic pressure here, not a Lagrange
+multiplier -- but it does not make it *parameter-free*. Any published rung-4
+result must state `incomp_p0` and, better, be Mach-matched to the compressible
+rung it is being compared with, as the `K = 2` comparison above is.
 
 ---
 

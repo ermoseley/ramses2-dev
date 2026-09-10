@@ -245,14 +245,24 @@ realizability cone are, skip to &sect;1.
 <h2>1. The result</h2>
 
 <div class="panel" style="border-left:4px solid #b45309">
-<p style="margin:0"><strong>What survives, in one line.</strong> The Navier&ndash;Stokes closure
-predicts a negative principal pressure and the code confirms it, converged and quantitatively:
-<span class="mono">min lam(P)/p &rarr; 1&minus;K</span> to within 1% at level 6, present from
-step 1, over a fixed fraction of the volume. The moment closure <em>delays</em> that state by a
-wide margin in <span class="mono">K</span> but <strong>does not prevent it</strong> &mdash; and
-the reason it does not is that the twenty-moment system stops being hyperbolic before it gets
-there. An earlier version of this page claimed the moment closure never goes negative; a
-resolution ladder overturned that. &sect;3 has both the ladder and the mechanism.</p>
+<p style="margin:0 0 10px"><strong>The result, in one line.</strong> Navier&ndash;Stokes
+predicts a negative principal pressure &mdash; an impossible gas state &mdash; and the code
+confirms it, converged and quantitatively: <span class="mono">min lam(P)/p &rarr; 1&minus;K</span>
+to within 1% at level 6, from step 1, over a couple of per cent of the volume. An evolved moment
+closure removes that state, <strong>but only in a compressible gas</strong>. Hold the density
+fixed and the same closure crosses at the same <span class="mono">K</span> as
+Navier&ndash;Stokes.</p>
+<p style="margin:0"><strong>Both ingredients are load-bearing</strong>, which is what the
+2&times;2 was built to detect: changing only the closure removes the violation, and changing only
+the compressibility puts it back. The mechanism is that compression raises
+<span class="mono">p</span>, which grows the realizability cone faster than the evolved
+<span class="mono">Pi</span> grows into it; pin the density and the cone stops growing.</p>
+<p class="why" style="margin:10px 0 0">This headline has been corrected twice, and both
+corrections are documented rather than quietly folded in. The first version claimed the moment
+closure simply never goes negative &mdash; a resolution ladder overturned that (&sect;3). The
+second concluded it merely <em>delays</em> the crossing &mdash; closing the 2&times;2 at
+ten-moment order, where the equations are well posed, showed it genuinely prevents it in the
+compressible case (&sect;3, &ldquo;the ten-moment column&rdquo;).</p>
 </div>
 
 <p><strong>How to read the chart.</strong> Each curve is one of the four rungs. Moving right
@@ -373,24 +383,33 @@ before any physics result from it is believed.</p>
     predicted <span class="mono">1&minus;K</span>.</p>
   </div>
   <div class="panel">
-    <div><span class="tag blk">usable at L4 only</span><strong>Rung 3 &mdash; compressible + moments</strong></div>
-    <p class="why">Twenty moments plus the &ldquo;dual frame&rdquo; bookkeeping that tracks how
-    fluid elements are being deformed &mdash; 38 stored fields per cell in all. All nine
-    verification gates pass, and it is the rung the headline rested on &mdash; but it
-    <strong>diverges under refinement</strong>:
-    fine at level 4, and at level 5 for <span class="mono">K = 2</span>; diverges at level 5 for
-    <span class="mono">K = 3</span> and at level 6 for both. Same obstruction as rung 4
-    (&sect;3). Sound at ten-moment order (<span class="mono">DFMM=1</span>).</p>
+    <div><span class="tag ok">usable at 10 moments</span><strong>Rung 3 &mdash; compressible + moments</strong></div>
+    <p class="why"><strong>At ten-moment order this is the strongest rung on the page.</strong>
+    Every run completes to <span class="mono">t_star</span> at levels 4&ndash;6 for
+    <span class="mono">K = 2</span> and 3, with zero realizability violations and a converging
+    <span class="mono">min lam(P)/p</span> (0.39 and 0.31). It reaches
+    <span class="mono">max |Pi|/p = 1.62</span> without trouble.
+    <br><br>At <strong>twenty</strong> moments &mdash; plus the &ldquo;dual frame&rdquo;
+    bookkeeping that tracks how fluid elements deform, 38 stored fields per cell &mdash; all nine
+    verification gates still pass, but it <em>diverges under refinement</em>: fine at level 4, and
+    at level 5 for <span class="mono">K = 2</span>; diverges at level 5 for
+    <span class="mono">K = 3</span> and at level 6 for both. That is the ill-posedness of &sect;3,
+    not a bug &mdash; and the ten-moment runs are what proves it, since removing
+    <span class="mono">Q</span> from an otherwise identical setup makes it clean.</p>
   </div>
   <div class="panel">
-    <div><span class="tag blk">blocked for K&nbsp;&ge;&nbsp;1</span><strong>Rung 4 &mdash; incompressible + moments</strong></div>
-    <p class="why">Verified and trustworthy for <span class="mono">K &le; 0.5</span>.
-    Above that it diverges, and crucially <em>the growth rate rises with refinement</em>
-    (38.4 per unit time at level 4 &rarr; 55.6 at level 5) &mdash; the ill-posedness fingerprint
-    from &sect;0, so a finer grid will not rescue it. P1 explains what it is.
-    <br><br>This rung matters more than its status suggests: it is the <em>only</em> one that can
+    <div><span class="tag ok">usable at 10 moments</span><strong>Rung 4 &mdash; incompressible + moments</strong></div>
+    <p class="why">At ten-moment order this rung <em>answers</em> rather than failing: it survives
+    to <span class="mono">t_star</span> at <span class="mono">K = 1</span> and crosses the
+    realizability cone at <span class="mono">K = 2</span> and 3, caught right at the boundary
+    (<span class="mono">lam/p<sub>0</sub> = &minus;0.006</span>) rather than after a runaway.
+    <br><br>At twenty moments it was trustworthy only for <span class="mono">K &le; 0.5</span>,
+    diverging above that with a growth rate that <em>rises</em> with refinement (38.4 per unit
+    time at level 4 &rarr; 55.6 at level 5) &mdash; the ill-posedness fingerprint from &sect;0.
+    <br><br>This rung matters more than its size suggests: it is the <em>only</em> one that can
     ask check 7 of an incompressible flow, which is the case the blowup construction is actually
-    about.</p>
+    about. But its answer depends on <span class="mono">incomp_p0</span>, i.e. on the Mach number
+    &mdash; see the caveat in &sect;3.</p>
   </div>
 </div>
 
@@ -431,8 +450,11 @@ contrast rung 2 converges cleanly onto the Newtonian prediction &mdash;
 <span class="mono">min lam(P)/p</span> = &minus;0.875 / &minus;0.968 / &minus;0.992 toward
 &minus;1 at <span class="mono">K = 2</span>, and &minus;1.812 / &minus;1.952 / &minus;1.988 toward
 &minus;2 at <span class="mono">K = 3</span> &mdash; with the violation present at step 1 at every
-level and <span class="mono">n(lam&lt;0)</span> scaling like the cell count (a fixed fraction of
-the volume, not a grid artifact). <strong>Rung 2&rsquo;s violation is the converged,
+level and the violating <em>volume fraction</em> rising with refinement
+(1.17% / 1.81% / 2.17% of cells at L4/L5/L6, increments shrinking). That direction is the
+informative part: an artifact confined to a fixed surface in the flow would give a fraction
+<em>shrinking</em> like 1/n<sub>side</sub>, so a growing fraction means the violation genuinely
+fills volume. <strong>Rung 2&rsquo;s violation is the converged,
 resolution-independent, quantitatively predicted result; rung 3&rsquo;s zero was not.</strong></p>
 </div>
 </details>
@@ -464,7 +486,7 @@ assumptions survive all the way to <span class="mono">t_star</span>?&rdquo; Incr
 <span class="mono">K</span> is our stand-in for the second question, and it is a good one, but it
 is a stand-in.</div>
 
-<p class="why">This is the most important conceptual gap and it is addressable (P2). We cannot
+<p class="why">This is the most important conceptual gap and it is addressable (P3). We cannot
 import the full 166-page velocity field, but we <em>can</em> prescribe the strain's own time
 dependence: the initial condition already sets the strain coefficient to
 <span class="mono">2/&Delta;</span>, so making it
@@ -474,6 +496,77 @@ fires &mdash; which is exactly the deliverable the note frames.</p>
 </div>
 </details>
 
+
+<details open>
+<summary>The ten-moment column &mdash; closing the 2&times;2 on a well-posed system</summary>
+<div>
+<p>The mechanism block below shows the twenty-moment system is not hyperbolic on the states this
+flow reaches, so its runs cannot answer the question. The fix follows from the same theorem: at
+<strong>ten</strong> moments, staying inside the realizability cone <em>is</em> sufficient for
+hyperbolicity. So the 2&times;2 was rerun at ten-moment order &mdash; one build flag, same
+namelists, same <span class="mono">K</span> calibration.</p>
+
+<p><strong>Rung 3 (compressible + moments) now converges and never leaves the cone:</strong></p>
+<table>
+<tr><th>rung 3, ten-moment</th><th>L4</th><th>L5</th><th>L6</th></tr>
+<tr><td>K = 2, min lam(P)/p</td><td class="pos">0.4400</td><td class="pos">0.4039</td><td class="pos">0.3935</td></tr>
+<tr><td>K = 3, min lam(P)/p</td><td class="pos">0.3530</td><td class="pos">0.3168</td><td class="pos">0.3076</td></tr>
+<tr><td>K = 3, max |Pi|/p</td><td>1.379</td><td>1.570</td><td>1.623</td></tr>
+<tr><td>n(lam&lt;0), all runs</td><td>0</td><td>0</td><td>0</td></tr>
+</table>
+<p class="why">Every run completes, and <span class="mono">min lam(P)/p</span> converges
+(increments &minus;0.036 then &minus;0.010). Note it reaches
+<span class="mono">max |Pi|/p = 1.62</span> &mdash; <em>further</em> from equilibrium than the
+twenty-moment runs ever got (1.15) before failing. That is the theorem doing its job.
+<br><br>This also settles something the mechanism block alone could not: the twenty-moment failure
+is specifically the <span class="mono">Q</span> sector, not a defect in the shared transport or
+source code, because the identical setup with <span class="mono">Q</span> removed runs clean at
+every level.</p>
+
+<p><strong>Rung 4 (incompressible + moments) crosses between K = 1 and K = 2:</strong></p>
+<table>
+<tr><th>rung 4, ten-moment</th><th>min lam(P)/p<sub>0</sub></th><th>max |Pi|/p<sub>0</sub></th><th>outcome</th></tr>
+<tr><td>K = 1, L4 / L5</td><td class="pos">0.4648 / 0.4323</td><td>1.31 / 1.39</td><td>survives to t_star</td></tr>
+<tr><td>K = 2, L4 / L5</td><td class="neg">&minus;0.0064 / &minus;0.0047</td><td>1.006 / 1.004</td><td class="neg">crosses</td></tr>
+<tr><td>K = 3, L4</td><td class="neg">&minus;0.0044</td><td>1.003</td><td class="neg">crosses</td></tr>
+</table>
+<p class="why">All the crossings land at <span class="mono">max |Pi|/p<sub>0</sub> &asymp; 1.005</span>,
+which is structural rather than lucky: with <span class="mono">p<sub>0</sub></span> held constant,
+<span class="mono">P = p<sub>0</sub>I + Pi</span>, so the cone boundary is at
+<span class="mono">|Pi|/p<sub>0</sub> = 1</span> exactly.</p>
+
+<div class="warnbox"><strong>The comparison is Mach-matched, which is what makes it a controlled
+experiment.</strong> At <span class="mono">K = 2</span> the compressible rung reaches a maximum
+local Mach number of <strong>1.497</strong> and the incompressible rung reaches
+<strong>1.502</strong> &mdash; 0.3% apart. Same <span class="mono">K</span>, same Mach number,
+same closure order, same initial condition. The only difference is whether the gas may compress,
+and that alone flips check 7.</div>
+
+<p><strong>One caveat that must travel with any rung-4 number.</strong> Rung 4 has a free
+parameter the compressible rungs do not. Scanning it at <span class="mono">K = 2</span>, with the
+velocity field essentially unchanged:</p>
+<table>
+<tr><th>incomp_p0</th><th>c<sub>s</sub></th><th>max |u|</th><th>Ma</th><th>outcome</th></tr>
+<tr><td>0.25</td><td>0.646</td><td>1.944</td><td>3.01</td><td class="neg">crosses, lam/p<sub>0</sub> = &minus;0.058</td></tr>
+<tr><td>1.0</td><td>1.291</td><td>1.939</td><td>1.50</td><td class="neg">crosses, lam/p<sub>0</sub> = &minus;0.006</td></tr>
+<tr><td>4.0</td><td>2.582</td><td>1.934</td><td>0.75</td><td class="pos">survives to t_star</td></tr>
+</table>
+<p class="why"><span class="mono">max |u|</span> is the same to 0.5% in all three, so this is the
+Mach number, not the velocity field. The reason: <span class="mono">Pi</span> relaxes toward
+<span class="mono">&minus;2p<sub>0</sub>&tau;S<sup>0</sup></span>, so
+<span class="mono">Pi</span> scales with <span class="mono">p<sub>0</sub></span>, and the momentum
+equation feels it as a force that scales with <span class="mono">p<sub>0</sub></span> too. Raising
+<span class="mono">p<sub>0</sub></span> strengthens the back-reaction of stress on velocity, which
+damps the strain and limits <span class="mono">Pi</span>. So
+<span class="mono">|Pi|/p<sub>0</sub></span> is <em>not</em> invariant under rescaling
+<span class="mono">p<sub>0</sub></span> &mdash; <strong>a rung-4 answer to check 7 is a statement
+at one Mach number, not a parameter-free one.</strong> Rung 4 still makes the question well posed,
+which incompressible Navier&ndash;Stokes does not (see the end of &sect;1); it just does not make
+it parameter-free. Any published rung-4 number must state
+<span class="mono">incomp_p0</span> and should be Mach-matched to the compressible rung it is
+compared against, as the <span class="mono">K = 2</span> comparison above is.</p>
+</div>
+</details>
 
 <details>
 <summary>The mechanism &mdash; why more moments made things worse, not better</summary>
@@ -544,11 +637,33 @@ wrong.</p>
 
 <h2>4. Agenda</h2>
 <p class="why">Ordered by what could falsify or unblock the result, not by build effort. Items are
-labelled <span class="mono">P1</span>&hellip;<span class="mono">P6</span> in that priority order
-and are referred to by those labels elsewhere on the page. Two are now done; their entries record
-what came back.</p>
+labelled <span class="mono">P1</span>&hellip;<span class="mono">P7</span> and referred to by
+those labels elsewhere on the page. <strong>Three are now done</strong>
+(<span class="mono">P1</span>, <span class="mono">P2</span>, <span class="mono">P4</span>); their
+entries record what came back, including where the answer contradicted the expectation. Of what
+remains, the priority order before publishing is
+<span class="mono">P5</span> (double precision) &rarr;
+<span class="mono">P3</span> (follow the trajectory) &rarr;
+<span class="mono">P6</span> (AMR) &rarr;
+<span class="mono">P7</span> (CUDA transport).</p>
 
 <ol class="agenda">
+<li>
+  <strong>Close the 2&times;2 at ten-moment order.</strong>
+  <span class="tag ok">done &mdash; it is the result</span>
+  <div class="why">Done, and it is what makes the page's headline defensible. The twenty-moment
+  runs cannot answer check 7 because their equations are ill posed on the states this flow
+  reaches; ten moments is hyperbolic wherever <span class="mono">P &gt; 0</span>, so the whole
+  2&times;2 was rerun there. Rung 3 then converges and stays realizable at levels 4&ndash;6 for
+  both <span class="mono">K</span>, and rung 4 crosses between <span class="mono">K = 1</span> and
+  2. Numbers and the Mach-matched comparison are in &sect;3.
+  <br><br>It also served as the control that isolates the cause: an otherwise identical setup with
+  <span class="mono">Q</span> removed runs clean at every level, so the twenty-moment failure is
+  the <span class="mono">Q</span> sector rather than a defect in the shared transport or source
+  code &mdash; a distinction the eigenvalue analysis alone could not make.</div>
+  <div class="cost">Cost: spent, one build flag. Outcome: the 2&times;2 has a working moment column.</div>
+</li>
+
 <li>
   <strong>Settle the rung-4 divergence with one offline eigenvalue test.</strong>
   <span class="tag ok">done &mdash; it is the closure</span>
@@ -695,12 +810,13 @@ default <span class="mono">-tp=native</span> gives a login-node binary that dies
 <table>
 <tr><th>what</th><th>namelist</th><th>build</th></tr>
 <tr><td>The sweep in section 1</td><td class="mono">namelist/vortex_sweep3d.nml</td><td class="mono">DFMM=4 INIT=BLOWUP</td></tr>
+<tr><td><strong>The ten-moment column (&sect;3) &mdash; the headline result</strong></td><td class="mono">namelist/vortex_sweep3d.nml</td><td class="mono">DFMM=1 INIT=BLOWUP</td></tr>
 <tr><td>Rung 1 &amp; 4 verification</td><td class="mono">namelist/taylorgreen3d.nml</td><td class="mono">DFMM=0 or 4, INIT=TAYLORGREEN</td></tr>
 <tr><td>Strain box, incompressible</td><td class="mono">namelist/incomp_blowup3d.nml</td><td class="mono">DFMM=4 INIT=BLOWUP</td></tr>
 <tr><td>Strain box, compressible</td><td class="mono">namelist/dfmm_blowup3d.nml</td><td class="mono">DFMM=2 or 4, INIT=BLOWUP</td></tr>
 <tr><td>Stage gates 1&ndash;8</td><td class="mono">namelist/dfmm_shear3d.nml</td><td class="mono">DFMM=1..4 INIT=DFMMTEST</td></tr>
 </table>
-<p class="why">One <span class="mono">DFMM=4 INIT=BLOWUP</span> binary covers all four rungs; the
+<p class="why">One binary covers all four rungs at a given closure order; the
 rungs differ by one namelist entry each
 (<span class="mono">incompressible</span>, <span class="mono">incomp_stress</span>,
 <span class="mono">dfmm_closure</span>). Full derivations and every gate number are in
