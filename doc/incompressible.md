@@ -507,7 +507,50 @@ grows faster. Two candidate explanations, neither yet established:
    has no numerical diffusion at all -- its design virtue and, here, its
    exposure.
 
-**The decisive next diagnostic** distinguishes them: run rung 4 at `K = 1`
+**It gets worse with refinement**, which is the most consequential thing
+measured about it. Fitting the exponential growth of `max|Q|` over the second
+half of the run at `K = 1`:
+
+| level | `dt` | growth rate | `max E_trunc/E` |
+|---|---|---|---|
+| 4 (16^3) | 2.0e-3 | **38.4** /time | 1.1e-13 |
+| 5 (32^3) | 9.3e-4 | **55.6** /time | 2.8e-13 |
+
+So this is not a low-resolution artefact that refinement will remove -- it
+grows. That rules the divergence *out* as a k-independent amplification, which
+is what candidate 1 above would predict if `T_Q2` were the mechanism: the
+`T_Q2` rate is `3|G| - 1/tau_q`, and for this field
+`3|G| tau_q = 18 tau/Delta = 2.25 K` exactly, so the predicted rate at `K = 1`
+is `26.8 - 11.9 = 15` /time, resolution-independent. The measured 38--56 /time
+is a factor 2.5--4 high and *k*-dependent. **So the first hypothesis is
+quantitatively wrong and should be discarded.**
+
+A rate that grows with `k` is the signature of a continuum problem that is
+**ill-posed at high wavenumber** -- i.e. loss of hyperbolicity of the
+twenty-moment closure, whose flux Jacobian has real eigenvalues only in a
+neighbourhood of equilibrium. Imaginary characteristic speeds give a growth
+rate proportional to `k`, and a spectral scheme with no numerical diffusion
+resolves it as soon as the grid admits it. That would also explain rung 3:
+it carries the same closure but damps high `k` with an HLL flux, and a
+compressible gas can relieve strain by expanding.
+
+**The decisive diagnostic**, and it needs no new solver: take a snapshot from
+a rung-4 run at `K = 1` just before it departs, form the flux Jacobian of the
+`(Pi, Q)` subsystem cell by cell, and look for complex eigenvalue pairs. If
+they appear where the growth starts, the closure has lost hyperbolicity on
+the states this flow visits and that is the finding -- a statement about the
+twenty-moment model, not about this code. If the eigenvalues stay real, the
+fault is in the integration: the velocity is advanced by RK2 with `Pi` frozen
+and the moments then by a single AP step, which is only first-order
+consistent overall and is not a stable pairing for a hyperbolic system, so
+the fix would be a two-stage treatment of the coupled `(u, Pi, Q)` system.
+
+An earlier framing of this section proposed freezing the velocity as the
+diagnostic. The eigenvalue test above is better: it is offline, it needs one
+snapshot rather than a modified solver, and it answers the question directly
+rather than by elimination.
+
+**Superseded distinguishing test**, kept only to record why it was dropped: run rung 4 at `K = 1`
 with the velocity frozen (`Pi` and `Q` advected and sourced but not fed back
 into `u`). If `Q` still diverges, it is (1), a closure property, and worth
 reporting as such. If it does not, the feedback loop is doing it and the
