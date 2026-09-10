@@ -293,6 +293,12 @@ contains
     real(kind=8),allocatable::u(:,:,:,:),pi5(:,:,:,:),q10(:,:,:,:)
     real(kind=8),allocatable::tw(:,:,:,:)
     real(kind=8)::dv,ef,cmin,gmin,qmax,c0
+    ! Lowest |Pi|/p0 at which the incompressible twenty-moment principal
+    ! symbol was found to lose hyperbolicity, over strain shapes: the scan in
+    ! doc/incompressible.md Section 4c gives 0.277-0.408, so warn at the
+    ! bottom of that range.
+    real(kind=8),parameter::incomp_hyp_warn = 0.277d0
+    logical,save::warned_hyp = .false.
 
     n = incomp_nside(sim%r)
     use_pi = (trim(sim%r%incomp_stress)=='moment')
@@ -326,20 +332,54 @@ contains
             ilevel, dv, ef, maxval(abs(u))
        if(use_pi)then
           cmin = incomp_cone_min(pi5,n,sim%r%incomp_p0)
-          ! Refuse to keep going once the moment sector has diverged.  At
-          ! level 4 and K >= 1 rung 4 grows |Pi|/p_0 without bound in a
-          ! RESOLVED mode (E_trunc/E stays at 1e-13, so it is not the
-          ! grid-scale aliasing the truncations above fixed) and reaches NaN
-          ! after a few hundred steps.  See doc/incompressible.md Section 4c.
-          ! Without this the run completes and reports -inf, which a sweep
-          ! script will happily tabulate as a realizability violation.
-          if(.not.(maxval(abs(pi5))/sim%r%incomp_p0 < 1.0d2))then
-             write(*,*)'incomp_step: the moment sector has diverged --', &
-                  ' max|Pi|/p0 = ',maxval(abs(pi5))/sim%r%incomp_p0, &
-                  ' at level ',ilevel,'.  This is the known rung-4', &
-                  ' instability at K >= 1 (doc/incompressible.md Sec. 4c),', &
-                  ' not a physical realizability violation.  Stopping so it', &
-                  ' cannot be mistaken for a result.'
+          ! Refuse to keep going once the state has left the region where
+          ! the closure is well posed.  Two thresholds, both from
+          ! doc/incompressible.md Sections 4c and 4d:
+          !
+          !   |Pi|/p0 > incomp_hyp_warn -- the incompressible twenty-moment
+          !     principal symbol loses hyperbolicity somewhere in
+          !     0.277-0.408 depending on the strain shape, so above the
+          !     lower end the run may already be integrating an ill-posed
+          !     system.  Warned once, not fatal: the exact threshold is
+          !     shape-dependent and a hard stop here would kill runs that
+          !     are still fine.
+          !
+          !   lam_min(P) < 0 -- P is positive semidefinite kinetically, so
+          !     this state is not realizable by any distribution function.
+          !     Hyperbolicity is necessarily lost with it (verified per cell
+          !     in Section 4d: no realizable-and-non-hyperbolic cell is ever
+          !     the other way round).  Everything after the crossing is
+          !     noise, so the first crossing IS the measurement.  Stop and
+          !     report it.
+          !
+          ! Both live inside the incomp_diag block because cmin is computed
+          ! there; incomp_diag defaults to .true., so setting it .false. also
+          ! disables these guards.
+          !
+          ! The previous threshold here was |Pi|/p0 > 100, which fires only
+          ! once the run is already numerically dead -- by then it reports
+          ! min lam(P)/p0 = -inf, which a sweep script will happily tabulate
+          ! as a spectacular realizability violation.
+          if(use_q .and. .not.warned_hyp .and. &
+               maxval(abs(pi5))/sim%r%incomp_p0 > incomp_hyp_warn)then
+             warned_hyp = .true.
+             write(*,'(" incomp_step: WARNING max|Pi|/p0 = ",1pe10.3, &
+                  & " at level ",I2," exceeds ",1pe10.3,", the lowest", &
+                  & " strain shape")') &
+                  maxval(abs(pi5))/sim%r%incomp_p0, ilevel, incomp_hyp_warn
+             write(*,*)'   at which the incompressible twenty-moment', &
+                  ' symbol loses hyperbolicity.  The system may be', &
+                  ' ill-posed from here on (doc/incompressible.md Sec. 4c).'
+          endif
+          if(.not.(cmin >= 0.0d0))then
+             write(*,*)'incomp_step: the moment sector has left the', &
+                  ' realizability cone -- min lam(P)/p0 = ',cmin, &
+                  ' with max|Pi|/p0 = ',maxval(abs(pi5))/sim%r%incomp_p0, &
+                  ' at level ',ilevel,'.  P is positive semidefinite', &
+                  ' kinetically, so this state is unphysical and the', &
+                  ' system is no longer hyperbolic', &
+                  ' (doc/incompressible.md Sec. 4c, 4d).  Stopping: this', &
+                  ' crossing is the result, and what follows it is noise.'
              stop 1
           endif
           if(use_tw)then
