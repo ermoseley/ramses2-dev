@@ -806,13 +806,25 @@ states of interest.
   L4), 5696/5696 (L6), 0/0 (rung 3, K=3, L4, all outputs), 16/16 (rung 3,
   K=3, L5, out 4) -- and `min lam/p` to 3-4 digits, the residual being the
   float32 kernel against a float64 eigensolve on a near-singular eigenvalue.
-* **Still not a true float64 verification.** The Metal build is `NPRE=4` and
-  `output_hydro.f90` writes `real(...,kind=4)` regardless of `NPRE`, so both
-  the run and the snapshot are single precision; the recheck verifies the
-  *diagnostic*, not the *precision*. The `K = 3` rung-2 crossing is far too
-  large to be precision-sensitive, but the rung-3 L5 onset -- 16 cells at
-  `lam/p = -0.29` -- deserves an `NPRE=8` rerun before publication. That is
-  what the CUDA branch is for.
+* **Still not a true float64 verification, and it cannot be done yet.** The
+  Metal build is `NPRE=4` and `output_hydro.f90` writes `real(...,kind=4)`
+  regardless of `NPRE`, so both the run and the snapshot are single precision;
+  the recheck verifies the *diagnostic*, not the *precision*.
+
+  There is currently **no** way to run these rungs in double precision, and the
+  dependency is worth stating: Metal is float32-only; the CUDA path refuses
+  `DFMM>0` because its transport half is unported; and there is no host
+  fallback, because the dfmm sector exists *only* as Metal kernels
+  (`metal_dfmm_godunov` and `metal_dfmm_diag` both sit behind `-D_METAL`), so a
+  `COMPILER=GNU` build has nothing to dispatch to. Double precision for the
+  dfmm rungs therefore **requires finishing the CUDA transport half first**.
+
+  What is actually at stake is narrow. Rung 2's `K = 3` crossing (-1.99) and
+  rung 3's ten-moment margin (+0.31) are orders of magnitude from float32
+  round-off. The numbers that genuinely want double precision are those within
+  a few times `1e-3` of zero -- rung 4's ten-moment crossings at
+  `lam/p_0 = -0.0064` and `-0.0044` (Section 4e). Those should carry an
+  explicit float32 caveat until the port lands.
 
 ### Reader trap: `rd_cell` returns primitives
 

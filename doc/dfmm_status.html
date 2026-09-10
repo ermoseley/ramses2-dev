@@ -723,19 +723,31 @@ remains, the priority order before publishing is
 </li>
 
 <li>
-  <strong>Rerun the crossings at <span class="mono">NPRE=8</span> on CUDA.</strong>
-  <span class="tag open">precision</span>
-  <div class="why">Everything above is single precision twice over: the Metal build is
+  <strong>Rerun the crossings in double precision.</strong>
+  <span class="tag blk">blocked on P7</span>
+  <div class="why">Everything on this page is single precision twice over: the Metal build is
   <span class="mono">NPRE=4</span> (Apple GPUs have no float64) and
   <span class="mono">output_hydro.f90</span> writes <span class="mono">real(&hellip;,kind=4)</span>
   regardless of <span class="mono">NPRE</span>. An independent float64 recheck of the snapshots
   reproduces the kernel&rsquo;s <span class="mono">n(lam&lt;0)</span> <em>exactly</em> at every
-  time-matched output &mdash; 48/48, 5696/5696, 0/0, 16/16 &mdash; so the diagnostic is verified,
-  but the <em>precision</em> is not. Rung 2&rsquo;s crossing at
-  <span class="mono">K = 3</span> is far too large to be precision-sensitive; rung 3&rsquo;s level-5
-  onset (16 cells at <span class="mono">lam/p = &minus;0.29</span>) is not, and should be confirmed
-  at <span class="mono">NPRE=8</span> before publication. This is what the CUDA branch is for.</div>
-  <div class="cost">Cost: one A100 job. Blocks: the rung-3 onset number specifically.</div>
+  time-matched output &mdash; 48/48, 5696/5696, 0/0, 16/16 &mdash; so the <em>diagnostic</em> is
+  verified against a second implementation, but the <em>precision</em> is not.
+  <br><br><strong>This turns out to be blocked, and the dependency is worth stating plainly.</strong>
+  There is no way to run these rungs in double precision today. Metal is float32-only. The CUDA
+  path refuses <span class="mono">DFMM&gt;0</span> because its transport half is unported
+  (<span class="mono">P7</span>). And there is no host/CPU fallback: the dfmm sector exists
+  <em>only</em> as Metal kernels, so a <span class="mono">COMPILER=GNU</span> build has nothing to
+  dispatch to. <strong>So double precision for the dfmm rungs requires finishing
+  <span class="mono">P7</span> first</strong>, which raises P7's priority above its cost estimate.
+  <br><br>What is at stake is narrow. Rung 2's crossing at <span class="mono">K = 3</span>
+  (<span class="mono">min lam/p = &minus;1.99</span>) and rung 3's ten-moment margin
+  (<span class="mono">+0.31</span>) are both far too large to be precision-sensitive. The numbers
+  that genuinely want double precision are the ones that sit within a few times
+  <span class="mono">10<sup>-3</sup></span> of zero: rung 4's crossings at
+  <span class="mono">lam/p<sub>0</sub> = &minus;0.006</span> and
+  <span class="mono">&minus;0.004</span>. Those should carry an explicit float32 caveat until P7
+  lands.</div>
+  <div class="cost">Cost: blocked on P7. At stake: the rung-4 crossing values, not the headline.</div>
 </li>
 
 <li>
@@ -780,6 +792,7 @@ remains, the priority order before publishing is
 <tr><td class="mono">min lam(P)/p0 = 1.000</td><td>Rung 1 only, and it means &ldquo;not applicable&rdquo; &mdash; no <span class="mono">Pi</span> is carried.</td></tr>
 <tr><td class="mono">E_trunc/E</td><td>The first diagnostic to announce under-resolution in the spectral rungs. 1e-13 across the current sweep; anything approaching 1e-6 means stop.</td></tr>
 <tr><td>first <span class="mono">incomp level=</span> line</td><td>Prints the state <em>after</em> the step whose header precedes it. The initial <span class="mono">max|u|</span> is not in the log at all, and on a 32<sup>3</sup> collocated grid the discrete max of the Taylor&ndash;Green <span class="mono">|u|</span> is 0.99044, not 1.</td></tr>
+<tr><td class="mono">COMPILER=</td><td><strong>The dfmm rungs build and silently do nothing on any compiler but METAL.</strong> The dfmm kernels are Metal-only, with no host or CUDA implementation, so a <span class="mono">COMPILER=GNU DFMM=1</span> build compiles, runs, prints <span class="mono">hydro solver with nvar = 10</span>, exits 0 and says <span class="mono">Run completed</span> &mdash; with the dfmm fields never advected or sourced. The only outward sign is that not one <span class="mono">dfmm level=</span> line appears. <span class="mono">bin/Makefile</span> now refuses this for every non-METAL compiler rather than only NVHPC.</td></tr>
 <tr><td class="mono">make</td><td><strong>Always <span class="mono">make clean</span> when changing <span class="mono">INIT=</span> or <span class="mono">DFMM=</span></strong> &mdash; neither is a dependency of <span class="mono">condinit.o</span>, so a stale object silently runs the previous problem's initial condition.</td></tr>
 <tr><td class="mono">rd_cell</td><td>Returns <strong>primitives</strong>. Slot 5 is <span class="mono">p</span>, not total energy &mdash; forming <span class="mono">eint = E/rho &minus; |u|<sup>2</sup>/2</span> from it produces a spurious 752 violating cells in a run the kernel reports clean throughout. Run the <span class="mono">t = 0</span> control first: it must give <span class="mono">rho = p = 1</span> exactly, <span class="mono">|Pi| = 0</span>, <span class="mono">min lam(P)/p = 1</span>. Note the dfmm slots go the other way &mdash; <span class="mono">output_hydro.f90</span> deliberately does <em>not</em> divide the density-like block (<span class="mono">Pi</span>, <span class="mono">Q</span>) by <span class="mono">rho</span>, but does divide the mass-like tower.</td></tr>
 <tr><td class="mono">dfmm_tau</td><td>Lives in both <span class="mono">DFMM_PARAMS</span> and <span class="mono">INCOMP_PARAMS</span>; <span class="mono">INCOMP_PARAMS</span> is read second and wins. Set it in one group only.</td></tr>
