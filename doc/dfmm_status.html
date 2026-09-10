@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>dfmm — status and next steps</title>
+<style>
+  :root{
+    --bg:#14161a; --panel:#1c1f25; --panel2:#22262d; --ink:#e8eaed; --dim:#9aa2ad;
+    --line:#31363f; --acc:#6ea8fe; --good:#4ec98a; --bad:#f0725f; --warn:#e7b75f;
+    --r1:#8a93a0; --r2:#f0725f; --r3:#4ec98a; --r4:#b48ce8;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+  .wrap{max-width:1120px;margin:0 auto;padding:32px 22px 80px}
+  h1{font-size:27px;margin:0 0 4px;letter-spacing:-.3px}
+  .sub{color:var(--dim);font-size:14px;margin-bottom:26px}
+  h2{font-size:19px;margin:38px 0 12px;padding-bottom:7px;border-bottom:1px solid var(--line)}
+  h3{font-size:15px;margin:22px 0 8px;color:var(--acc)}
+  p{margin:9px 0}
+  code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px}
+  code{background:var(--panel2);padding:1px 5px;border-radius:4px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin:14px 0}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:820px){.grid2{grid-template-columns:1fr}}
+  table{border-collapse:collapse;width:100%;font-size:13.5px}
+  th,td{padding:6px 9px;text-align:right;border-bottom:1px solid var(--line)}
+  th:first-child,td:first-child{text-align:left}
+  th{color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  tr:last-child td{border-bottom:none}
+  .neg{color:var(--bad);font-weight:600}
+  .pos{color:var(--good)}
+  .div{color:var(--warn);font-style:italic}
+  .na{color:var(--dim);font-style:italic}
+  .tag{display:inline-block;font-size:11px;padding:2px 8px;border-radius:20px;
+       border:1px solid var(--line);color:var(--dim);margin-right:6px}
+  .tag.ok{color:var(--good);border-color:#2d5c45}
+  .tag.open{color:var(--warn);border-color:#5c4d2d}
+  .tag.blk{color:var(--bad);border-color:#5c332d}
+  button{background:var(--panel2);color:var(--ink);border:1px solid var(--line);
+         border-radius:7px;padding:6px 13px;font-size:13px;cursor:pointer;margin:0 6px 6px 0}
+  button:hover{border-color:var(--acc)}
+  button[aria-pressed="true"]{background:var(--acc);color:#0d1117;border-color:var(--acc);font-weight:600}
+  .chartwrap{position:relative}
+  svg{display:block;width:100%;height:auto;overflow:visible}
+  .axis{stroke:var(--line);stroke-width:1}
+  .gridln{stroke:var(--line);stroke-width:1;stroke-dasharray:2 4;opacity:.65}
+  .lbl{fill:var(--dim);font-size:11px;font-family:ui-monospace,Menlo,monospace}
+  .ser{fill:none;stroke-width:2.4}
+  .dot{stroke:var(--bg);stroke-width:1.6}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;margin:10px 0 2px;font-size:13px}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+  details{border:1px solid var(--line);border-radius:8px;padding:0;margin:9px 0;background:var(--panel)}
+  summary{cursor:pointer;padding:11px 15px;font-weight:600;font-size:14px}
+  summary:hover{color:var(--acc)}
+  details > div{padding:2px 15px 14px}
+  ol.agenda{list-style:none;counter-reset:a;padding:0;margin:0}
+  ol.agenda > li{counter-increment:a;background:var(--panel);border:1px solid var(--line);
+       border-radius:10px;padding:15px 18px 15px 56px;margin:11px 0;position:relative}
+  ol.agenda > li::before{content:"P" counter(a);position:absolute;left:16px;top:14px;
+       font:600 13px ui-monospace,Menlo,monospace;color:var(--bg);background:var(--acc);
+       border-radius:6px;padding:3px 7px}
+  .why{color:var(--dim);font-size:13.5px;margin-top:6px}
+  .cost{font-size:12px;color:var(--dim);margin-top:8px}
+  .note{border-left:3px solid var(--acc);padding-left:13px;color:var(--dim);font-size:13.5px;margin:12px 0}
+  .warnbox{border-left:3px solid var(--warn);padding-left:13px;margin:12px 0;font-size:13.5px}
+  .tt{position:absolute;pointer-events:none;background:#0c0e11;border:1px solid var(--line);
+      border-radius:6px;padding:6px 9px;font:12px ui-monospace,Menlo,monospace;
+      color:var(--ink);opacity:0;transition:opacity .1s;white-space:pre;z-index:5}
+  footer{margin-top:44px;padding-top:16px;border-top:1px solid var(--line);color:var(--dim);font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Dual-frame moment method — where it stands, and what to do next</h1>
+<div class="sub">
+  Four-rung study of the finite-time-blowup construction ·
+  branches <code>dfmm_3d_metal</code> (22 commits) and <code>dfmm_3d_cuda</code> (4) ·
+  all figures below are from runs in this repository, not sketches
+</div>
+
+<div class="panel">
+  <h3 style="margin-top:0">The question, in one paragraph</h3>
+  <p>The blowup construction is stated for <em>incompressible Navier&ndash;Stokes</em>. The
+  pedagogical note asks whether the assumptions that make a velocity-only description
+  legitimate survive as the core shrinks &mdash; in particular its <strong>check 7</strong>: the
+  kinetic pressure tensor is positive semidefinite by construction, so a closure that predicts
+  a negative principal pressure has falsified itself, not the gas. Newtonian stress predicts
+  exactly that: <span class="mono">lam_min(P_NS)/p = 1 &minus; K</span> with
+  <span class="mono">K = 8&mu;/(p&Delta;)</span>. The experiment is to run the same initial
+  condition with the same solver and change <em>only</em> the closure.</p>
+</div>
+
+<h2>1. The result</h2>
+
+<p>Low-resolution sweep: four rungs &times; six values of <span class="mono">K</span>, level 4
+(16<sup>3</sup>), each run to <span class="mono">t_star = blowup_delta</span> with output times
+clipped exactly onto the quarter ladder. Pick an indicator:</p>
+
+<div>
+  <button id="b_lam" aria-pressed="true">min lam(P)/p &nbsp;(check 7)</button>
+  <button id="b_pi" aria-pressed="false">max |Pi|/p</button>
+  <button id="b_q" aria-pressed="false">max |q|/(p c<sub>s</sub>)</button>
+  <button id="b_g" aria-pressed="false">min g (rank)</button>
+</div>
+
+<div class="panel chartwrap">
+  <div class="legend">
+    <span><span class="sw" style="background:var(--r1)"></span>rung 1 &mdash; incompressible + Newtonian</span>
+    <span><span class="sw" style="background:var(--r2)"></span>rung 2 &mdash; compressible + Newtonian</span>
+    <span><span class="sw" style="background:var(--r3)"></span>rung 3 &mdash; compressible + moments</span>
+    <span><span class="sw" style="background:var(--r4)"></span>rung 4 &mdash; incompressible + moments</span>
+    <span><span class="sw" style="background:#5a6270"></span>Newtonian prediction 1&minus;K</span>
+  </div>
+  <svg id="chart" viewBox="0 0 880 420" role="img" aria-label="sweep chart"></svg>
+  <div class="tt" id="tt"></div>
+  <div id="cap" class="why"></div>
+</div>
+
+<div class="panel">
+  <h3 style="margin-top:0">What the check-7 panel says</h3>
+  <p><strong>Rung 2 tracks the Newtonian prediction and crosses zero between
+  <span class="mono">K = 1</span> and <span class="mono">K = 2</span></strong>, exactly where the
+  note says the extrapolation must fail &mdash; <span class="mono">n(lam&lt;0)</span> reaches
+  <strong>1504</strong> of 4096 cells at <span class="mono">K = 3</span>.</p>
+  <p><strong>Rung 3 never goes negative.</strong> Same grid, same initial condition, same Riemann
+  solver, <em>one namelist entry different</em>
+  (<span class="mono">dfmm_closure='ns'</span> &rarr; <span class="mono">'evolve'</span>).
+  <span class="mono">n(lam&lt;0) = 0</span> at every <span class="mono">K</span>, and
+  <span class="mono">min lam(P)/p</span> saturates at 0.401 by
+  <span class="mono">K = 3</span> instead of falling to &minus;1.8. The nonlinear
+  <span class="mono">&minus;[Pi&middot;G]<sup>dev</sup></span> term limits the anisotropy the
+  Newtonian extrapolation grows without bound.</p>
+  <p>That is the falsifiable claim of the whole exercise, and it holds at this resolution.
+  The failure <em>ordering</em> is: the phase-space rank indicator
+  <span class="mono">g</span> collapses first (rung 3 at <span class="mono">K = 3</span>),
+  Newtonian <span class="mono">lam_min</span> crosses second, evolved
+  <span class="mono">lam_min</span> not at all in this range.</p>
+  <div class="warnbox"><strong>Read rung 1 as &ldquo;not applicable&rdquo;, not as a pass.</strong>
+  It prints <span class="mono">1.000</span> identically because it carries no
+  <span class="mono">Pi</span>. That is the pressure-gauge argument showing up in the output:
+  incompressible Navier&ndash;Stokes has no gas pressure &mdash; its <span class="mono">p</span> is
+  a multiplier with a free additive gauge &mdash; so check 7 cannot even be <em>asked</em> of it.
+  Rung 4 exists precisely to ask it.</div>
+</div>
+
+<h2>2. Honest status of each rung</h2>
+
+<div class="grid2">
+  <div class="panel">
+    <div><span class="tag ok">usable</span><strong>Rung 1 &mdash; incompressible + Newtonian</strong></div>
+    <p class="why">Spectral, exact Leray projection, host float64. Taylor&ndash;Green verified to
+    <span class="mono">6&times;10<sup>-7</sup></span>, <span class="mono">div u ~ 10<sup>-15</sup></span>.
+    Check 7 is vacuous here by construction.</p>
+  </div>
+  <div class="panel">
+    <div><span class="tag ok">usable</span><strong>Rung 2 &mdash; compressible + Newtonian</strong></div>
+    <p class="why">Same kernel as rung 3 with the Chapman&ndash;Enskog substitution, so the
+    comparison is not confounded by a separately written viscous solver. Reproduces
+    <span class="mono">1&minus;K</span>.</p>
+  </div>
+  <div class="panel">
+    <div><span class="tag ok">usable</span><strong>Rung 3 &mdash; compressible + moments</strong></div>
+    <p class="why">Twenty moments plus the dual frame (38 fields). All nine gates pass. This is
+    the rung the headline rests on.</p>
+  </div>
+  <div class="panel">
+    <div><span class="tag blk">blocked for K&nbsp;&ge;&nbsp;1</span><strong>Rung 4 &mdash; incompressible + moments</strong></div>
+    <p class="why">Clean and gated at <span class="mono">K &le; 0.5</span>. Diverges above that,
+    and <em>the growth rate rises with refinement</em> (38.4&nbsp;/time at level 4 &rarr;
+    55.6&nbsp;/time at level 5), so it will not be resolved away. See P1.</p>
+  </div>
+</div>
+
+<h2>3. Two things that would change the headline</h2>
+
+<details>
+<summary>Resolution &mdash; some indicators converge, some do not</summary>
+<div>
+<p>At <span class="mono">K = 1</span>, rung 3, one deformation time:</p>
+<table>
+<tr><th>quantity</th><th>L4</th><th>L5</th><th>L6</th><th>behaviour</th></tr>
+<tr><td>min lam(P)/p</td><td>0.6836</td><td>0.6554</td><td>0.6486</td><td class="pos">converging</td></tr>
+<tr><td>min g (rank)</td><td>0.716</td><td>0.625</td><td>0.529</td><td class="neg">not converged</td></tr>
+<tr><td>sigma_max(dL/dx)</td><td>2.29</td><td>2.93</td><td>3.44</td><td class="neg">not converged</td></tr>
+<tr><td>|rho/det J &minus; 1|</td><td>9.7e-2</td><td>7.5e-2</td><td>4.3e-2</td><td class="div">4% error at L6</td></tr>
+</table>
+<p class="why">The headline quantity <span class="mono">min lam(P)/p</span> converges, which is why
+the claim is defensible. But <span class="mono">min g</span> and
+<span class="mono">sigma_max(dL/dx)</span> are minima/maxima over cells of a field that keeps
+sharpening, so refining finds more of it &mdash; <span class="mono">Kn_local</span> from the sweep
+is a <em>lower bound that grows with resolution</em>. That is itself the note's check 1 made
+numerically, but it means the <span class="mono">g</span>-collapse-first ordering is not yet
+resolution-proof. The untested case is rung 3 at <span class="mono">K = 2, 3</span>, where
+<span class="mono">min lam(P)/p</span> is closest to zero and the flow is transonic.</p>
+</div>
+</details>
+
+<details>
+<summary>Scope &mdash; we are running a released snapshot, not the construction</summary>
+<div>
+<p>The construction is <em>forced</em>: a smooth body force confined in space and time keeps the
+flow on a trajectory whose strain at the origin is exactly
+<span class="mono">S(0,t) = (1/&Delta;) diag(&minus;2,&minus;2,4)</span> with
+<span class="mono">&Delta; = t_star &minus; t</span>.</p>
+<p>Our initial condition freezes that field at <span class="mono">&Delta; = blowup_delta</span> and
+then lets the gas evolve <strong>freely</strong>. So the <span class="mono">K</span> ladder is a
+<em>proxy</em> for approaching <span class="mono">t_star</span>: each rung of it asks &ldquo;given
+the constructed state at remaining time <span class="mono">&Delta;</span>, does a gas immediately
+violate the kinetic assumptions?&rdquo; The note asks the stronger question &mdash; along the
+constructed trajectory, do the assumptions survive <em>to</em>
+<span class="mono">t_star</span>?</p>
+<p class="why">This is the most important conceptual gap and it is addressable (P2). We cannot
+import the full 166-page velocity field, but we <em>can</em> prescribe the strain's own time
+dependence: the IC already sets <span class="mono">cstr = 2/&Delta;</span>, so making it
+<span class="mono">2/(&Delta;<sub>0</sub> &minus; t)</span> and relaxing the velocity toward that
+field turns the study into a direct measurement of <em>at what</em>
+<span class="mono">&Delta;/t_c</span> each check fires &mdash; which is exactly the deliverable
+the note frames.</p>
+</div>
+</details>
+
+<h2>4. Agenda</h2>
+<p class="why">Ordered by what could falsify or unblock the result, not by build effort.</p>
+
+<ol class="agenda">
+<li>
+  <strong>Settle the rung-4 divergence with one offline eigenvalue test.</strong>
+  <span class="tag open">open</span>
+  <div class="why">Take one snapshot from rung 4 at <span class="mono">K = 1</span> just before
+  departure, form the <span class="mono">(Pi, Q)</span> flux Jacobian cell by cell, and look for
+  complex eigenvalue pairs. If they appear where the growth starts, the twenty-moment closure has
+  lost hyperbolicity on the states this flow visits &mdash; a statement about the <em>model</em>,
+  publishable, and it explains why rung 3 survives (an HLL flux damps high
+  <span class="mono">k</span>; a compressible gas can relieve strain by expanding). If the
+  eigenvalues stay real, the fault is the integration: the velocity is advanced by RK2 with
+  <span class="mono">Pi</span> frozen and the moments then by a single asymptotic-preserving step,
+  which is only first-order consistent overall and is not a stable pairing for a hyperbolic
+  system.
+  <br><br>Why first: it is hours of work on an existing snapshot, it unblocks the <em>only</em>
+  rung that can ask check 7 gauge-free, and the answer is interesting either way. Note the rate
+  measurement already discarded the obvious hypothesis &mdash;
+  <span class="mono">T_Q2</span> amplification predicts
+  <span class="mono">3|G| &minus; 1/tau_q = 15</span> /time, resolution-independent, against
+  38&ndash;56 /time measured and rising with <span class="mono">k</span>.</div>
+  <div class="cost">Cost: hours. No solver change. Blocks: rung 4 entirely.</div>
+</li>
+
+<li>
+  <strong>Follow the construction's trajectory instead of releasing a snapshot.</strong>
+  <span class="tag open">new physics</span>
+  <div class="why">Prescribe <span class="mono">&Delta;(t) = &Delta;<sub>0</sub> &minus; t</span>
+  and drive the velocity toward the constructed strain field, so the run approaches
+  <span class="mono">t_star</span> along the trajectory rather than departing from it. Then the
+  deliverable becomes what the note actually frames: the <em>time</em>, in units of
+  <span class="mono">&Delta;/t_c</span>, at which each check fires, and their ordering.
+  Recommend a <span class="mono">blowup_forced</span> namelist flag so the unforced runs stay
+  reproducible, and an honest statement that this forces the <em>local</em> strain, not the full
+  construction.</div>
+  <div class="cost">Cost: days. Turns a proxy into the measurement. Highest scientific value.</div>
+</li>
+
+<li>
+  <strong>Resolution ladder on the headline, at the K where it is closest to breaking.</strong>
+  <span class="tag open">falsifiability</span>
+  <div class="why">Rungs 2 and 3 at <span class="mono">K = 2</span> and
+  <span class="mono">K = 3</span>, levels 4&ndash;6. The claim is &ldquo;rung 3 never goes
+  negative&rdquo;; at <span class="mono">K = 3</span> it sits at 0.401 and the flow is transonic
+  with shocks, so this is where under-resolution could flip the answer.
+  <span class="mono">min lam(P)/p</span> converges cleanly at
+  <span class="mono">K = 1</span>, which is encouraging but is not the test.</div>
+  <div class="cost">Cost: level 6 is ~2&nbsp;s/step on an M3; feasible on the Mac. Do it before publishing anything.</div>
+</li>
+
+<li>
+  <strong>Verify AMR on the mass-like tower with an actually refined run.</strong>
+  <span class="tag open">correctness risk</span>
+  <div class="why">Prolongation and restriction of all <span class="mono">NVAR</span> fields is
+  verified <em>by inspection only</em>. The tower (<span class="mono">rho D_i</span>,
+  <span class="mono">rho Sxx</span>, <span class="mono">rho Sxv</span>) is mass-like where
+  <span class="mono">Pi</span> and <span class="mono">Q</span> are density-like, and the blowup
+  problem has a shrinking core &mdash; AMR is the natural way to resolve it and is untested. If
+  refinement mishandles the tower, the deformation tensor and therefore
+  <span class="mono">Kn_local</span> are wrong on refined levels, silently.</div>
+  <div class="cost">Cost: one refined blowup run plus a check that |rho/det J &minus; 1| does not jump at level boundaries.</div>
+</li>
+
+<li>
+  <strong>Finish the CUDA transport half.</strong>
+  <span class="tag open">enables scale</span>
+  <div class="why">The source half and the timestep kernel are ported and compile on an A100
+  (<span class="mono">DFMM=1/2/4</span>, <span class="mono">NPRE=8</span>). What remains is the
+  MUSCL predictor over the extended state, the HLL solver on the twenty-moment flux, the
+  upwind-on-mass-flux kernel for the passive tower, and the fine/coarse flux bookkeeping. Until
+  then <span class="mono">gpu_dfmm_godunov</span> refuses rather than falling through to
+  <span class="mono">gpu_godunov</span>, which would leave the dfmm fields unadvected while the
+  run called itself a dfmm run.
+  <br><br>One thing not to assume: the two-kernel split on Metal exists because 38 fields need
+  43840&nbsp;B against Apple's 32768&nbsp;B threadgroup limit. An A100 offers 164&nbsp;KB of shared
+  memory per block, so <em>measure before reproducing it</em>. Also: <span class="mono">NPRE=8</span>
+  makes the realizability diagnostics trustworthy without the float64 recheck that Gate 9 needed.</div>
+  <div class="cost">Cost: weeks. Needed for level 7+, i.e. for P3 beyond level 6.</div>
+</li>
+</ol>
+
+<h2>5. Caveats a reader of the logs needs</h2>
+<div class="panel">
+<table>
+<tr><th>thing</th><th>why it will mislead you</th></tr>
+<tr><td class="mono">econs</td><td>Meaningless in the incompressible rungs: <span class="mono">eint</span> is pinned at <span class="mono">3p<sub>0</sub>/2</span>, so dissipated kinetic energy leaves the budget instead of heating the gas. Watch <span class="mono">mcons</span> (exactly zero) and <span class="mono">max|u|</span>.</td></tr>
+<tr><td class="mono">ekin</td><td>RAMSES's <span class="mono">ekin</span> slot carries <em>total</em> energy, not the kinetic part.</td></tr>
+<tr><td class="mono">min lam(P)/p0 = 1.000</td><td>Rung 1 only, and it means &ldquo;not applicable&rdquo; &mdash; no <span class="mono">Pi</span> is carried.</td></tr>
+<tr><td class="mono">E_trunc/E</td><td>The first diagnostic to announce under-resolution in the spectral rungs. 1e-13 across the current sweep; anything approaching 1e-6 means stop.</td></tr>
+<tr><td>first <span class="mono">incomp level=</span> line</td><td>Prints the state <em>after</em> the step whose header precedes it. The initial <span class="mono">max|u|</span> is not in the log at all, and on a 32<sup>3</sup> collocated grid the discrete max of the Taylor&ndash;Green <span class="mono">|u|</span> is 0.99044, not 1.</td></tr>
+<tr><td class="mono">make</td><td><strong>Always <span class="mono">make clean</span> when changing <span class="mono">INIT=</span> or <span class="mono">DFMM=</span></strong> &mdash; neither is a dependency of <span class="mono">condinit.o</span>, so a stale object silently runs the previous problem's initial condition.</td></tr>
+<tr><td class="mono">dfmm_tau</td><td>Lives in both <span class="mono">DFMM_PARAMS</span> and <span class="mono">INCOMP_PARAMS</span>; <span class="mono">INCOMP_PARAMS</span> is read second and wins. Set it in one group only.</td></tr>
+</table>
+</div>
+
+<details>
+<summary>Deliberately not done, with reasons</summary>
+<div>
+<ul>
+<li><strong>1D reduction against <span class="mono">py-1d</span> for the moment sector &mdash; impossible in principle.</strong>
+<span class="mono">py-1d</span> carries <span class="mono">P_perp</span> with flux
+<span class="mono">u&middot;P_perp</span> and drops <span class="mono">Q_yyx</span>, so it is a
+reduced model rather than the 1D restriction of the twenty-moment system. The dual-frame sector
+<em>is</em> identical and the equivalence is proved analytically.</li>
+<li><strong>Max-entropy closure</strong> &mdash; rejected in the ledger, not ported.</li>
+<li><strong>Cross-cluster runs</strong> &mdash; only Stellar has been used. Note its login node is
+Intel with AVX-512 while <em>every</em> GPU-partition node is AMD EPYC without it, so NVHPC's
+default <span class="mono">-tp=native</span> gives a login-node binary that dies with
+<span class="mono">Illegal instruction</span> before printing a line. Build inside the job.</li>
+</ul>
+</div>
+</details>
+
+<details>
+<summary>Reproducing any of it</summary>
+<div>
+<table>
+<tr><th>what</th><th>namelist</th><th>build</th></tr>
+<tr><td>The sweep in section 1</td><td class="mono">namelist/vortex_sweep3d.nml</td><td class="mono">DFMM=4 INIT=BLOWUP</td></tr>
+<tr><td>Rung 1 &amp; 4 verification</td><td class="mono">namelist/taylorgreen3d.nml</td><td class="mono">DFMM=0 or 4, INIT=TAYLORGREEN</td></tr>
+<tr><td>Strain box, incompressible</td><td class="mono">namelist/incomp_blowup3d.nml</td><td class="mono">DFMM=4 INIT=BLOWUP</td></tr>
+<tr><td>Strain box, compressible</td><td class="mono">namelist/dfmm_blowup3d.nml</td><td class="mono">DFMM=2 or 4, INIT=BLOWUP</td></tr>
+<tr><td>Stage gates 1&ndash;8</td><td class="mono">namelist/dfmm_shear3d.nml</td><td class="mono">DFMM=1..4 INIT=DFMMTEST</td></tr>
+</table>
+<p class="why">One <span class="mono">DFMM=4 INIT=BLOWUP</span> binary covers all four rungs; the
+rungs differ by one namelist entry each
+(<span class="mono">incompressible</span>, <span class="mono">incomp_stress</span>,
+<span class="mono">dfmm_closure</span>). Full derivations and every gate number are in
+<span class="mono">doc/dfmm_3d.md</span> and <span class="mono">doc/incompressible.md</span>.</p>
+</div>
+</details>
+
+<footer>
+Generated from the run logs in this repository. Sweep: 24 runs, level 4, all completed.
+Every number in section 1 is a minimum or maximum over the whole run to
+<span class="mono">t_star</span>, not a final-snapshot value.
+</footer>
+</div>
+
+<script>
+const DATA = {"r1_0.1":{"lam_min":1.0,"pi_max":0.0,"q_max":0.0,"g_min":1.0,"sig_max":1.0,"kn_max":0.02288,"lag_max":0.0,"nlam":0,"diverged":false,"done":true},"r1_0.25":{"lam_min":1.0,"pi_max":0.0,"q_max":0.0,"g_min":1.0,"sig_max":1.0,"kn_max":0.03617,"lag_max":0.0,"nlam":0,"diverged":false,"done":true},"r1_0.5":{"lam_min":1.0,"pi_max":0.0,"q_max":0.0,"g_min":1.0,"sig_max":1.0,"kn_max":0.05115,"lag_max":0.0,"nlam":0,"diverged":false,"done":true},"r1_1":{"lam_min":1.0,"pi_max":0.0,"q_max":0.0,"g_min":1.0,"sig_max":1.0,"kn_max":0.07234,"lag_max":0.0,"nlam":0,"diverged":false,"done":true},"r1_2":{"lam_min":1.0,"pi_max":0.0,"q_max":0.0,"g_min":1.0,"sig_max":1.0,"kn_max":0.1023,"lag_max":0.0,"nlam":0,"diverged":false,"done":true},"r1_3":{"lam_min":1.0,"pi_max":0.0,"q_max":0.0,"g_min":1.0,"sig_max":1.0,"kn_max":0.1253,"lag_max":0.0,"nlam":0,"diverged":false,"done":true},"r2_0.1":{"lam_min":0.9063,"pi_max":0.115,"q_max":0.009663,"g_min":0.8713,"sig_max":2.564,"kn_max":0.05867,"lag_max":0.1391,"nlam":0,"diverged":false,"done":true},"r2_0.25":{"lam_min":0.7657,"pi_max":0.2883,"q_max":0.03181,"g_min":0.7905,"sig_max":2.855,"kn_max":0.1033,"lag_max":0.1722,"nlam":0,"diverged":false,"done":true},"r2_0.5":{"lam_min":0.5313,"pi_max":0.5779,"q_max":0.08231,"g_min":0.704,"sig_max":2.981,"kn_max":0.1525,"lag_max":0.1954,"nlam":0,"diverged":false,"done":true},"r2_1":{"lam_min":0.0626,"pi_max":1.16,"q_max":0.2171,"g_min":0.5769,"sig_max":2.994,"kn_max":0.2166,"lag_max":0.2058,"nlam":0,"diverged":false,"done":true},"r2_2":{"lam_min":-0.8748,"pi_max":2.322,"q_max":0.5355,"g_min":0.0,"sig_max":2.851,"kn_max":0.2917,"lag_max":0.197,"nlam":336,"diverged":false,"done":true},"r2_3":{"lam_min":-1.812,"pi_max":3.488,"q_max":0.8957,"g_min":0.0,"sig_max":2.68,"kn_max":0.3358,"lag_max":0.1991,"nlam":1504,"diverged":false,"done":true},"r3_0.1":{"lam_min":0.9261,"pi_max":0.1013,"q_max":0.02358,"g_min":0.8753,"sig_max":2.65,"kn_max":0.06063,"lag_max":0.148,"nlam":0,"diverged":false,"done":true},"r3_0.25":{"lam_min":0.8452,"pi_max":0.229,"q_max":0.07781,"g_min":0.8049,"sig_max":3.128,"kn_max":0.1132,"lag_max":0.2129,"nlam":0,"diverged":false,"done":true},"r3_0.5":{"lam_min":0.7475,"pi_max":0.4014,"q_max":0.1892,"g_min":0.7365,"sig_max":3.557,"kn_max":0.1819,"lag_max":0.2615,"nlam":0,"diverged":false,"done":true},"r3_1":{"lam_min":0.6203,"pi_max":0.6537,"q_max":0.4248,"g_min":0.6451,"sig_max":4.061,"kn_max":0.2938,"lag_max":0.3064,"nlam":0,"diverged":false,"done":true},"r3_2":{"lam_min":0.4798,"pi_max":0.9651,"q_max":0.8225,"g_min":0.385,"sig_max":4.617,"kn_max":0.4724,"lag_max":0.4025,"nlam":0,"diverged":false,"done":true},"r3_3":{"lam_min":0.4007,"pi_max":1.15,"q_max":1.113,"g_min":0.0,"sig_max":4.917,"kn_max":0.6161,"lag_max":0.4299,"nlam":0,"diverged":false,"done":true},"r4_0.1":{"lam_min":0.92,"pi_max":0.1127,"q_max":0.01223,"g_min":0.874,"sig_max":4.547,"kn_max":0.104,"lag_max":1534.0,"nlam":0,"diverged":false,"done":true},"r4_0.25":{"lam_min":0.8292,"pi_max":0.2676,"q_max":0.05661,"g_min":0.801,"sig_max":5.023,"kn_max":0.1817,"lag_max":369.4,"nlam":0,"diverged":false,"done":true},"r4_0.5":{"lam_min":0.7143,"pi_max":0.4972,"q_max":0.1961,"g_min":0.7281,"sig_max":5.962,"kn_max":0.305,"lag_max":1636.0,"nlam":0,"diverged":false,"done":true},"r4_1":{"lam_min":null,"pi_max":null,"q_max":null,"g_min":null,"sig_max":null,"kn_max":null,"lag_max":null,"nlam":4096,"diverged":true,"done":true},"r4_2":{"lam_min":null,"pi_max":null,"q_max":null,"g_min":null,"sig_max":null,"kn_max":null,"lag_max":null,"nlam":4096,"diverged":true,"done":true},"r4_3":{"lam_min":null,"pi_max":null,"q_max":null,"g_min":null,"sig_max":null,"kn_max":null,"lag_max":null,"nlam":4096,"diverged":true,"done":true}};
+const KS = [0.1,0.25,0.5,1,2,3];
+const RUNGS = [
+  {id:'r1', name:'rung 1', col:'var(--r1)'},
+  {id:'r2', name:'rung 2', col:'var(--r2)'},
+  {id:'r3', name:'rung 3', col:'var(--r3)'},
+  {id:'r4', name:'rung 4', col:'var(--r4)'}
+];
+const IND = {
+  lam:{key:'lam_min', label:'min lam(P)/p  over the run', zero:true, pred:true,
+       cap:'Newtonian (rung 2) crosses zero between K=1 and K=2, exactly where the note says it must. The evolved closure (rung 3) never does. Rung 1 is flat at 1.000 because it carries no Pi — read it as not applicable.'},
+  pi:{key:'pi_max', label:'max |Pi|/p  over the run', zero:false, pred:false,
+      cap:'The Newtonian stress grows without bound in K; the evolved stress saturates, which is what keeps rung 3 inside the cone.'},
+  q:{key:'q_max', label:'max |q|/(p c_s)  over the run', zero:false, pred:false,
+     cap:'Heat flux. In rung 4 the first-order Chapman–Enskog value is exactly zero (theta is constant), so whatever is plotted there is entirely second order — Burnett order and beyond.'},
+  g:{key:'g_min', label:'min g (phase-space rank indicator)', zero:false, pred:false,
+     cap:'g collapses to zero first — rung 3 at K=3, before its lam_min goes anywhere near zero. This is the indicator that fires earliest, and it is also the one least converged in resolution.'}
+};
+let cur = 'lam';
+
+const svg = document.getElementById('chart');
+const tt  = document.getElementById('tt');
+const NS  = 'http://www.w3.org/2000/svg';
+const W=880, H=420, M={l:66,r:18,t:18,b:52};
+
+function el(t,a){const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);return e;}
+function xOf(i){return M.l + i*(W-M.l-M.r)/(KS.length-1);}
+
+function draw(){
+  const ind = IND[cur], key = ind.key;
+  let vals=[];
+  RUNGS.forEach(r=>KS.forEach(k=>{
+    const d=DATA[r.id+'_'+k];
+    if(d && !d.diverged && d[key]!=null && isFinite(d[key])) vals.push(d[key]);
+  }));
+  if(ind.pred) KS.forEach(k=>vals.push(1-k));
+  let lo=Math.min(...vals), hi=Math.max(...vals);
+  if(ind.zero){ lo=Math.min(lo,-2.1); hi=Math.max(hi,1.05); }
+  else { lo=Math.min(0,lo); }
+  const pad=(hi-lo)*0.08||0.1; lo-=pad; hi+=pad;
+  const yOf=v=>M.t+(hi-v)*(H-M.t-M.b)/(hi-lo);
+
+  svg.textContent='';
+
+  // y gridlines
+  const nT=6;
+  for(let i=0;i<=nT;i++){
+    const v=lo+(hi-lo)*i/nT, y=yOf(v);
+    svg.appendChild(el('line',{class:'gridln',x1:M.l,x2:W-M.r,y1:y,y2:y}));
+    const t=el('text',{class:'lbl',x:M.l-9,y:y+4,'text-anchor':'end'});
+    t.textContent=(Math.abs(v)<1e-9?0:v).toFixed(2); svg.appendChild(t);
+  }
+  // zero line emphasised
+  if(lo<0&&hi>0){
+    const y=yOf(0);
+    svg.appendChild(el('line',{x1:M.l,x2:W-M.r,y1:y,y2:y,stroke:'#7a828f','stroke-width':1.4}));
+    const z=el('text',{class:'lbl',x:W-M.r-2,y:y-7,'text-anchor':'end',fill:'#9aa2ad'});
+    z.textContent='0  — below here the closure has falsified itself'; svg.appendChild(z);
+  }
+  // axes
+  svg.appendChild(el('line',{class:'axis',x1:M.l,x2:W-M.r,y1:H-M.b,y2:H-M.b}));
+  svg.appendChild(el('line',{class:'axis',x1:M.l,x2:M.l,y1:M.t,y2:H-M.b}));
+  KS.forEach((k,i)=>{
+    const t=el('text',{class:'lbl',x:xOf(i),y:H-M.b+19,'text-anchor':'middle'});
+    t.textContent='K = '+k; svg.appendChild(t);
+  });
+  const xa=el('text',{class:'lbl',x:(M.l+W-M.r)/2,y:H-M.b+40,'text-anchor':'middle'});
+  xa.textContent='K = 8μ/(pΔ)   —   governing group; Δ = t_star, Ma = 1.1√K'; svg.appendChild(xa);
+  const ya=el('text',{class:'lbl',x:14,y:(M.t+H-M.b)/2,'text-anchor':'middle',
+                      transform:'rotate(-90 14 '+((M.t+H-M.b)/2)+')'});
+  ya.textContent=ind.label; svg.appendChild(ya);
+
+  // Newtonian prediction
+  if(ind.pred){
+    let dp=KS.map((k,i)=>(i?'L':'M')+xOf(i)+' '+yOf(1-k)).join(' ');
+    svg.appendChild(el('path',{d:dp,class:'ser',stroke:'#5a6270','stroke-dasharray':'6 5','stroke-width':1.8}));
+    const t=el('text',{class:'lbl',x:xOf(KS.length-1)-4,y:yOf(1-KS[KS.length-1])+16,
+                       'text-anchor':'end',fill:'#7a828f'});
+    t.textContent='1 − K'; svg.appendChild(t);
+  }
+
+  // series
+  RUNGS.forEach(r=>{
+    let seg=[],pts=[];
+    KS.forEach((k,i)=>{
+      const d=DATA[r.id+'_'+k];
+      if(d && !d.diverged && d[key]!=null && isFinite(d[key])){
+        seg.push([xOf(i),yOf(d[key])]);
+        pts.push({x:xOf(i),y:yOf(d[key]),k:k,v:d[key],d:d,r:r});
+      } else if(d && d.diverged){
+        // mark divergence at the top of the panel
+        const x=xOf(i);
+        const g=el('g',{});
+        g.appendChild(el('line',{x1:x-6,y1:M.t+8,x2:x+6,y2:M.t+20,stroke:'var(--warn)','stroke-width':2}));
+        g.appendChild(el('line',{x1:x-6,y1:M.t+20,x2:x+6,y2:M.t+8,stroke:'var(--warn)','stroke-width':2}));
+        svg.appendChild(g);
+        if(i===3){const t=el('text',{class:'lbl',x:x+12,y:M.t+18,fill:'var(--warn)'});
+                  t.textContent='rung 4 diverges (P1)'; svg.appendChild(t);}
+        if(seg.length){svg.appendChild(el('path',{d:seg.map((p,j)=>(j?'L':'M')+p[0]+' '+p[1]).join(' '),
+                       class:'ser',stroke:r.col}));seg=[];}
+      }
+    });
+    if(seg.length>1) svg.appendChild(el('path',{d:seg.map((p,j)=>(j?'L':'M')+p[0]+' '+p[1]).join(' '),
+                        class:'ser',stroke:r.col}));
+    pts.forEach(p=>{
+      const c=el('circle',{cx:p.x,cy:p.y,r:4.6,fill:r.col,class:'dot'});
+      c.addEventListener('mouseenter',ev=>{
+        const nl=p.d.nlam?('\nn(lam<0) = '+p.d.nlam+' cells'):'';
+        tt.textContent=r.name+'   K = '+p.k+'\n'+ind.label.split('  ')[0]+' = '+p.v.toFixed(4)+nl;
+        tt.style.opacity=1;
+        const bb=svg.getBoundingClientRect(), sc=bb.width/W;
+        tt.style.left=(p.x*sc+14)+'px'; tt.style.top=(p.y*sc-8)+'px';
+      });
+      c.addEventListener('mouseleave',()=>tt.style.opacity=0);
+      svg.appendChild(c);
+    });
+  });
+  document.getElementById('cap').textContent=ind.cap;
+  ['lam','pi','q','g'].forEach(id=>
+    document.getElementById('b_'+id).setAttribute('aria-pressed', id===cur?'true':'false'));
+}
+['lam','pi','q','g'].forEach(id=>
+  document.getElementById('b_'+id).addEventListener('click',()=>{cur=id;draw();}));
+draw();
+</script>
+</body>
+</html>
