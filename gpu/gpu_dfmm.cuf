@@ -32,6 +32,10 @@ module dfmm_device
   use hydro_parameters
   use oct_commons, only: oct
   use gpu_utils
+  ! index_1Dto3D is an attributes(device) helper in hydro_device; reused
+  ! rather than duplicated.  gpu_hydro.o precedes gpu_dfmm.o in the Makefile
+  ! object order, so the module file exists by the time this compiles.
+  use hydro_device, only: index_1Dto3D
   use cudafor
   implicit none
 
