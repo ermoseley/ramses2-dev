@@ -77,21 +77,170 @@
 <h1>Dual-frame moment method — where it stands, and what to do next</h1>
 <div class="sub">
   Four-rung study of the finite-time-blowup construction ·
-  branches <code>dfmm_3d_metal</code> (22 commits) and <code>dfmm_3d_cuda</code> (4) ·
+  branches <code>dfmm_3d_metal</code> (27 commits) and <code>dfmm_3d_cuda</code> (4) ·
   all figures below are from runs in this repository, not sketches
 </div>
 
-<div class="panel">
-  <h3 style="margin-top:0">The question, in one paragraph</h3>
-  <p>The blowup construction is stated for <em>incompressible Navier&ndash;Stokes</em>. The
-  pedagogical note asks whether the assumptions that make a velocity-only description
-  legitimate survive as the core shrinks &mdash; in particular its <strong>check 7</strong>: the
-  kinetic pressure tensor is positive semidefinite by construction, so a closure that predicts
-  a negative principal pressure has falsified itself, not the gas. Newtonian stress predicts
-  exactly that: <span class="mono">lam_min(P_NS)/p = 1 &minus; K</span> with
-  <span class="mono">K = 8&mu;/(p&Delta;)</span>. The experiment is to run the same initial
-  condition with the same solver and change <em>only</em> the closure.</p>
+<div class="note">
+This page is written to be readable without prior exposure to kinetic theory. &sect;0 builds up
+the physics and defines every symbol; if you already know what a moment closure and a
+realizability cone are, skip to &sect;1.
 </div>
+
+<h2>0. Background &mdash; what this is about</h2>
+
+<div class="panel">
+  <h3 style="margin-top:0">The physics question</h3>
+  <p>A famous open problem asks whether a smooth fluid velocity field, evolved by the
+  <strong>incompressible Navier&ndash;Stokes</strong> equations, must stay smooth forever &mdash;
+  or whether it can develop infinite velocity gradients in finite time. That event is called a
+  <strong>finite-time blowup</strong> or a singularity.</p>
+  <p>A recent construction (a 166-page manuscript, our Ref. [1]) exhibits a velocity field that
+  blows up at a specific time, which we call <span class="mono">t_star</span>. As
+  <span class="mono">t</span> approaches <span class="mono">t_star</span>, the flow concentrates
+  into a shrinking core, and the rate at which fluid elements are being stretched there grows
+  like <span class="mono">1/&Delta;</span>, where</p>
+  <p style="text-align:center"><span class="mono">&Delta; = t_star &minus; t</span> &nbsp;=&nbsp;
+  the <em>remaining time</em>.</p>
+  <p>So the whole story is about what happens as <span class="mono">&Delta;</span> gets small.</p>
+</div>
+
+<div class="panel">
+  <h3 style="margin-top:0">Why a gas dynamicist should be suspicious</h3>
+  <p>Navier&ndash;Stokes is not a fundamental law. It is the <em>first-order approximation</em> to
+  the Boltzmann equation, which describes the actual gas of molecules. That approximation is only
+  valid when molecules collide often compared to the timescale on which the flow changes &mdash;
+  i.e. when the gas is close to local thermodynamic equilibrium.</p>
+  <p>But near a blowup the flow timescale <em>is</em> <span class="mono">&Delta;</span>, and
+  <span class="mono">&Delta; &rarr; 0</span>. Sooner or later the collisions cannot keep up.
+  At that point Navier&ndash;Stokes is no longer a description of a gas at all &mdash; it is just
+  a partial differential equation that happens to be doing something dramatic.</p>
+  <p><strong>The question this study asks:</strong> does the approximation break down
+  <em>before</em> the blowup? If it does, then the singularity is a property of the equation
+  rather than of any gas that could obey it.</p>
+</div>
+
+<div class="panel">
+  <h3 style="margin-top:0">The measurement: pressure is a tensor, and it cannot be negative</h3>
+  <p>In kinetic theory pressure is not a single number. Write a molecule's velocity as the local
+  mean flow <span class="mono">u</span> plus a random part <span class="mono">c</span>. The
+  <strong>pressure tensor</strong> is</p>
+  <p style="text-align:center"><span class="mono">P<sub>ij</sub> = rho &lang;c<sub>i</sub> c<sub>j</sub>&rang;</span></p>
+  <p>&mdash; an average over the molecules in a fluid element. That object is a
+  <strong>covariance matrix</strong> of a probability distribution, and covariance matrices have a
+  hard mathematical property: <strong>every eigenvalue is greater than or equal to zero.</strong>
+  The reason is simple &mdash; an eigenvalue of <span class="mono">P</span> is
+  <span class="mono">rho</span> times the <em>variance</em> of the molecular velocity along the
+  corresponding eigenvector, and a variance cannot be negative.</p>
+  <p>The set of allowed <span class="mono">P</span> is therefore a cone in matrix space, called the
+  <strong>realizability cone</strong>. A state inside it corresponds to some possible
+  distribution of molecules; a state outside it corresponds to none.</p>
+  <div class="warnbox"><strong>This gives a clean, binary test, and it is the centre of the whole
+  page.</strong> If a model predicts an eigenvalue of <span class="mono">P</span> below zero, it
+  has predicted a negative variance. The model has falsified <em>itself</em> &mdash; no
+  experiment, no tolerance, no judgement call required. The blowup note calls this its
+  <strong>check 7</strong>, and <span class="mono">lam_min(P)</span> (the smallest eigenvalue of
+  <span class="mono">P</span>) is the number plotted everywhere below.</div>
+</div>
+
+<div class="panel">
+  <h3 style="margin-top:0">What Navier&ndash;Stokes predicts, and the one knob <span class="mono">K</span></h3>
+  <p>Navier&ndash;Stokes assumes the stress responds <em>instantaneously</em> to the strain:
+  <span class="mono">Pi = &minus;2&mu;S<sup>0</sup></span>, viscosity times rate of deformation.
+  (<span class="mono">Pi</span> is the anisotropic, trace-free part of
+  <span class="mono">P</span>; <span class="mono">S<sup>0</sup></span> is the trace-free strain
+  rate.) Substituting the blowup construction's strain field into that formula gives a
+  strikingly simple answer:</p>
+  <p style="text-align:center"><span class="mono">lam_min(P<sub>NS</sub>) / p = 1 &minus; K</span>,
+  &nbsp;&nbsp;where&nbsp;&nbsp;<span class="mono">K = 8&mu;/(p&Delta;)</span>.</p>
+  <p><span class="mono">K</span> is the single dimensionless group that controls everything here.
+  It compares the collision time of the gas to the remaining time
+  <span class="mono">&Delta;</span>: small <span class="mono">K</span> is a collision-dominated,
+  safely-Navier&ndash;Stokes gas, and large <span class="mono">K</span> is a gas being deformed
+  faster than it can relax. Because <span class="mono">&Delta;</span> shrinks as the blowup
+  approaches, <strong>increasing <span class="mono">K</span> is our proxy for approaching
+  <span class="mono">t_star</span></strong>.</p>
+  <p>And the prediction is stark: Navier&ndash;Stokes gives a negative eigenvalue &mdash; an
+  impossible gas state &mdash; the moment <span class="mono">K</span> exceeds 1. That is the
+  claim to be tested numerically, and it is what &sect;1 tests.</p>
+</div>
+
+<div class="panel">
+  <h3 style="margin-top:0">The alternative: moment methods, and the 2&times;2 design</h3>
+  <p>If assuming the stress responds instantly is the problem, the fix is to stop assuming it.
+  A <strong>moment method</strong> carries <span class="mono">Pi</span> as its own field with its
+  own evolution equation: it <em>relaxes toward</em> <span class="mono">&minus;2&mu;S<sup>0</sup></span>
+  over the collision time <span class="mono">&tau;</span>, but lags behind when the flow changes
+  faster than that. Counting fields:</p>
+  <table>
+  <tr><th>closure</th><th>fields carried</th><th>count</th></tr>
+  <tr><td><strong>ten-moment</strong></td><td>density, momentum (3), pressure tensor <span class="mono">P</span> (6)</td><td>10</td></tr>
+  <tr><td><strong>twenty-moment</strong></td><td>the above plus the third moment <span class="mono">Q<sub>ijk</sub> = rho&lang;c<sub>i</sub>c<sub>j</sub>c<sub>k</sub>&rang;</span> (10)</td><td>20</td></tr>
+  </table>
+  <p>More moments means more kinetic detail retained, and in principle a better description
+  further from equilibrium. That intuition is the one this study ends up complicating.</p>
+  <p>To isolate the effect of the closure and nothing else, the study runs a 2&times;2:</p>
+  <table>
+  <tr><th></th><th>Newtonian stress</th><th>evolved moments</th></tr>
+  <tr><td><strong>incompressible</strong></td><td>rung 1</td><td>rung 4</td></tr>
+  <tr><td><strong>compressible</strong></td><td>rung 2</td><td>rung 3</td></tr>
+  </table>
+  <p class="why">All four come out of <em>one</em> compiled binary and differ by a single entry in
+  the input file &mdash; same grid, same initial condition, same Riemann solver, same transport
+  coefficients. So any difference between rung 2 and rung 3 is attributable to the closure alone,
+  which is the entire point of building it this way.</p>
+</div>
+
+<div class="panel">
+  <h3 style="margin-top:0">Hyperbolicity &mdash; the concept that decided the outcome</h3>
+  <p>This one is worth understanding before reading &sect;3, because it is what the study actually
+  found.</p>
+  <p>For a system of conservation laws, the <strong>wave speeds</strong> are the eigenvalues of a
+  matrix built from the equations (the <em>principal symbol</em>). If every eigenvalue is
+  <strong>real</strong>, disturbances travel at finite speed and the system is called
+  <strong>hyperbolic</strong> &mdash; the initial-value problem is well posed, which is the
+  minimum requirement for a simulation to mean anything.</p>
+  <p>If instead a pair of eigenvalues becomes <strong>complex</strong>, a disturbance of
+  wavenumber <span class="mono">k</span> grows like
+  <span class="mono">exp(|Im &lambda;| k t)</span>. Note the <span class="mono">k</span>: the
+  growth rate is <em>proportional to wavenumber</em>, so the finer the feature, the faster it
+  explodes. This gives a diagnostic fingerprint that we lean on heavily:</p>
+  <div class="warnbox"><strong>Under-resolution gets better when you refine the grid.
+  Ill-posedness gets worse.</strong> A simulation that fails <em>harder</em> on a finer grid, with
+  the same physical setup, is not under-resolved &mdash; it is resolving a genuine instability of
+  the equations it is solving.</div>
+  <p><strong>Levermore's theorem</strong> is the key prior result: the <em>ten</em>-moment closure
+  is hyperbolic wherever <span class="mono">P</span> is positive definite. In other words, for ten
+  moments, staying inside the realizability cone is <em>enough</em>. There is no corresponding
+  theorem for twenty moments &mdash; and that gap is exactly where this study broke.</p>
+</div>
+
+<details>
+<summary>Notation &mdash; every symbol used on this page</summary>
+<div>
+<table>
+<tr><th>symbol</th><th>meaning</th></tr>
+<tr><td class="mono">P<sub>ij</sub></td><td>pressure tensor, <span class="mono">rho&lang;c<sub>i</sub>c<sub>j</sub>&rang;</span>. Must be positive semidefinite.</td></tr>
+<tr><td class="mono">lam_min(P)</td><td>smallest eigenvalue of <span class="mono">P</span>. <strong>Negative = impossible gas state.</strong> Usually shown divided by <span class="mono">p</span> to make it dimensionless.</td></tr>
+<tr><td class="mono">p</td><td>scalar pressure, <span class="mono">= trace(P)/3</span>.</td></tr>
+<tr><td class="mono">Pi<sub>ij</sub></td><td>the anisotropic part of <span class="mono">P</span>: <span class="mono">P<sub>ij</sub> &minus; p&delta;<sub>ij</sub></span>. Zero in equilibrium. <span class="mono">|Pi|/p</span> measures how far from equilibrium the gas is.</td></tr>
+<tr><td class="mono">Q<sub>ijk</sub></td><td>third moment, <span class="mono">rho&lang;c<sub>i</sub>c<sub>j</sub>c<sub>k</sub>&rang;</span>. Carried only by the twenty-moment closure. Its contraction <span class="mono">q<sub>i</sub> = Q<sub>ijj</sub>/2</span> is the heat flux.</td></tr>
+<tr><td class="mono">K</td><td><span class="mono">8&mu;/(p&Delta;)</span> &mdash; the one governing group. Larger <span class="mono">K</span> = closer to the singular time. Navier&ndash;Stokes predicts <span class="mono">lam_min/p = 1&minus;K</span>.</td></tr>
+<tr><td class="mono">&Delta;</td><td>remaining time <span class="mono">t_star &minus; t</span>. The initial condition freezes the construction at one value of it.</td></tr>
+<tr><td class="mono">t_star</td><td>the construction's singular time, used here as a reference clock. <strong>There is no forcing</strong>, so our runs do not actually blow up at it.</td></tr>
+<tr><td class="mono">&tau;</td><td>collision time. <span class="mono">&mu; = p&tau;</span> is the Chapman&ndash;Enskog viscosity.</td></tr>
+<tr><td class="mono">&mu;</td><td>dynamic viscosity.</td></tr>
+<tr><td class="mono">L4 / L5 / L6</td><td>grid refinement level: <span class="mono">2<sup>n</sup></span> cells per side, so 16<sup>3</sup> / 32<sup>3</sup> / 64<sup>3</sup>.</td></tr>
+<tr><td class="mono">n(lam&lt;0)</td><td>number of grid cells whose <span class="mono">P</span> has a negative eigenvalue. A raw count, needing no normalisation &mdash; which is why it is the most trustworthy indicator here.</td></tr>
+<tr><td class="mono">g</td><td>a phase-space &ldquo;rank indicator&rdquo; from the dual-frame sector, measuring whether the deformation is collapsing onto a lower-dimensional set. It turns out to be an <em>early warning</em> for the failures below.</td></tr>
+<tr><td class="mono">hyperbolic</td><td>all wave speeds real &rArr; well-posed. Complex speeds &rArr; growth rate proportional to wavenumber &rArr; worse on finer grids.</td></tr>
+<tr><td class="mono">E_trunc/E</td><td>fraction of kinetic energy in the top third of the spectrum in the spectral rungs &mdash; the under-resolution alarm. <span class="mono">10<sup>-13</sup></span> throughout here, i.e. fully resolved.</td></tr>
+<tr><td class="mono">NPRE</td><td>floating-point size in bytes: 4 = single, 8 = double precision.</td></tr>
+<tr><td class="mono">Ma</td><td>Mach number. Tied to <span class="mono">K</span> here by the construction: <span class="mono">Ma = 1.1&radic;K</span>.</td></tr>
+<tr><td class="mono">rung 1&ndash;4</td><td>the four cells of the 2&times;2 above.</td></tr>
+</table>
+</div>
+</details>
 
 <h2>1. The result</h2>
 
@@ -106,11 +255,23 @@ there. An earlier version of this page claimed the moment closure never goes neg
 resolution ladder overturned that. &sect;3 has both the ladder and the mechanism.</p>
 </div>
 
-<p>Low-resolution sweep: four rungs &times; six values of <span class="mono">K</span>, level 4
-(16<sup>3</sup>), each run to <span class="mono">t_star = blowup_delta</span> with output times
-clipped exactly onto the quarter ladder. <strong>Read the panel below as a level-4 snapshot, not
-as the result</strong> &mdash; rung 3&rsquo;s zero here does not survive refinement. Pick an
-indicator:</p>
+<p><strong>How to read the chart.</strong> Each curve is one of the four rungs. Moving right
+along the horizontal axis means increasing <span class="mono">K</span>, which means getting
+closer to the singular time. The default indicator is check 7: the smallest eigenvalue of the
+pressure tensor, so <em>crossing below the zero line means the model has predicted a state no gas
+can be in</em>. The grey dashed line is the Navier&ndash;Stokes prediction
+<span class="mono">1&minus;K</span>. Hover any point for its exact value and cell count.</p>
+
+<p class="why">Setup: four rungs &times; six values of <span class="mono">K</span>, on a 16<sup>3</sup>
+grid (level 4), each run to <span class="mono">t_star</span> with output times clipped exactly
+onto quarters of it. Every plotted number is a minimum or maximum over the <em>whole</em> run,
+not a final-snapshot value.</p>
+
+<div class="warnbox"><strong>Read this panel as a level-4 snapshot, not as the result.</strong>
+Rung 3&rsquo;s clean record here does not survive grid refinement &mdash; &sect;3 shows why, and
+the top of this section already states the corrected conclusion.</div>
+
+<p>Pick an indicator:</p>
 
 <div>
   <button id="b_lam" aria-pressed="true">min lam(P)/p &nbsp;(check 7)</button>
@@ -143,9 +304,15 @@ indicator:</p>
   (<span class="mono">dfmm_closure='ns'</span> &rarr; <span class="mono">'evolve'</span>).
   <span class="mono">n(lam&lt;0) = 0</span> at every <span class="mono">K</span>, and
   <span class="mono">min lam(P)/p</span> saturates at 0.401 by
-  <span class="mono">K = 3</span> instead of falling to &minus;1.8. The nonlinear
-  <span class="mono">&minus;[Pi&middot;G]<sup>dev</sup></span> term limits the anisotropy the
-  Newtonian extrapolation grows without bound.</p>
+  <span class="mono">K = 3</span> instead of falling to &minus;1.8.</p>
+  <p class="why">The reason is a term the Newtonian description simply does not have. Because the
+  moment closure evolves <span class="mono">Pi</span> rather than reading it off the strain, its
+  equation contains a term quadratic in <span class="mono">Pi</span> (written
+  <span class="mono">&minus;[Pi&middot;G]<sup>dev</sup></span>, where <span class="mono">G</span>
+  is the velocity gradient). That term acts as a brake: the larger the anisotropy already is, the
+  harder it pushes back. Newtonian stress has no such feedback, so it grows without limit as
+  <span class="mono">K</span> rises &mdash; which is exactly what the
+  <span class="mono">max |Pi|/p</span> panel shows.</p>
 
   <div class="warnbox"><strong>This panel is level 4, and the rung-3 zero does not survive
   refinement.</strong> An earlier version of this page called rung 3&rsquo;s zero
@@ -167,48 +334,70 @@ indicator:</p>
   <span class="mono">min lam</span> is still 0.367, and <span class="mono">lam</span> crosses
   only at step 157.</p>
   <div class="warnbox"><strong>Read rung 1 as &ldquo;not applicable&rdquo;, not as a pass.</strong>
-  It prints <span class="mono">1.000</span> identically because it carries no
-  <span class="mono">Pi</span>. That is the pressure-gauge argument showing up in the output:
-  incompressible Navier&ndash;Stokes has no gas pressure &mdash; its <span class="mono">p</span> is
-  a multiplier with a free additive gauge &mdash; so check 7 cannot even be <em>asked</em> of it.
-  Rung 4 exists precisely to ask it.</div>
+  It prints <span class="mono">1.000</span> at every <span class="mono">K</span> simply because it
+  carries no <span class="mono">Pi</span> at all, so the quantity being plotted is identically 1
+  by construction rather than by any physics.
+  <br><br>There is a deeper reason, and it is worth a moment. In <em>incompressible</em>
+  Navier&ndash;Stokes the pressure is not a thermodynamic quantity: it is a Lagrange multiplier
+  whose only job is to enforce <span class="mono">div u = 0</span>, and adding a constant to it
+  everywhere changes nothing. So there is no absolute scale against which &ldquo;the smallest
+  principal pressure has gone negative&rdquo; even means anything. Check 7 cannot be
+  <em>asked</em> of incompressible Navier&ndash;Stokes, let alone answered. Rung 4 &mdash;
+  incompressible flow with an evolved pressure tensor &mdash; exists precisely to make the
+  question well posed.</div>
 </div>
 
 <h2>2. Honest status of each rung</h2>
+<p class="why">Which of the four cells of the 2&times;2 can currently be trusted, and over what
+range of <span class="mono">K</span>. &ldquo;Gates&rdquo; below means the suite of verification
+tests each rung must pass &mdash; analytic decay rates, conservation, known wave speeds &mdash;
+before any physics result from it is believed.</p>
 
 <div class="grid2">
   <div class="panel">
     <div><span class="tag ok">usable</span><strong>Rung 1 &mdash; incompressible + Newtonian</strong></div>
-    <p class="why">Spectral, exact Leray projection, host float64. Taylor&ndash;Green verified to
-    <span class="mono">6&times;10<sup>-7</sup></span>, <span class="mono">div u ~ 10<sup>-15</sup></span>.
-    Check 7 is vacuous here by construction.</p>
+    <p class="why">Solved with a spectral (Fourier) method in double precision, with the
+    incompressibility constraint imposed exactly rather than approximately. Checked against the
+    Taylor&ndash;Green vortex, which has an analytic decay rate, to
+    <span class="mono">6&times;10<sup>-7</sup></span>; the velocity field's divergence stays at
+    <span class="mono">10<sup>-15</sup></span>, i.e. round-off.
+    <br><br>Check 7 cannot be asked of this rung at all &mdash; see the note at the end of
+    &sect;1.</p>
   </div>
   <div class="panel">
     <div><span class="tag ok">usable</span><strong>Rung 2 &mdash; compressible + Newtonian</strong></div>
-    <p class="why">Same kernel as rung 3 with the Chapman&ndash;Enskog substitution, so the
-    comparison is not confounded by a separately written viscous solver. Reproduces
-    <span class="mono">1&minus;K</span>.</p>
+    <p class="why">This is the Navier&ndash;Stokes comparison case, and it is deliberately built
+    from the <em>same</em> code as rung 3 with the stress replaced by its instantaneous formula,
+    rather than from a separately written viscous solver. That matters: it means the rung-2 versus
+    rung-3 difference cannot be blamed on two different implementations. It reproduces the
+    predicted <span class="mono">1&minus;K</span>.</p>
   </div>
   <div class="panel">
     <div><span class="tag blk">usable at L4 only</span><strong>Rung 3 &mdash; compressible + moments</strong></div>
-    <p class="why">Twenty moments plus the dual frame (38 fields). All nine gates pass, and it is
-    the rung the headline rested on &mdash; but it <strong>diverges under refinement</strong>:
+    <p class="why">Twenty moments plus the &ldquo;dual frame&rdquo; bookkeeping that tracks how
+    fluid elements are being deformed &mdash; 38 stored fields per cell in all. All nine
+    verification gates pass, and it is the rung the headline rested on &mdash; but it
+    <strong>diverges under refinement</strong>:
     fine at level 4, and at level 5 for <span class="mono">K = 2</span>; diverges at level 5 for
     <span class="mono">K = 3</span> and at level 6 for both. Same obstruction as rung 4
     (&sect;3). Sound at ten-moment order (<span class="mono">DFMM=1</span>).</p>
   </div>
   <div class="panel">
     <div><span class="tag blk">blocked for K&nbsp;&ge;&nbsp;1</span><strong>Rung 4 &mdash; incompressible + moments</strong></div>
-    <p class="why">Clean and gated at <span class="mono">K &le; 0.5</span>. Diverges above that,
-    and <em>the growth rate rises with refinement</em> (38.4&nbsp;/time at level 4 &rarr;
-    55.6&nbsp;/time at level 5), so it will not be resolved away. See P1.</p>
+    <p class="why">Verified and trustworthy for <span class="mono">K &le; 0.5</span>.
+    Above that it diverges, and crucially <em>the growth rate rises with refinement</em>
+    (38.4 per unit time at level 4 &rarr; 55.6 at level 5) &mdash; the ill-posedness fingerprint
+    from &sect;0, so a finer grid will not rescue it. P1 explains what it is.
+    <br><br>This rung matters more than its status suggests: it is the <em>only</em> one that can
+    ask check 7 of an incompressible flow, which is the case the blowup construction is actually
+    about.</p>
   </div>
 </div>
 
 <h2>3. What changed the headline, and why</h2>
 
 <details>
-<summary>Resolution &mdash; some indicators converge, some do not</summary>
+<summary>The resolution ladder &mdash; the test that overturned the headline</summary>
 <div>
 <p>At <span class="mono">K = 1</span>, rung 3, one deformation time:</p>
 <table>
@@ -249,7 +438,7 @@ resolution-independent, quantitatively predicted result; rung 3&rsquo;s zero was
 </details>
 
 <details>
-<summary>Scope &mdash; we are running a released snapshot, not the construction</summary>
+<summary>A scope limit worth knowing: we release a snapshot, we do not follow the construction</summary>
 <div>
 <p>The construction is <em>forced</em>: a smooth body force confined in space and time keeps the
 flow on a trajectory whose strain at the origin is exactly
@@ -262,24 +451,52 @@ the constructed state at remaining time <span class="mono">&Delta;</span>, does 
 violate the kinetic assumptions?&rdquo; The note asks the stronger question &mdash; along the
 constructed trajectory, do the assumptions survive <em>to</em>
 <span class="mono">t_star</span>?</p>
+<div class="note"><strong>Why this matters, in plain terms.</strong> The construction keeps its
+flow on a blowup trajectory by <em>pushing</em> on it &mdash; a body force, tuned so the stretching
+rate at the origin follows <span class="mono">1/&Delta;</span> all the way to
+<span class="mono">t_star</span>. We do not have that force. What we do is take a photograph of the
+constructed flow at one instant, hand it to the gas, and let go.
+<br><br>
+So our runs answer &ldquo;given the state the construction reaches at remaining time
+<span class="mono">&Delta;</span>, does a gas immediately violate the kinetic assumptions?&rdquo;
+&mdash; whereas the sharper question is &ldquo;travelling <em>along</em> the trajectory, do the
+assumptions survive all the way to <span class="mono">t_star</span>?&rdquo; Increasing
+<span class="mono">K</span> is our stand-in for the second question, and it is a good one, but it
+is a stand-in.</div>
+
 <p class="why">This is the most important conceptual gap and it is addressable (P2). We cannot
 import the full 166-page velocity field, but we <em>can</em> prescribe the strain's own time
-dependence: the IC already sets <span class="mono">cstr = 2/&Delta;</span>, so making it
+dependence: the initial condition already sets the strain coefficient to
+<span class="mono">2/&Delta;</span>, so making it
 <span class="mono">2/(&Delta;<sub>0</sub> &minus; t)</span> and relaxing the velocity toward that
-field turns the study into a direct measurement of <em>at what</em>
-<span class="mono">&Delta;/t_c</span> each check fires &mdash; which is exactly the deliverable
-the note frames.</p>
+field turns the study into a direct measurement of <em>at what</em> remaining time each check
+fires &mdash; which is exactly the deliverable the note frames.</p>
 </div>
 </details>
 
 
 <details>
-<summary>Mechanism &mdash; positive-definite P is not sufficient at twenty moments</summary>
+<summary>The mechanism &mdash; why more moments made things worse, not better</summary>
 <div>
-<p>Levermore&rsquo;s theorem gives hyperbolicity of the <strong>ten</strong>-moment Gaussian
-closure wherever <span class="mono">P &gt; 0</span>. It says nothing about twenty. Evaluating the
-principal symbol on the states the code actually visited (read back from the snapshots, float64
-eigensolve), on the failing snapshot &mdash; 200 most-strained cells of 32768:</p>
+<div class="note"><strong>The idea in words.</strong> One would naturally expect that carrying
+<em>more</em> kinetic detail (twenty moments instead of ten) can only help describe a gas far from
+equilibrium. What we found is the opposite, and the reason is well-posedness rather than accuracy.
+<br><br>
+For ten moments, Levermore proved that staying inside the realizability cone &mdash; keeping the
+pressure tensor a legitimate covariance matrix &mdash; is <em>enough</em> to guarantee real wave
+speeds. For twenty moments no such theorem exists, and it turns out not to be true: there are
+states with a perfectly respectable, positive-definite <span class="mono">P</span> whose wave
+speeds are nevertheless complex. The extra field <span class="mono">Q</span> that was supposed to
+buy extra fidelity is what carries the system out of the well-posed region. So the region where
+the twenty-moment model is <em>usable</em> is strictly smaller than the region where it is
+<em>physical</em>, and this problem's states fall in the gap.</div>
+
+<p>Quantitatively: Levermore&rsquo;s theorem gives hyperbolicity of the <strong>ten</strong>-moment
+Gaussian closure wherever <span class="mono">P &gt; 0</span>. It says nothing about twenty.
+To test it we compute the wave speeds (the eigenvalues of the principal symbol, &sect;0) on the
+states the code actually visited &mdash; reading each cell back out of the saved snapshots and
+diagonalising in double precision. On the snapshot where rung 3 first fails, taking the 200
+most-strained cells out of 32768:</p>
 <table>
 <tr><th></th><th>hyperbolic</th><th>non-hyperbolic</th></tr>
 <tr><td>lam_min(P) &ge; 0</td><td>152</td><td class="neg"><strong>32</strong></td></tr>
@@ -318,14 +535,18 @@ law <span class="mono">|Q|<sub>max</sub> = 0.91 (lam_min/p)<sup>3/2</sup></span>
 shape pair to 2% but six random shape pairs give slopes 0.16&ndash;1.17, nowhere near 1.5 &mdash;
 only the qualitative statements are shape-robust. And the equilibrium symbol&rsquo;s repeated
 eigenvalues (&plusmn;1.732 &times;2, &plusmn;1.000 &times;3, 0 &times;6) are all
-<em>semisimple</em>, so there <em>is</em> a genuine hyperbolic neighbourhood of equilibrium and
+<em>semisimple</em> (i.e. not defective &mdash; each has as many independent eigenvectors as its
+multiplicity), so there <em>is</em> a genuine hyperbolic neighbourhood of equilibrium and
 the &ldquo;small <span class="mono">Q</span> splits a defective pair&rdquo; hypothesis is
 wrong.</p>
 </div>
 </details>
 
 <h2>4. Agenda</h2>
-<p class="why">Ordered by what could falsify or unblock the result, not by build effort.</p>
+<p class="why">Ordered by what could falsify or unblock the result, not by build effort. Items are
+labelled <span class="mono">P1</span>&hellip;<span class="mono">P6</span> in that priority order
+and are referred to by those labels elsewhere on the page. Two are now done; their entries record
+what came back.</p>
 
 <ol class="agenda">
 <li>
@@ -405,8 +626,9 @@ wrong.</p>
 <li>
   <strong>Verify AMR on the mass-like tower with an actually refined run.</strong>
   <span class="tag open">correctness risk</span>
-  <div class="why">Prolongation and restriction of all <span class="mono">NVAR</span> fields is
-  verified <em>by inspection only</em>. The tower (<span class="mono">rho D_i</span>,
+  <div class="why">When a grid refines, values must be interpolated down to the finer cells and
+  averaged back up to the coarser ones. For the dfmm fields that has been verified
+  <em>by reading the code only</em>, never by running a refined case. The tower (<span class="mono">rho D_i</span>,
   <span class="mono">rho Sxx</span>, <span class="mono">rho Sxv</span>) is mass-like where
   <span class="mono">Pi</span> and <span class="mono">Q</span> are density-like, and the blowup
   problem has a shrinking core &mdash; AMR is the natural way to resolve it and is untested. If
@@ -419,9 +641,10 @@ wrong.</p>
   <strong>Finish the CUDA transport half.</strong>
   <span class="tag open">enables scale</span>
   <div class="why">The source half and the timestep kernel are ported and compile on an A100
-  (<span class="mono">DFMM=1/2/4</span>, <span class="mono">NPRE=8</span>). What remains is the
-  MUSCL predictor over the extended state, the HLL solver on the twenty-moment flux, the
-  upwind-on-mass-flux kernel for the passive tower, and the fine/coarse flux bookkeeping. Until
+  (<span class="mono">DFMM=1/2/4</span>, <span class="mono">NPRE=8</span>). What remains is the transport half:
+  the slope-limited predictor step over the extended state, the approximate Riemann solver
+  (HLL) for the twenty-moment flux, the upwind kernel for the passively advected fields, and
+  the bookkeeping that keeps fluxes consistent across refinement boundaries. Until
   then <span class="mono">gpu_dfmm_godunov</span> refuses rather than falling through to
   <span class="mono">gpu_godunov</span>, which would leave the dfmm fields unadvected while the
   run called itself a dfmm run.
@@ -433,11 +656,11 @@ wrong.</p>
 </li>
 </ol>
 
-<h2>5. Caveats a reader of the logs needs</h2>
+<h2>5. Traps &mdash; read this before interpreting any output</h2>
 <div class="panel">
 <table>
 <tr><th>thing</th><th>why it will mislead you</th></tr>
-<tr><td class="mono">econs</td><td>Meaningless in the incompressible rungs: <span class="mono">eint</span> is pinned at <span class="mono">3p<sub>0</sub>/2</span>, so dissipated kinetic energy leaves the budget instead of heating the gas. Watch <span class="mono">mcons</span> (exactly zero) and <span class="mono">max|u|</span>.</td></tr>
+<tr><td class="mono">econs</td><td>The code's energy-conservation error. Meaningless in the incompressible rungs: <span class="mono">eint</span> is pinned at <span class="mono">3p<sub>0</sub>/2</span>, so dissipated kinetic energy leaves the budget instead of heating the gas. Watch instead <span class="mono">mcons</span>, the mass-conservation error (exactly zero here), and <span class="mono">max|u|</span>.</td></tr>
 <tr><td class="mono">ekin</td><td>RAMSES's <span class="mono">ekin</span> slot carries <em>total</em> energy, not the kinetic part.</td></tr>
 <tr><td class="mono">min lam(P)/p0 = 1.000</td><td>Rung 1 only, and it means &ldquo;not applicable&rdquo; &mdash; no <span class="mono">Pi</span> is carried.</td></tr>
 <tr><td class="mono">E_trunc/E</td><td>The first diagnostic to announce under-resolution in the spectral rungs. 1e-13 across the current sweep; anything approaching 1e-6 means stop.</td></tr>
@@ -503,13 +726,13 @@ const RUNGS = [
 ];
 const IND = {
   lam:{key:'lam_min', label:'min lam(P)/p  over the run', zero:true, pred:true,
-       cap:'Newtonian (rung 2) crosses zero between K=1 and K=2, exactly where the note says it must. The evolved closure (rung 3) never does. Rung 1 is flat at 1.000 because it carries no Pi — read it as not applicable.'},
+       cap:'Check 7: below the zero line the closure has predicted a negative variance, which no gas can have. Newtonian (rung 2, red) tracks the dashed 1-K prediction and crosses zero between K=1 and K=2. Rung 3 (green) does not cross HERE — but this is level 4, and it does cross on finer grids (see section 3). Rung 1 is flat at 1.000 because it carries no Pi at all: read it as "not applicable", not as a pass.'},
   pi:{key:'pi_max', label:'max |Pi|/p  over the run', zero:false, pred:false,
-      cap:'The Newtonian stress grows without bound in K; the evolved stress saturates, which is what keeps rung 3 inside the cone.'},
+      cap:'How far from equilibrium the gas gets. The Newtonian stress grows without bound in K; the evolved stress saturates at roughly a third of it. That saturation is real and is why rung 3 lasts longer — but it is a delay, not a bound, and rung 3 still fails once the grid is fine enough to resolve the instability.'},
   q:{key:'q_max', label:'max |q|/(p c_s)  over the run', zero:false, pred:false,
-     cap:'Heat flux. In rung 4 the first-order Chapman–Enskog value is exactly zero (theta is constant), so whatever is plotted there is entirely second order — Burnett order and beyond.'},
+     cap:'Heat flux, in units of pressure times sound speed. Worth noting: in rung 4 the ordinary first-order (Fourier-law) value is exactly zero because the temperature is uniform, so everything plotted there is a genuinely second-order kinetic effect — Burnett order and beyond — that a Navier-Stokes description does not contain at all.'},
   g:{key:'g_min', label:'min g (phase-space rank indicator)', zero:false, pred:false,
-     cap:'g collapses to zero first — rung 3 at K=3, before its lam_min goes anywhere near zero. This is the indicator that fires earliest, and it is also the one least converged in resolution.'}
+     cap:'g measures whether the deformation is collapsing onto a lower-dimensional set; zero means it has. It is the EARLIEST warning on this page: it hits zero well before lam_min gets near zero. At level 5, K=3, g reaches zero at step 41 while lam_min is still a healthy 0.367, and lam_min only crosses at step 157. Note it is also the indicator least converged in resolution.'}
 };
 let cur = 'lam';
 
@@ -545,12 +768,14 @@ function draw(){
     const t=el('text',{class:'lbl',x:M.l-9,y:y+4,'text-anchor':'end'});
     t.textContent=(Math.abs(v)<1e-9?0:v).toFixed(2); svg.appendChild(t);
   }
-  // zero line emphasised
-  if(lo<0&&hi>0){
+  // zero line emphasised -- only for check 7, where zero is the meaningful
+  // boundary.  The other indicators are magnitudes and cannot go below zero,
+  // so labelling their axis "negative variance" would be nonsense.
+  if(ind.zero && lo<0 && hi>0){
     const y=yOf(0);
     svg.appendChild(el('line',{x1:M.l,x2:W-M.r,y1:y,y2:y,stroke:'#7a828f','stroke-width':1.4}));
     const z=el('text',{class:'lbl',x:W-M.r-2,y:y-7,'text-anchor':'end',fill:'#9aa2ad'});
-    z.textContent='0  — below here the closure has falsified itself'; svg.appendChild(z);
+    z.textContent='0  — below this line: negative variance, an impossible gas state'; svg.appendChild(z);
   }
   // axes
   svg.appendChild(el('line',{class:'axis',x1:M.l,x2:W-M.r,y1:H-M.b,y2:H-M.b}));
