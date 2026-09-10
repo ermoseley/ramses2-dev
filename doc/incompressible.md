@@ -565,16 +565,53 @@ resolves it as soon as the grid admits it. That would also explain rung 3:
 it carries the same closure but damps high `k` with an HLL flux, and a
 compressible gas can relieve strain by expanding.
 
-**The decisive diagnostic**, and it needs no new solver: take a snapshot from
-a rung-4 run at `K = 1` just before it departs, form the flux Jacobian of the
-`(Pi, Q)` subsystem cell by cell, and look for complex eigenvalue pairs. If
-they appear where the growth starts, the closure has lost hyperbolicity on
-the states this flow visits and that is the finding -- a statement about the
-twenty-moment model, not about this code. If the eigenvalues stay real, the
-fault is in the integration: the velocity is advanced by RK2 with `Pi` frozen
-and the moments then by a single AP step, which is only first-order
-consistent overall and is not a stable pairing for a hyperbolic system, so
-the fix would be a two-stage treatment of the coupled `(u, Pi, Q)` system.
+**That last inference was wrong, and Section 4d retracts it.** Rung 3 does not
+survive -- it fails at level 5 and 6 for the same reason, and the HLL damping
+only postpones the failure to a finer grid. Read "explains why rung 3 survives"
+throughout this section as "explains why rung 3 survives *at level 4*".
+
+**The decisive diagnostic has now been run, and the answer is the first
+branch: the closure has lost hyperbolicity on the states this flow visits.**
+Scanning the *incompressible* twenty-moment principal symbol over strain
+shapes puts the loss at
+
+|  | `\|Pi\|/p_0` at which hyperbolicity is lost |
+|---|---|
+| worst shape found | **0.277** |
+| best shape found | **0.408** |
+| the sweep's strain shape | 0.340 |
+| with `Q != 0` | 0.305 |
+
+against the four rung-4 sweep points reaching `max|Pi|/p_0` = 0.113 / 0.268 /
+0.497 / diverge. The first two sit below the threshold and are clean; the third
+is above it and the fourth diverges. **So rung 4's divergence is
+ill-posedness of the constrained system, not a bug, and no integration fix
+will help it.** Section 4d does the same for the compressible member and finds
+the corresponding statement for rung 3.
+
+The construction of the symbol had to be corrected first, and the correction
+matters enough to record: the original attempt finite-differenced the *flux*
+Jacobian alone, exactly as proposed in the paragraph above. That is wrong --
+`-2p S0_ij` contains derivatives of `u` and so belongs in the **principal
+part**, as do `[Pi G]^dev`, `T_Q1` and `T_Q2`; only the BGK terms are
+algebraic. The flux-only version gave the ten-moment fastest speed as the
+sound speed 1.291 instead of `sqrt(3)` and declared the Gaussian closure
+non-hyperbolic, contradicting Levermore. Rebuilt quasilinearly -- the system is
+linear in the directional derivative, so `A[:,c] = -Op(V0, dV = e_c)` needs no
+differencing at all -- it reproduces `sqrt(3) = 1.732051` and
+`sqrt(3+sqrt(6)) = 2.334414` exactly. Two claims derived from the broken
+version were withdrawn: a loss of hyperbolicity at `|Pi|/p_0 = 0.25`, and that
+`CSCOEF = 3+sqrt(6)` was 15% too small.
+
+Had the eigenvalues stayed real, the fault would have been in the
+integration: the velocity is advanced by RK2 with `Pi` frozen and the moments
+then by a single AP step, which is only first-order consistent overall and is
+not a stable pairing for a hyperbolic system, so the fix would have been a
+two-stage treatment of the coupled `(u, Pi, Q)` system. That work is now
+**not** worth doing for its own sake -- it would not make an ill-posed system
+well posed -- though it remains the right thing to do if rung 4 is rebuilt at
+ten-moment order, where the system *is* hyperbolic and the first-order
+splitting is then the leading error.
 
 An earlier framing of this section proposed freezing the velocity as the
 diagnostic. The eigenvalue test above is better: it is offline, it needs one
