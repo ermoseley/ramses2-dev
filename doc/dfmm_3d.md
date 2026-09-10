@@ -1,17 +1,89 @@
-# dfmm in 3D on the Metal backend — implementation ledger
+# dfmm in 3D — implementation ledger (CUDA Fortran branch)
 
-Status: **ledger frozen; Stages 1-4 implemented and gated -- the dual-frame
-method is complete.** This document fixes the
-equations, field layout, flux ledger, source ledger, realizability rule and
-diagnostics *before* physics code is written, following the practice used for
-the mini-RAMSES multimoment work. Any change to the equations below is a
-change to this file first.
+Status: **CUDA Fortran port in progress.** The source half and the timestep
+kernel are ported and compile on an A100; the transport half is not. See
+Section 0. The Metal implementation this ports is on branch `dfmm_3d_metal`.
 
-Branch: `dfmm_3d_metal`. Backend: Apple Metal (`COMPILER=METAL`), `NDIM=3` only.
+Branch: `dfmm_3d_cuda`. Backend: CUDA Fortran (`COMPILER=NVHPC`), `NDIM=3`
+only. The reference implementation this ports is Apple Metal on branch
+`dfmm_3d_metal`; Sections 1 onward describe it and are the specification.
 
 ---
 
-## 0. Objective and what "dfmm in 3D" means here
+## 0. This branch: the CUDA Fortran port
+
+**Everything below Section 0 describes the Metal implementation on branch
+`dfmm_3d_metal`, which is the reference.** This branch (`dfmm_3d_cuda`) is
+branched from `develop` and carries none of that Metal code -- no
+`metal/kernels/dfmm.metal`, no dfmm entry points in `metal_runner.f90` or
+`metal_bridge.mm`. `COMPILER=METAL` with `DFMM>0` is a hard Makefile error
+here, the mirror of the guard `dfmm_3d_metal` puts on `COMPILER=NVHPC`.
+
+Read the physics, the field ledger, the source terms and the gate results
+below as the specification the port must reproduce; read this section for
+where the port has got to.
+
+### Ported unchanged (compiler-agnostic host Fortran)
+
+`hydro_parameters.f90` (the `ndfmm`/`ipi`/`iq`/`il`/`isxx`/`isxv` ledger),
+`amr_commons.f90` and `read_params.f90` (parameters and namelists),
+`pm/newdt_fine.f90` (`tout_exact`), `hydro/condinit.f90` (DFMMTEST, BLOWUP,
+TAYLORGREEN), `hydro/output_hydro.f90` and `input_hydro_condinit.f90` (the
+density-like / mass-like split), all four `incomp/` modules, every namelist,
+and both ledgers. None of this is Metal-specific and none of it was rewritten.
+
+### Ported to CUDA Fortran
+
+`gpu/gpu_dfmm.cuf` -- the **source half** and the timestep kernel:
+
+* `dfmm_source_kernel`: strain production, the asymptotic-preserving BGK map
+  for `Pi` and `Q`, the combined `-d_l R_ijkl + T_Q1` production, `T_Q2`, the
+  `dfmm_closure='ns'` Chapman--Enskog branch, the Lagrangian displacement, and
+  `df_phase_space_update` with its required trapezoidal `Sxx`/`Sxv` pairing.
+* `dfmm_cmpdt_kernel`: the `sqrt((3 + sqrt 6) P_nn/rho)` wave speed and the
+  parabolic limb the Navier--Stokes closure reintroduces.
+
+`gpu_uold_to_host` / `gpu_unew_to_device` in `gpu_runner.cuf`, which the
+incompressible rungs bracket themselves with. In CUDA Fortran these are
+whole-array assignments on device arrays, so the port is nearly free.
+
+Two differences from the reference that are structural, not incidental:
+
+1. **`NPRE=8` is available.** The Metal path is float32 because Apple GPUs
+   have no float64, which forced the cancellation care recorded in Section 5
+   (the series form of `tau(1-exp(-dt/tau))`, the sym6 eigenvalue routine).
+   All of it is kept -- it costs nothing and keeps an `NPRE=4` build honest --
+   but at `NPRE=8` the realizability diagnostics are trustworthy without the
+   float64 recheck Gate 9 needed.
+2. **`uold`/`unew` are indexed device arrays** `uold(cell, ivar, oct)`, not
+   flat buffers with a hand-computed stride, so the reference's
+   `df_u_get`/`df_u_set` accessor pair collapses to direct array references
+   and is not reproduced.
+
+### Not ported yet
+
+The **transport half**: the MUSCL predictor over the extended state, the HLL
+solver on the twenty-moment flux, the two-kernel split and the
+upwind-on-mass-flux kernel for the passive tower (Section 6), and the
+fine/coarse flux bookkeeping. `gpu_dfmm_godunov` and `gpu_dfmm_cmpdt`
+therefore **refuse** rather than falling through to `gpu_godunov`, which knows
+nothing about `ivar 6..nvar` and would leave the dfmm fields unadvected while
+the run reported itself as a dfmm run.
+
+The two-kernel split of Section 6 may not be needed here: it exists because 38
+fields need 43840 B against Apple's 32768 B threadgroup limit, and an A100
+offers 164 KB of shared memory per block. That is the first thing to measure
+when the transport kernel is written, not to assume.
+
+### Verified so far
+
+Built on a Stellar A100 with `nvhpc/25.5` at `sm_80`, `NPRE=8`, built **on the
+GPU node** (see the cross-architecture trap in Section 7):
+`COMPILER=NVHPC DFMM=1/2/4` all compile, as does the baseline, and
+`COMPILER=METAL DFMM=4` errors out as intended. Nothing has been *run* on the
+CUDA path yet, because the transport half is what a run would need.
+
+## 1. Objective and what "dfmm in 3D" means here
 
 Target science question: run the OpenAI finite-time-blowup construction for
 incompressible Navier--Stokes as a *gas* problem and measure which of the
