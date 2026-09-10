@@ -3,7 +3,9 @@
 Status: **both incompressible rungs implemented and gated, `Pi` and `Q` both
 evolved in rung 4.** Two claims in an earlier version of this ledger are
 corrected below and marked as such: that `Q` could be dropped (Section 1) and
-that the timestep carries no acoustic limb (Section 2).
+that the timestep carries no acoustic limb (Section 2). **Rung 4 is
+trustworthy for `K <= 0.5` only**; it diverges at `K >= 1` for a reason not
+yet established (Section 4c). Rungs 1--3 are unaffected.
 
 Branch: `dfmm_3d_metal`. Scope: `NDIM=3`, single rank, `levelmin == levelmax`,
 periodic, uniform grid of `N = 2^L` cells per side. Any other configuration is
@@ -366,6 +368,65 @@ names the build flag to change. Verified: the run stops at startup with
 
 ---
 
+## 4a. The low-resolution vortex sweep
+
+`namelist/vortex_sweep3d.nml`, level 4 (16^3), all four rungs at six values
+of `K`, each run to `t_star = blowup_delta` with `tout_exact` on the quarter
+ladder. `t_star` is the construction's singular time in its own clock -- the
+note parameterises by the remaining time `Delta = t_star - t`, and the initial
+condition freezes the field at `Delta = blowup_delta`. There is **no forcing**,
+so the flow does not actually blow up at `t_star`; it is the reference clock,
+not an event.
+
+Minimum of `lam_min(P)/p` over the run -- the note's check 7:
+
+| | K=0.1 | K=0.25 | K=0.5 | K=1 | K=2 | K=3 |
+|---|---|---|---|---|---|---|
+| Navier--Stokes prediction `1-K` | 0.900 | 0.750 | 0.500 | 0.000 | -1.000 | -2.000 |
+| rung 1 incomp + NS | *n/a* | *n/a* | *n/a* | *n/a* | *n/a* | *n/a* |
+| rung 2 compr + NS | 0.906 | 0.766 | 0.531 | **0.063** | **-0.875** | **-1.812** |
+| rung 3 compr + moment | 0.926 | 0.845 | 0.748 | 0.620 | 0.480 | **0.401** |
+| rung 4 incomp + moment | 0.920 | 0.829 | 0.714 | *diverges* | *diverges* | *diverges* |
+
+`n(lam<0)` cells rises 0 / 0 / 0 / 0 / **336** / **1504** for rung 2 and is
+**0 everywhere** for rung 3.
+
+**The headline of the sweep.** Rung 2 tracks the Newtonian prediction `1-K`
+closely and crosses zero between `K = 1` and `K = 2`, exactly where the note
+says the extrapolation must fail. Rung 3, on the same grid, the same initial
+condition and the same Riemann solver, **never goes negative** -- it saturates
+at 0.40 by `K = 3`, because the nonlinear `-[Pi G]^dev` term limits the
+anisotropy that the Newtonian extrapolation grows without bound. That is the
+falsifiable claim of the whole exercise, and it holds: the moment system does
+not produce the negative-variance state that Navier--Stokes predicts, and the
+two differ by one namelist entry.
+
+Rung 1 is marked *n/a*, not 1.000. It carries no `Pi`, so
+`min lam(p_0 I + Pi)/p_0` is identically 1 and the diagnostic is vacuous --
+which is the pressure-gauge argument of Section 0 showing up in the output:
+check 7 cannot be *asked* of rung 1. The 1.000 the code prints should be read
+as "not applicable".
+
+Other indicators at level 4, maxima over the run:
+
+| | K=0.1 | K=0.25 | K=0.5 | K=1 | K=2 | K=3 |
+|---|---|---|---|---|---|---|
+| `max\|Pi\|/p` rung 2 | 0.115 | 0.288 | 0.578 | 1.160 | 2.322 | 3.488 |
+| `max\|Pi\|/p` rung 3 | 0.101 | 0.229 | 0.401 | 0.654 | 0.965 | 1.150 |
+| `max\|q\|/(p c_s)` rung 3 | 0.024 | 0.078 | 0.189 | 0.425 | 0.823 | 1.113 |
+| `min g(rank)` rung 3 | 0.875 | 0.805 | 0.737 | 0.645 | 0.385 | **0.000** |
+
+So the ordering of the failures is: the **rank indicator** `g` collapses first
+(rung 3 at `K = 3`), the Newtonian `lam_min` crosses zero next (rung 2 between
+`K = 1` and 2), and the evolved `lam_min` never crosses at all in this range.
+That ordering is the deliverable, and level 4 is adequate for it. It is **not**
+adequate for the values: `doc/dfmm_3d.md` Section 7 shows `sigma_max(dL/dx)`
+and `min g` are resolution-limited extrema, and `|rho/det J - 1|` is 0.31 at
+level 4 against 0.043 at level 6, so `Kn_local` from this sweep is a lower
+bound.
+
+---
+
 ## 4b. Corrected during this work, recorded so the reasoning is not lost
 
 * **`Q_ijk` was dropped on a valid argument about the wrong quantity.**
@@ -394,6 +455,69 @@ names the build flag to change. Verified: the run stops at startup with
   `uold` first and then overwrites what it evolved.
 * **`incomp_stress='moment'` under a `DFMM=0` binary segfaulted.** See the
   note under Gate 7 above; `incomp_validate` now rejects it at startup.
+* **Three spectral operators were differentiating at full spectrum.**
+  `incomp_pigrad` and `incomp_qdiv` (new with `Q`) and `incomp_divpi`
+  (pre-existing) all fed products without truncating first, where
+  `incomp_advect` had always truncated. The comment in `incomp_rhs` claiming
+  the 2/3 rule was applied "here and nowhere else" was wrong and is corrected.
+  The rule now stated in that comment is the one to keep: **any operator whose
+  output feeds a product must truncate its input.**
+
+---
+
+## 4c. Rung 4 diverges at K >= 1, and it is not the aliasing
+
+At level 4 and `K >= 1`, rung 4 grows `|Pi|/p_0` without bound -- 105 by step
+~250 at `K = 1`, NaN a few hundred steps later. `incomp_step` now **stops**
+when `|Pi|/p_0` exceeds 100, with a message naming this note, because
+otherwise the run completes and reports `min lam(P)/p_0 = -inf`, which a sweep
+script will tabulate as a spectacular realizability violation.
+
+What it is not:
+
+* **Not the aliasing.** Two real omissions were found and fixed on the way
+  here -- `incomp_pigrad`/`incomp_qdiv` and then `incomp_divpi` were
+  differentiating at full spectrum instead of truncating first. Those
+  produced a genuine grid-scale mode growing 2.9x per step from round-off,
+  reaching `E_trunc/E = 0.68`. With all four operators truncating,
+  `E_trunc/E` is **1e-13** across the whole sweep and the divergence is in a
+  **resolved** mode. The fixes were necessary and are not the cure.
+* **Not a CFL limit.** The growth rate per *step* falls with `dt` (2.88 at
+  `courant = 0.4`, 1.13 at 0.1) but the rate per unit *time* is
+  ~170--310 either way. Quartering `dt` delays it and does not remove it.
+* **Not specific to `Q`.** A `DFMM=1` ten-moment rung 4 at `K = 1` shows the
+  same growth, ten orders of magnitude in 100 steps. It stays *bounded* there
+  only because the flow decays -- which is why one deformation time of Gate 7
+  never showed it. So this was latent in the ten-moment rung before `Q`
+  landed; `Q` supplies enough extra high-`k` input to make it fatal.
+
+The growth is `Q`-led (`|Q|` reaches 8e15 while `|Pi|` reaches 6e9) and the
+feedback is closed: `Q` grows, `Pi` grows, `div Pi` drives `u`, `G` grows, `Q`
+grows faster. Two candidate explanations, neither yet established:
+
+1. **A genuine instability of the closure at large strain.** `T_Q2` amplifies
+   `Q` at `~3|G|` against BGK relaxation at `1/tau_q`, and
+   `3|G| tau_q = 3 (4/Delta)(tau/Pr)` is 1.13 at `K = 0.5` (stable) and 2.25
+   at `K = 1` (unstable). The twenty-moment Gaussian closure is hyperbolic
+   only in a neighbourhood of equilibrium, so losing it at large anisotropy
+   would be a property of the closure, not of this discretisation.
+2. **Masked in rung 3 by numerical diffusion.** Rung 3 has the same `T_Q2`
+   and is stable to `K = 3`, but it carries `R_ijkl` inside an HLL flux, and a
+   compressible gas can also relieve strain by expanding. This spectral rung
+   has no numerical diffusion at all -- its design virtue and, here, its
+   exposure.
+
+**The decisive next diagnostic** distinguishes them: run rung 4 at `K = 1`
+with the velocity frozen (`Pi` and `Q` advected and sourced but not fed back
+into `u`). If `Q` still diverges, it is (1), a closure property, and worth
+reporting as such. If it does not, the feedback loop is doing it and the
+integration of the coupled `(u, Pi, Q)` system needs the two-stage treatment
+the velocity already gets -- currently the velocity is advanced by RK2 with
+`Pi` frozen and then the moments by a single AP step, which is only
+first-order consistent overall.
+
+Until that is settled, **rung 4 results are trustworthy for `K <= 0.5` only**,
+and rungs 1--3 are unaffected -- rungs 2 and 3 do not use this solver at all.
 
 ---
 

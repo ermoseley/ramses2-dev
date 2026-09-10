@@ -326,6 +326,22 @@ contains
             ilevel, dv, ef, maxval(abs(u))
        if(use_pi)then
           cmin = incomp_cone_min(pi5,n,sim%r%incomp_p0)
+          ! Refuse to keep going once the moment sector has diverged.  At
+          ! level 4 and K >= 1 rung 4 grows |Pi|/p_0 without bound in a
+          ! RESOLVED mode (E_trunc/E stays at 1e-13, so it is not the
+          ! grid-scale aliasing the truncations above fixed) and reaches NaN
+          ! after a few hundred steps.  See doc/incompressible.md Section 4c.
+          ! Without this the run completes and reports -inf, which a sweep
+          ! script will happily tabulate as a realizability violation.
+          if(.not.(maxval(abs(pi5))/sim%r%incomp_p0 < 1.0d2))then
+             write(*,*)'incomp_step: the moment sector has diverged --', &
+                  ' max|Pi|/p0 = ',maxval(abs(pi5))/sim%r%incomp_p0, &
+                  ' at level ',ilevel,'.  This is the known rung-4', &
+                  ' instability at K >= 1 (doc/incompressible.md Sec. 4c),', &
+                  ' not a physical realizability violation.  Stopping so it', &
+                  ' cannot be mistaken for a result.'
+             stop 1
+          endif
           if(use_tw)then
              gmin = incomp_rank_min(pi5,tw(4:9,:,:,:),tw(10:18,:,:,:),n, &
                   sim%r%incomp_p0,sim%r%incomp_rho0,nbad)

@@ -54,10 +54,10 @@ contains
 
     ! u x omega is where the VELOCITY equation generates aliasing, so the 2/3
     ! truncation is applied to it here.  It is not the only place in the
-    ! solver: incomp_advect, incomp_pigrad and incomp_qdiv all truncate their
-    ! inputs before differentiating, for the same reason.  Any new operator
-    ! whose output feeds a product must do the same -- omitting it in
-    ! incomp_pigrad/incomp_qdiv produced a grid-scale instability.
+    ! solver: incomp_advect, incomp_pigrad, incomp_qdiv and incomp_divpi all
+    ! truncate their inputs before differentiating, for the same reason.  Any
+    ! new operator whose output feeds a product must do the same -- omitting
+    ! it produced a grid-scale instability in the moment rungs.
     call incomp_dealias(a,n,boxlen)
 
     allocate(s(3,n,n,n))
@@ -82,16 +82,32 @@ contains
     real(kind=8),intent(in)::pi5(5,n,n,n)
     real(kind=8),intent(out)::s(3,n,n,n)
     complex(kind=8),allocatable::ph(:,:,:,:),sh(:,:,:,:)
-    real(kind=8)::kv(n),kx,ky,kz
+    real(kind=8)::kv(n),kx,ky,kz,kcut,kmax
     complex(kind=8)::ii,pxx,pyy,pzz,pxy,pxz,pyz
     integer::i,j,k,d
 
     ii = cmplx(0.0d0,1.0d0,kind=8)
     call incomp_wavenumbers(n,boxlen,kv)
+    kmax = maxval(abs(kv)); kcut = 2.0d0/3.0d0*kmax
     allocate(ph(n,n,n,5),sh(n,n,n,3))
     do d=1,5
        ph(:,:,:,d) = cmplx(pi5(d,:,:,:),0.0d0,kind=8)
        call fft3d_wrap(ph(:,:,:,d),n,-1)
+       ! Truncate before differentiating.  This closes the last un-truncated
+       ! operator in the (u, Pi) loop: div Pi drives the velocity, u x omega
+       ! and [Pi G] then refill the top third, and div Pi amplifies it by k.
+       ! Without this the ten-moment rung 4 grew grid-scale velocity energy
+       ! ten orders of magnitude in 100 steps at level 4, K = 1 -- bounded
+       ! only because the flow decays, which is why one deformation time of
+       ! Gate 7 never showed it, and fatal once Q supplies more high-k input.
+       do k=1,n
+          do j=1,n
+             do i=1,n
+                if(abs(kv(i))>kcut.or.abs(kv(j))>kcut.or.abs(kv(k))>kcut) &
+                     ph(i,j,k,d)=cmplx(0.0d0,0.0d0,kind=8)
+             end do
+          end do
+       end do
     end do
     do k=1,n
        kz=kv(k)

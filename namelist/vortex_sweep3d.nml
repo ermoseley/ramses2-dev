@@ -68,6 +68,20 @@ deliverable is the value of an indicator AT a stated fraction of t_star, and
 without it the snapshot lands up to a full dt past the request (measured:
 0.9% on Metal, 11.9% on the CUDA sedov test).
 
+KNOWN LIMITATION.  Rung 4 DIVERGES at K >= 1 at this resolution: |Pi|/p_0
+grows without bound in a resolved mode and incomp_step stops the run when it
+passes 100 rather than let a sweep script tabulate the resulting -inf as a
+realizability violation.  The cause is not established -- see
+doc/incompressible.md Section 4c for the three things it has been ruled out
+as (aliasing, a CFL limit, and anything specific to Q) and for the decisive
+next diagnostic.  Rung 4 results here are trustworthy for K <= 0.5 only.
+Rungs 1, 2 and 3 are unaffected and complete at every K in the table.
+
+Rung 1 reports min lam(P)/p0 = 1.000 identically, because it carries no Pi.
+Read that as "not applicable", not as a passing check: it is the
+pressure-gauge argument of doc/incompressible.md Section 0 appearing in the
+output.  Check 7 cannot be asked of rung 1, which is why rung 4 exists.
+
 RESOLUTION.  levelmin = levelmax = 4 (16^3) is the low-resolution sweep --
 cheap enough to run 24 configurations, and adequate for the ORDERING of the
 indicators.  It is NOT adequate for their converged values: doc/dfmm_3d.md
