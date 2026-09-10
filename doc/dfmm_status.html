@@ -95,9 +95,22 @@
 
 <h2>1. The result</h2>
 
+<div class="panel" style="border-left:4px solid #b45309">
+<p style="margin:0"><strong>What survives, in one line.</strong> The Navier&ndash;Stokes closure
+predicts a negative principal pressure and the code confirms it, converged and quantitatively:
+<span class="mono">min lam(P)/p &rarr; 1&minus;K</span> to within 1% at level 6, present from
+step 1, over a fixed fraction of the volume. The moment closure <em>delays</em> that state by a
+wide margin in <span class="mono">K</span> but <strong>does not prevent it</strong> &mdash; and
+the reason it does not is that the twenty-moment system stops being hyperbolic before it gets
+there. An earlier version of this page claimed the moment closure never goes negative; a
+resolution ladder overturned that. &sect;3 has both the ladder and the mechanism.</p>
+</div>
+
 <p>Low-resolution sweep: four rungs &times; six values of <span class="mono">K</span>, level 4
 (16<sup>3</sup>), each run to <span class="mono">t_star = blowup_delta</span> with output times
-clipped exactly onto the quarter ladder. Pick an indicator:</p>
+clipped exactly onto the quarter ladder. <strong>Read the panel below as a level-4 snapshot, not
+as the result</strong> &mdash; rung 3&rsquo;s zero here does not survive refinement. Pick an
+indicator:</p>
 
 <div>
   <button id="b_lam" aria-pressed="true">min lam(P)/p &nbsp;(check 7)</button>
@@ -125,19 +138,34 @@ clipped exactly onto the quarter ladder. Pick an indicator:</p>
   <span class="mono">K = 1</span> and <span class="mono">K = 2</span></strong>, exactly where the
   note says the extrapolation must fail &mdash; <span class="mono">n(lam&lt;0)</span> reaches
   <strong>1504</strong> of 4096 cells at <span class="mono">K = 3</span>.</p>
-  <p><strong>Rung 3 never goes negative.</strong> Same grid, same initial condition, same Riemann
-  solver, <em>one namelist entry different</em>
+  <p><strong>Rung 3 does not go negative <em>at this resolution</em>.</strong> Same grid, same
+  initial condition, same Riemann solver, <em>one namelist entry different</em>
   (<span class="mono">dfmm_closure='ns'</span> &rarr; <span class="mono">'evolve'</span>).
   <span class="mono">n(lam&lt;0) = 0</span> at every <span class="mono">K</span>, and
   <span class="mono">min lam(P)/p</span> saturates at 0.401 by
   <span class="mono">K = 3</span> instead of falling to &minus;1.8. The nonlinear
   <span class="mono">&minus;[Pi&middot;G]<sup>dev</sup></span> term limits the anisotropy the
   Newtonian extrapolation grows without bound.</p>
-  <p>That is the falsifiable claim of the whole exercise, and it holds at this resolution.
-  The failure <em>ordering</em> is: the phase-space rank indicator
+
+  <div class="warnbox"><strong>This panel is level 4, and the rung-3 zero does not survive
+  refinement.</strong> An earlier version of this page called rung 3&rsquo;s zero
+  &ldquo;the falsifiable claim of the whole exercise, and it holds.&rdquo; A resolution ladder
+  since then shows otherwise: rung 3 is realizable at level 4 for
+  <span class="mono">K = 2, 3</span> and at level 5 for <span class="mono">K = 2</span>, but
+  <em>diverges</em> at level 5 for <span class="mono">K = 3</span> and at level 6 for both.
+  Refining makes it worse, which is the signature of an ill-posed system rather than of
+  under-resolution. Level 4&rsquo;s zero was numerical diffusion holding the state inside a
+  region the closure cannot sustain. See &sect;3 for the mechanism and the restated claim.</div>
+
+  <p>The failure <em>ordering</em> at level 4 is: the phase-space rank indicator
   <span class="mono">g</span> collapses first (rung 3 at <span class="mono">K = 3</span>),
   Newtonian <span class="mono">lam_min</span> crosses second, evolved
-  <span class="mono">lam_min</span> not at all in this range.</p>
+  <span class="mono">lam_min</span> not at all. Only the first two survive refinement &mdash;
+  and the <span class="mono">g</span> collapse turns out to be the <em>early warning</em> of
+  rung 3&rsquo;s own failure, not a separate phenomenon: at level 5,
+  <span class="mono">K = 3</span>, <span class="mono">min g</span> hits zero at step 41 while
+  <span class="mono">min lam</span> is still 0.367, and <span class="mono">lam</span> crosses
+  only at step 157.</p>
   <div class="warnbox"><strong>Read rung 1 as &ldquo;not applicable&rdquo;, not as a pass.</strong>
   It prints <span class="mono">1.000</span> identically because it carries no
   <span class="mono">Pi</span>. That is the pressure-gauge argument showing up in the output:
@@ -162,9 +190,12 @@ clipped exactly onto the quarter ladder. Pick an indicator:</p>
     <span class="mono">1&minus;K</span>.</p>
   </div>
   <div class="panel">
-    <div><span class="tag ok">usable</span><strong>Rung 3 &mdash; compressible + moments</strong></div>
-    <p class="why">Twenty moments plus the dual frame (38 fields). All nine gates pass. This is
-    the rung the headline rests on.</p>
+    <div><span class="tag blk">usable at L4 only</span><strong>Rung 3 &mdash; compressible + moments</strong></div>
+    <p class="why">Twenty moments plus the dual frame (38 fields). All nine gates pass, and it is
+    the rung the headline rested on &mdash; but it <strong>diverges under refinement</strong>:
+    fine at level 4, and at level 5 for <span class="mono">K = 2</span>; diverges at level 5 for
+    <span class="mono">K = 3</span> and at level 6 for both. Same obstruction as rung 4
+    (&sect;3). Sound at ten-moment order (<span class="mono">DFMM=1</span>).</p>
   </div>
   <div class="panel">
     <div><span class="tag blk">blocked for K&nbsp;&ge;&nbsp;1</span><strong>Rung 4 &mdash; incompressible + moments</strong></div>
@@ -174,7 +205,7 @@ clipped exactly onto the quarter ladder. Pick an indicator:</p>
   </div>
 </div>
 
-<h2>3. Two things that would change the headline</h2>
+<h2>3. What changed the headline, and why</h2>
 
 <details>
 <summary>Resolution &mdash; some indicators converge, some do not</summary>
@@ -187,14 +218,33 @@ clipped exactly onto the quarter ladder. Pick an indicator:</p>
 <tr><td>sigma_max(dL/dx)</td><td>2.29</td><td>2.93</td><td>3.44</td><td class="neg">not converged</td></tr>
 <tr><td>|rho/det J &minus; 1|</td><td>9.7e-2</td><td>7.5e-2</td><td>4.3e-2</td><td class="div">4% error at L6</td></tr>
 </table>
-<p class="why">The headline quantity <span class="mono">min lam(P)/p</span> converges, which is why
-the claim is defensible. But <span class="mono">min g</span> and
+<p class="why">At <span class="mono">K = 1</span> the headline quantity
+<span class="mono">min lam(P)/p</span> converges. But <span class="mono">min g</span> and
 <span class="mono">sigma_max(dL/dx)</span> are minima/maxima over cells of a field that keeps
 sharpening, so refining finds more of it &mdash; <span class="mono">Kn_local</span> from the sweep
-is a <em>lower bound that grows with resolution</em>. That is itself the note's check 1 made
-numerically, but it means the <span class="mono">g</span>-collapse-first ordering is not yet
-resolution-proof. The untested case is rung 3 at <span class="mono">K = 2, 3</span>, where
-<span class="mono">min lam(P)/p</span> is closest to zero and the flow is transonic.</p>
+is a <em>lower bound that grows with resolution</em>.</p>
+
+<div class="warnbox"><strong>The case flagged here as untested has now been run, and it
+broke.</strong> This block previously concluded &ldquo;<span class="mono">min lam(P)/p</span>
+converges, which is why the claim is defensible,&rdquo; with rung 3 at
+<span class="mono">K = 2, 3</span> named as the untested case. Running it:</div>
+
+<table>
+<tr><th>rung 3</th><th>L4</th><th>L5</th><th>L6</th></tr>
+<tr><td>K = 2, min lam(P)/p</td><td class="pos">0.480</td><td class="pos">0.448</td><td class="div">diverges</td></tr>
+<tr><td>K = 3, min lam(P)/p</td><td class="pos">0.401</td><td class="div">diverges</td><td class="div">diverges</td></tr>
+<tr><td>K = 2, max n(lam&lt;0)</td><td>0</td><td>0</td><td>11904</td></tr>
+<tr><td>K = 3, max n(lam&lt;0)</td><td>0</td><td>128</td><td>14752</td></tr>
+</table>
+
+<p class="why">Refining makes rung 3 <em>worse</em>, which under-resolution never does. By
+contrast rung 2 converges cleanly onto the Newtonian prediction &mdash;
+<span class="mono">min lam(P)/p</span> = &minus;0.875 / &minus;0.968 / &minus;0.992 toward
+&minus;1 at <span class="mono">K = 2</span>, and &minus;1.812 / &minus;1.952 / &minus;1.988 toward
+&minus;2 at <span class="mono">K = 3</span> &mdash; with the violation present at step 1 at every
+level and <span class="mono">n(lam&lt;0)</span> scaling like the cell count (a fixed fraction of
+the volume, not a grid artifact). <strong>Rung 2&rsquo;s violation is the converged,
+resolution-independent, quantitatively predicted result; rung 3&rsquo;s zero was not.</strong></p>
 </div>
 </details>
 
@@ -222,30 +272,92 @@ the note frames.</p>
 </div>
 </details>
 
+
+<details>
+<summary>Mechanism &mdash; positive-definite P is not sufficient at twenty moments</summary>
+<div>
+<p>Levermore&rsquo;s theorem gives hyperbolicity of the <strong>ten</strong>-moment Gaussian
+closure wherever <span class="mono">P &gt; 0</span>. It says nothing about twenty. Evaluating the
+principal symbol on the states the code actually visited (read back from the snapshots, float64
+eigensolve), on the failing snapshot &mdash; 200 most-strained cells of 32768:</p>
+<table>
+<tr><th></th><th>hyperbolic</th><th>non-hyperbolic</th></tr>
+<tr><td>lam_min(P) &ge; 0</td><td>152</td><td class="neg"><strong>32</strong></td></tr>
+<tr><td>lam_min(P) &lt; 0</td><td>0</td><td>16</td></tr>
+</table>
+<p>Every unrealizable cell is non-hyperbolic, as it must be. But <strong>32 cells are realizable
+and still non-hyperbolic</strong>, at <span class="mono">lam_min(P)/p = 0.180</span> and
+<span class="mono">|Pi|/p = 0.412</span> &mdash; comfortably inside the cone. So the hyperbolic
+region is a <em>strict subset</em> of the realizability cone.</p>
+<p>It is driven by <span class="mono">Q</span>, not <span class="mono">Pi</span>. Scaling that
+cell&rsquo;s <span class="mono">Q &rarr; &alpha;Q</span> gives
+<span class="mono">max|Im|/|lam|</span> = 1.2e&minus;16 / 0.364 / 0.498 / 0.625 / 0.689 at
+<span class="mono">&alpha;</span> = 0 / 0.1 / 0.2 / 0.5 / 1.0. At
+<span class="mono">&alpha; = 0</span> the state is a valid ten-moment state and is hyperbolic to
+round-off, exactly as Levermore requires. The mirror test &mdash;
+<span class="mono">Pi &rarr; &beta;Pi</span> at full <span class="mono">Q</span> &mdash; stays
+non-hyperbolic all the way to <span class="mono">&beta; = 0</span>.</p>
+<p>Mapping the boundary with that cell&rsquo;s shapes, <span class="mono">Q</span> normalised by
+its thermal scale <span class="mono">p<sup>3/2</sup>/rho<sup>1/2</sup></span>:</p>
+<table>
+<tr><th>|Pi|<sub>inf</sub>/p</th><td>0.0</td><td>0.1</td><td>0.2</td><td>0.3</td><td>0.4</td><td>0.5</td><td>&ge;0.6</td></tr>
+<tr><th>lam_min(P)/p</th><td>1.000</td><td>0.801</td><td>0.602</td><td>0.403</td><td>0.204</td><td>0.005</td><td class="neg">&lt;0</td></tr>
+<tr><th>max hyperbolic |Q|</th><td>0.896</td><td>0.653</td><td>0.425</td><td>0.233</td><td>0.084</td><td>0.000</td><td>0</td></tr>
+</table>
+<p class="why">The hyperbolic region is a bounded neighbourhood of equilibrium in
+<span class="mono">Q</span> that shrinks to nothing exactly as
+<span class="mono">lam_min(P) &rarr; 0</span>, touching the realizability boundary only at
+<span class="mono">Q = 0</span> where the ten-moment guarantee takes over. <strong>So rungs 3 and
+4 fail for the same reason in different places</strong>: the twenty-moment closure has no
+hyperbolic neighbourhood large enough for the states this problem visits. Both are sound at
+<span class="mono">DFMM=1</span> (ten moments), which is hyperbolic wherever
+<span class="mono">P &gt; 0</span> &mdash; so the 2&times;2 should be closed at ten-moment order,
+and the twenty-moment runs reported as what they are.</p>
+<p class="why"><strong>Two candidate explanations were tested and retracted.</strong> The apparent
+law <span class="mono">|Q|<sub>max</sub> = 0.91 (lam_min/p)<sup>3/2</sup></span> fits that one
+shape pair to 2% but six random shape pairs give slopes 0.16&ndash;1.17, nowhere near 1.5 &mdash;
+only the qualitative statements are shape-robust. And the equilibrium symbol&rsquo;s repeated
+eigenvalues (&plusmn;1.732 &times;2, &plusmn;1.000 &times;3, 0 &times;6) are all
+<em>semisimple</em>, so there <em>is</em> a genuine hyperbolic neighbourhood of equilibrium and
+the &ldquo;small <span class="mono">Q</span> splits a defective pair&rdquo; hypothesis is
+wrong.</p>
+</div>
+</details>
+
 <h2>4. Agenda</h2>
 <p class="why">Ordered by what could falsify or unblock the result, not by build effort.</p>
 
 <ol class="agenda">
 <li>
   <strong>Settle the rung-4 divergence with one offline eigenvalue test.</strong>
-  <span class="tag open">open</span>
-  <div class="why">Take one snapshot from rung 4 at <span class="mono">K = 1</span> just before
-  departure, form the <span class="mono">(Pi, Q)</span> flux Jacobian cell by cell, and look for
-  complex eigenvalue pairs. If they appear where the growth starts, the twenty-moment closure has
-  lost hyperbolicity on the states this flow visits &mdash; a statement about the <em>model</em>,
-  publishable, and it explains why rung 3 survives (an HLL flux damps high
-  <span class="mono">k</span>; a compressible gas can relieve strain by expanding). If the
-  eigenvalues stay real, the fault is the integration: the velocity is advanced by RK2 with
-  <span class="mono">Pi</span> frozen and the moments then by a single asymptotic-preserving step,
-  which is only first-order consistent overall and is not a stable pairing for a hyperbolic
-  system.
-  <br><br>Why first: it is hours of work on an existing snapshot, it unblocks the <em>only</em>
-  rung that can ask check 7 gauge-free, and the answer is interesting either way. Note the rate
-  measurement already discarded the obvious hypothesis &mdash;
-  <span class="mono">T_Q2</span> amplification predicts
-  <span class="mono">3|G| &minus; 1/tau_q = 15</span> /time, resolution-independent, against
-  38&ndash;56 /time measured and rising with <span class="mono">k</span>.</div>
-  <div class="cost">Cost: hours. No solver change. Blocks: rung 4 entirely.</div>
+  <span class="tag ok">done &mdash; it is the closure</span>
+  <div class="why">Done, and the answer is the first branch: the twenty-moment closure has lost
+  hyperbolicity on the states this flow visits. The incompressible member loses it above
+  <span class="mono">|Pi|/p<sub>0</sub> = 0.277&ndash;0.408</span> depending on strain shape; the
+  compressible member (rung 3) loses it in a <span class="mono">Q</span>-dependent region
+  <em>inside</em> the realizability cone. See &sect;3. So this is a statement about the
+  <em>model</em>, not the integration &mdash; and the corollary is that rung 3 does <strong>not</strong>
+  survive either, which is what overturned the headline.
+  <br><br>Getting there required retracting a wrong first attempt: the original symbol
+  finite-differenced the <em>flux</em> Jacobian alone, which gave the ten-moment fastest speed as
+  the sound speed 1.291 instead of <span class="mono">&radic;3</span> and declared the Gaussian
+  closure non-hyperbolic &mdash; contradicting Levermore. The error:
+  <span class="mono">&minus;2p S<sup>0</sup><sub>ij</sub></span> contains derivatives of
+  <span class="mono">u</span> and belongs in the <em>principal</em> part. Rebuilt quasilinearly,
+  the symbol reproduces <span class="mono">&radic;3 = 1.732051</span> and
+  <span class="mono">&radic;(3+&radic;6) = 2.334414</span> exactly. Two claims derived from the
+  broken version were withdrawn.
+  <br><br>The runtime guard has been moved accordingly: it was
+  <span class="mono">|Pi|/p<sub>0</sub> &gt; 100</span>, which fires only once the run is
+  numerically dead and then reports <span class="mono">&minus;inf</span>. It now warns at the
+  hyperbolicity threshold and stops at <span class="mono">lam_min(P) &lt; 0</span>. On rung 4 at
+  <span class="mono">K = 1</span> that converts &ldquo;grows to 105, NaN&rdquo; into a measurable
+  crossing: warning at <span class="mono">t = 0.0023</span>, cone crossing at
+  <span class="mono">t = 0.2242 = t_star/2</span> with
+  <span class="mono">lam_min/p<sub>0</sub> = &minus;0.046</span> at
+  <span class="mono">|Pi|/p<sub>0</sub> = 0.52</span>, and
+  <span class="mono">E_trunc/E = 1.1e&minus;13</span> there &mdash; a fully resolved crossing.</div>
+  <div class="cost">Cost: spent. Result: rung 4 unblocked as a measurement; rung 3 reclassified.</div>
 </li>
 
 <li>
@@ -263,15 +375,31 @@ the note frames.</p>
 </li>
 
 <li>
-  <strong>Resolution ladder on the headline, at the K where it is closest to breaking.</strong>
-  <span class="tag open">falsifiability</span>
+  <strong>Resolution ladder on the headline.</strong>
+  <span class="tag ok">done &mdash; it flipped the answer</span>
   <div class="why">Rungs 2 and 3 at <span class="mono">K = 2</span> and
-  <span class="mono">K = 3</span>, levels 4&ndash;6. The claim is &ldquo;rung 3 never goes
-  negative&rdquo;; at <span class="mono">K = 3</span> it sits at 0.401 and the flow is transonic
-  with shocks, so this is where under-resolution could flip the answer.
-  <span class="mono">min lam(P)/p</span> converges cleanly at
-  <span class="mono">K = 1</span>, which is encouraging but is not the test.</div>
-  <div class="cost">Cost: level 6 is ~2&nbsp;s/step on an M3; feasible on the Mac. Do it before publishing anything.</div>
+  <span class="mono">K = 3</span>, levels 4&ndash;6. This was the right test and it came back
+  against the claim: rung 3 diverges at level 5 for <span class="mono">K = 3</span> and at level 6
+  for both, while rung 2 converges onto <span class="mono">1&minus;K</span>. Numbers in &sect;3.
+  The reassurance that <span class="mono">min lam(P)/p</span> converges cleanly at
+  <span class="mono">K = 1</span> was, as this item itself warned, not the test.</div>
+  <div class="cost">Cost: spent. Outcome: headline restated, rung 3 reclassified.</div>
+</li>
+
+<li>
+  <strong>Rerun the crossings at <span class="mono">NPRE=8</span> on CUDA.</strong>
+  <span class="tag open">precision</span>
+  <div class="why">Everything above is single precision twice over: the Metal build is
+  <span class="mono">NPRE=4</span> (Apple GPUs have no float64) and
+  <span class="mono">output_hydro.f90</span> writes <span class="mono">real(&hellip;,kind=4)</span>
+  regardless of <span class="mono">NPRE</span>. An independent float64 recheck of the snapshots
+  reproduces the kernel&rsquo;s <span class="mono">n(lam&lt;0)</span> <em>exactly</em> at every
+  time-matched output &mdash; 48/48, 5696/5696, 0/0, 16/16 &mdash; so the diagnostic is verified,
+  but the <em>precision</em> is not. Rung 2&rsquo;s crossing at
+  <span class="mono">K = 3</span> is far too large to be precision-sensitive; rung 3&rsquo;s level-5
+  onset (16 cells at <span class="mono">lam/p = &minus;0.29</span>) is not, and should be confirmed
+  at <span class="mono">NPRE=8</span> before publication. This is what the CUDA branch is for.</div>
+  <div class="cost">Cost: one A100 job. Blocks: the rung-3 onset number specifically.</div>
 </li>
 
 <li>
@@ -315,6 +443,7 @@ the note frames.</p>
 <tr><td class="mono">E_trunc/E</td><td>The first diagnostic to announce under-resolution in the spectral rungs. 1e-13 across the current sweep; anything approaching 1e-6 means stop.</td></tr>
 <tr><td>first <span class="mono">incomp level=</span> line</td><td>Prints the state <em>after</em> the step whose header precedes it. The initial <span class="mono">max|u|</span> is not in the log at all, and on a 32<sup>3</sup> collocated grid the discrete max of the Taylor&ndash;Green <span class="mono">|u|</span> is 0.99044, not 1.</td></tr>
 <tr><td class="mono">make</td><td><strong>Always <span class="mono">make clean</span> when changing <span class="mono">INIT=</span> or <span class="mono">DFMM=</span></strong> &mdash; neither is a dependency of <span class="mono">condinit.o</span>, so a stale object silently runs the previous problem's initial condition.</td></tr>
+<tr><td class="mono">rd_cell</td><td>Returns <strong>primitives</strong>. Slot 5 is <span class="mono">p</span>, not total energy &mdash; forming <span class="mono">eint = E/rho &minus; |u|<sup>2</sup>/2</span> from it produces a spurious 752 violating cells in a run the kernel reports clean throughout. Run the <span class="mono">t = 0</span> control first: it must give <span class="mono">rho = p = 1</span> exactly, <span class="mono">|Pi| = 0</span>, <span class="mono">min lam(P)/p = 1</span>. Note the dfmm slots go the other way &mdash; <span class="mono">output_hydro.f90</span> deliberately does <em>not</em> divide the density-like block (<span class="mono">Pi</span>, <span class="mono">Q</span>) by <span class="mono">rho</span>, but does divide the mass-like tower.</td></tr>
 <tr><td class="mono">dfmm_tau</td><td>Lives in both <span class="mono">DFMM_PARAMS</span> and <span class="mono">INCOMP_PARAMS</span>; <span class="mono">INCOMP_PARAMS</span> is read second and wins. Set it in one group only.</td></tr>
 </table>
 </div>

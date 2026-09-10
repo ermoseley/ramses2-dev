@@ -389,17 +389,26 @@ Minimum of `lam_min(P)/p` over the run -- the note's check 7:
 | rung 4 incomp + moment | 0.920 | 0.829 | 0.714 | *diverges* | *diverges* | *diverges* |
 
 `n(lam<0)` cells rises 0 / 0 / 0 / 0 / **336** / **1504** for rung 2 and is
-**0 everywhere** for rung 3.
+**0 everywhere** for rung 3 *at this level*. The last clause is essential:
+Section 4d refines the ladder and rung 3's zero does **not** survive.
 
-**The headline of the sweep.** Rung 2 tracks the Newtonian prediction `1-K`
-closely and crosses zero between `K = 1` and `K = 2`, exactly where the note
-says the extrapolation must fail. Rung 3, on the same grid, the same initial
-condition and the same Riemann solver, **never goes negative** -- it saturates
-at 0.40 by `K = 3`, because the nonlinear `-[Pi G]^dev` term limits the
-anisotropy that the Newtonian extrapolation grows without bound. That is the
-falsifiable claim of the whole exercise, and it holds: the moment system does
-not produce the negative-variance state that Navier--Stokes predicts, and the
-two differ by one namelist entry.
+**The headline of the sweep, as it stands after Section 4d.** Rung 2 tracks
+the Newtonian prediction `1-K` closely and crosses zero between `K = 1` and
+`K = 2`, exactly where the note says the extrapolation must fail; that half
+is resolution-converged and is the solid result. Rung 3 is realizable on this
+grid, but that is **a property of level 4, not of the closure** -- refining to
+level 5 and 6 makes rung 3 fail too. The defensible statement is therefore
+narrower than the one first recorded here:
+
+> The moment closure delays the negative-variance state that Navier--Stokes
+> reaches immediately, and it does so by a wide margin in `K`; it does not
+> prevent it.
+
+The mechanism first offered for the zero -- that the nonlinear `-[Pi G]^dev`
+term limits the anisotropy the Newtonian extrapolation grows without bound --
+is still what produces the delay, and rung 3's `max|Pi|/p` really is a factor
+~3 below rung 2's at every `K`. It is not what produces a bound. Section 4d
+gives the actual obstruction.
 
 Rung 1 is marked *n/a*, not 1.000. It carries no `Pi`, so
 `min lam(p_0 I + Pi)/p_0` is identically 1 and the diagnostic is vacuous --
@@ -416,11 +425,16 @@ Other indicators at level 4, maxima over the run:
 | `max\|q\|/(p c_s)` rung 3 | 0.024 | 0.078 | 0.189 | 0.425 | 0.823 | 1.113 |
 | `min g(rank)` rung 3 | 0.875 | 0.805 | 0.737 | 0.645 | 0.385 | **0.000** |
 
-So the ordering of the failures is: the **rank indicator** `g` collapses first
-(rung 3 at `K = 3`), the Newtonian `lam_min` crosses zero next (rung 2 between
-`K = 1` and 2), and the evolved `lam_min` never crosses at all in this range.
-That ordering is the deliverable, and level 4 is adequate for it. It is **not**
-adequate for the values: `doc/dfmm_3d.md` Section 7 shows `sigma_max(dL/dx)`
+So the ordering of the failures at level 4 is: the **rank indicator** `g`
+collapses first (rung 3 at `K = 3`), the Newtonian `lam_min` crosses zero next
+(rung 2 between `K = 1` and 2), and the evolved `lam_min` does not cross in
+this range. Only the first two orderings survive refinement, and the `g`
+collapse turns out to be the *early warning* of the rung-3 failure rather than
+a separate phenomenon -- at level 5, `K = 3`, `min g` reaches zero at step 41
+while `min lam` is still 0.367, and `lam` crosses only at step 157. Level 4 is
+adequate for ordering `g` against rung 2's crossing; it is **not** adequate
+for the claim that rung 3 does not cross, nor for the
+values: `doc/dfmm_3d.md` Section 7 shows `sigma_max(dL/dx)`
 and `min g` are resolution-limited extrema, and `|rho/det J - 1|` is 0.31 at
 level 4 against 0.043 at level 6, so `Kn_local` from this sweep is a lower
 bound.
@@ -468,10 +482,27 @@ bound.
 ## 4c. Rung 4 diverges at K >= 1, and it is not the aliasing
 
 At level 4 and `K >= 1`, rung 4 grows `|Pi|/p_0` without bound -- 105 by step
-~250 at `K = 1`, NaN a few hundred steps later. `incomp_step` now **stops**
-when `|Pi|/p_0` exceeds 100, with a message naming this note, because
-otherwise the run completes and reports `min lam(P)/p_0 = -inf`, which a sweep
-script will tabulate as a spectacular realizability violation.
+~250 at `K = 1`, NaN a few hundred steps later.
+
+**What that growth actually was.** The guard originally stopped the run at
+`|Pi|/p_0 > 100`, which fires long after the state is meaningless, and the
+`-inf` it then reported was post-mortem noise. With the guard moved to the
+physically meaningful boundary (`lam_min(P) < 0`, plus a warning at the
+Section 4d hyperbolicity threshold) the same run gives a **measurable**
+crossing instead:
+
+| event | `t` | `max\|Pi\|/p_0` | `min lam(P)/p_0` | `min g` |
+|---|---|---|---|---|
+| hyperbolicity warning | 0.00225 | 0.281 | 0.614 | 0.638 |
+| `g` collapses / cone crossing | 0.22415 = `t_star/2` | 0.491 -> 0.523 | 0.018 -> **-0.046** | 0.000 |
+
+So rung 4 at `K = 1` leaves the realizability cone at `|Pi|/p_0 = 0.52` with
+`lam_min/p_0 = -0.046`, at exactly half the reference time, and
+`E_trunc/E = 1.1e-13` there -- a **fully resolved** crossing, not aliasing.
+The `|Pi|/p_0 = 105` was what happened afterwards, integrating a non-hyperbolic
+system. The rank indicator `g` reaching zero in the same step as the crossing
+(with `n(Gamma<0) = 16`) repeats the ordering seen in rung 3: `g` is the early
+warning, `lam_min` is the event.
 
 What it is not:
 
@@ -559,8 +590,173 @@ the velocity already gets -- currently the velocity is advanced by RK2 with
 `Pi` frozen and then the moments by a single AP step, which is only
 first-order consistent overall.
 
-Until that is settled, **rung 4 results are trustworthy for `K <= 0.5` only**,
-and rungs 1--3 are unaffected -- rungs 2 and 3 do not use this solver at all.
+Until that is settled, **rung 4 results are trustworthy for `K <= 0.5` only**.
+Rung 1 is unaffected and rungs 2--3 do not use this solver at all -- but
+rung 3 is **not** thereby sound: Section 4d shows it fails under refinement
+for the same underlying reason, the twenty-moment closure's hyperbolic region
+being too small for the states this problem visits. Read 4c and 4d together:
+they are one obstruction seen in the incompressible and compressible members
+of the same closure.
+
+---
+
+## 4d. The resolution ladder, and why rung 3 fails too
+
+Section 4a's headline was a level-4 statement. Repeating rungs 2 and 3 at
+`K = 2` and `K = 3` on levels 4, 5, 6 (16^3, 32^3, 64^3), everything else
+fixed:
+
+| run | min `lam(P)/p` | max `\|Pi\|/p` | max `n(lam<0)` | steps | first step with `lam<0` |
+|---|---|---|---|---|---|
+| rung 2, K=2, L4 | -0.875 | 2.322 | 336 | 205 | 1 |
+| rung 2, K=2, L5 | -0.968 | 2.421 | 2912 | 822 | 1 |
+| rung 2, K=2, L6 | -0.992 | 2.443 | 23264 | 3292 | 1 |
+| rung 2, K=3, L4 | -1.812 | 3.488 | 1504 | 232 | 1 |
+| rung 2, K=3, L5 | -1.952 | 3.632 | 11936 | 933 | 1 |
+| rung 2, K=3, L6 | -1.988 | 3.665 | 95120 | 3742 | 1 |
+| rung 3, K=2, L4 | **0.480** | 0.965 | 0 | 117 | never |
+| rung 3, K=2, L5 | **0.448** | 1.107 | 0 | 238 | never |
+| rung 3, K=2, L6 | *diverges* | 4.5e35 | 11904 | 1084 | 334 |
+| rung 3, K=3, L4 | **0.401** | 1.150 | 0 | 103 | never |
+| rung 3, K=3, L5 | *diverges* | 1.4e21 | 128 | 213 | 158 |
+| rung 3, K=3, L6 | *diverges* | 3.5e35 | 1003 | 263 | 252 |
+
+Two opposite behaviours, and the contrast is the whole point.
+
+**Rung 2 converges.** `min lam(P)/p` tightens monotonically onto the Newtonian
+prediction `1 - K`: -0.875 / -0.968 / -0.992 toward -1 at `K = 2`, and
+-1.812 / -1.952 / -1.988 toward -2 at `K = 3`. `max|Pi|/p` converges too
+(2.322 / 2.421 / 2.443). The violation appears at step 1 at every level and
+`n(lam<0)` scales like the cell count (336 / 2912 / 23264 is 8.7x then 8.0x
+for 8x the cells), i.e. it is a *fixed fraction of the volume*, not a
+grid-scale artifact. So the Navier--Stokes closure's negative-variance state
+is a converged, resolution-independent, quantitatively predicted property.
+**This is the solid result of the study** and it does not depend on anything
+in this section.
+
+**Rung 3 fails the other way: refining makes it worse.** Realizable at L4 for
+both `K`, and at L5 for `K = 2`; diverges at L5 for `K = 3` and at L6 for
+both. A failure that *appears* under refinement at fixed physical setup is the
+signature of an ill-posed or marginally-posed system, not of under-resolution
+-- under-resolution is cured by refining. Level 4's zero was numerical
+diffusion holding the state inside a region the closure cannot actually
+sustain.
+
+### The obstruction: positive-definite `P` is not sufficient at twenty moments
+
+Levermore's theorem gives hyperbolicity of the **ten**-moment Gaussian closure
+wherever `P > 0`. It says nothing about twenty. Testing the principal symbol
+(the validated construction of Section 4c, which reproduces `sqrt(3)` and
+`sqrt(3+sqrt(6))`) on the states the code actually visited, read back from the
+snapshots:
+
+| run | out | worst `\|Pi\|/p` | non-hyperbolic, of 24 most-strained cells |
+|---|---|---|---|
+| rung 3, K=3, L4 | 2 | 0.535 | 0/24 |
+| rung 3, K=3, L4 | 3 | 0.356 | 0/24 |
+| rung 3, K=3, L4 | 4 | 0.203 | 0/24 |
+| rung 3, K=3, L5 | 2 | 0.619 | 0/24 |
+| rung 3, K=3, L5 | 3 | 0.403 | 0/24 |
+| rung 3, K=3, L5 | 4 | 0.613 | **24/24**, max `\|Im\|/\|lam\| = 0.77` |
+| rung 3, K=2, L5 | 2..5 | 0.473 | 0/24 |
+
+Cross-tabulating realizability against hyperbolicity per cell on the failing
+snapshot (200 most-strained cells of 32768):
+
+| | hyperbolic | non-hyperbolic |
+|---|---|---|
+| `lam_min(P) >= 0` | 152 | **32** |
+| `lam_min(P) < 0` | 0 | 16 |
+
+Every unrealizable cell is non-hyperbolic, as it must be. But **32 cells are
+realizable and still non-hyperbolic**, at `lam_min(P)/p = 0.180` and
+`|Pi|/p = 0.412` -- comfortably inside the cone. (All 32 report the identical
+value: they are copies of one state under the initial condition's symmetry
+group.) So the hyperbolic region is a *strict subset* of the realizability
+cone.
+
+It is driven by `Q`, not `Pi`. Taking that cell and scaling `Q -> alpha Q`:
+
+| alpha | 0 | 0.1 | 0.2 | 0.5 | 1.0 |
+|---|---|---|---|---|---|
+| max `\|Im\|/\|lam\|` | 1.2e-16 | 0.364 | 0.498 | 0.625 | 0.689 |
+
+At `alpha = 0` the state is a valid ten-moment state and is hyperbolic to
+round-off, exactly as Levermore requires. The mirror test -- `Pi -> beta Pi`
+at full `Q` -- stays non-hyperbolic all the way to `beta = 0` (0.398). So
+`Q` alone destroys hyperbolicity here and `Pi` alone does not.
+
+Mapping the boundary in the `(|Pi|_inf/p, |Q|)` plane with the failing cell's
+shapes, `Q` normalised by its thermal scale `p^{3/2}/rho^{1/2}`:
+
+| `\|Pi\|_inf/p` | 0.0 | 0.1 | 0.2 | 0.3 | 0.4 | 0.5 | >=0.6 |
+|---|---|---|---|---|---|---|---|
+| `lam_min(P)/p` | 1.000 | 0.801 | 0.602 | 0.403 | 0.204 | 0.005 | <0 |
+| max hyperbolic `\|Q\|` | 0.896 | 0.653 | 0.425 | 0.233 | 0.084 | 0.000 | 0 |
+
+The hyperbolic region is a bounded neighbourhood of equilibrium in `Q` that
+shrinks to nothing exactly as `lam_min(P) -> 0`, and it touches the
+realizability boundary only at `Q = 0`, where the ten-moment guarantee takes
+over. That is the obstruction, and it is a property of the twenty-moment
+closure, not of this discretisation.
+
+**Consequences for the 2x2.** Rung 3 and rung 4 fail for the *same* reason at
+different places: the twenty-moment system has no hyperbolic neighbourhood
+large enough for the states this problem visits. Section 4c found the
+incompressible twenty-moment system loses hyperbolicity above
+`|Pi|/p_0 = 0.277-0.408`; rung 3 is the compressible member and loses it in a
+`Q`-dependent region inside the cone. Both are salvageable at `DFMM=1`
+(ten-moment), which is hyperbolic wherever `P > 0` -- so **the 2x2 should be
+closed at ten-moment order**, and the twenty-moment runs reported as what they
+are: a demonstration that the closure's well-posed region does not reach the
+states of interest.
+
+### What was checked and what is still open
+
+* The exponent in the boundary table is **not** universal. `|Q|_max` looked
+  like `0.91 (lam_min(P)/p)^{3/2}` to 2% for the failing cell's shape pair,
+  but fitting six random `(Pi, Q)` shape pairs over `lam/p` in [0.15, 0.95]
+  gives slopes 0.16, 0.90, 1.17, 0.95, 1.12, 0.16 -- nowhere near 1.5. The
+  3/2 law was a coincidence of one shape pair and is retracted. Only the
+  qualitative statements (bounded in `Q`, shrinking with `lam_min`, vanishing
+  at the cone boundary) are shape-robust.
+* The equilibrium twenty-moment symbol's repeated eigenvalues
+  (`+-1.732` x2, `+-1.000` x3, `0` x6) are all **semisimple**, geometric
+  multiplicity equal to algebraic. So the system is *not* merely weakly
+  hyperbolic at equilibrium and there is a genuine hyperbolic neighbourhood --
+  the hypothesis that an arbitrarily small `Q` splits a defective pair is
+  wrong and is retracted.
+* **The in-kernel diagnostic is verified against an independent
+  reimplementation.** Reading the snapshots back and recomputing
+  `lam_min(p I + Pi)` with a float64 eigensolver reproduces the kernel's
+  `n(lam<0)` **exactly** at every time-matched output -- 48/48 (rung 2, K=3,
+  L4), 5696/5696 (L6), 0/0 (rung 3, K=3, L4, all outputs), 16/16 (rung 3,
+  K=3, L5, out 4) -- and `min lam/p` to 3-4 digits, the residual being the
+  float32 kernel against a float64 eigensolve on a near-singular eigenvalue.
+* **Still not a true float64 verification.** The Metal build is `NPRE=4` and
+  `output_hydro.f90` writes `real(...,kind=4)` regardless of `NPRE`, so both
+  the run and the snapshot are single precision; the recheck verifies the
+  *diagnostic*, not the *precision*. The `K = 3` rung-2 crossing is far too
+  large to be precision-sensitive, but the rung-3 L5 onset -- 16 cells at
+  `lam/p = -0.29` -- deserves an `NPRE=8` rerun before publication. That is
+  what the CUDA branch is for.
+
+### Reader trap: `rd_cell` returns primitives
+
+`utils/py/ramses.py`'s `rd_cell` returns **primitive** variables. Slot 5 is
+`p`, not total energy. Treating it as energy and forming
+`eint = E/rho - |u|^2/2` gives, on a `t = 0` snapshot whose initial condition
+is exactly uniform `rho = p = 1`, `Pi = 0`, an `eint` ranging over
+[-1.80, +1.00] where 1.5 is required -- and then a spurious 752 violating
+cells in a run the kernel reports as clean throughout. Always run the `t = 0`
+control first: it must give `rho = p = 1` exactly, `|Pi| = 0`, and
+`min lam(P)/p = 1`.
+
+The dfmm slots need care in the other direction. `output_hydro.f90:125-137`
+deliberately does **not** divide the density-like block (`Pi_ij`, `Q_ijk`) by
+`rho`, while it does divide the mass-like tower (`rho L_i`, `rho Sxx`,
+`rho Sxv`). So snapshot slots 6..20 hold `Pi` and `Q` themselves, and slots
+21..38 hold `L`, `Sxx`, `Sxv` per unit mass.
 
 ---
 
