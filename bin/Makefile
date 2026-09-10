@@ -170,6 +170,33 @@ ifneq ($(UNITS),)
 endif
 DEFINES := $(strip $(DEFINES))
 #############################################################################
+# The dfmm sector exists ONLY as Metal kernels (metal/kernels/dfmm.metal,
+# dispatched from metal/metal_runner.f90).  There is no host implementation
+# and no CUDA one on this branch: metal_dfmm_godunov and metal_dfmm_diag both
+# live behind -D_METAL.
+#
+# So any non-METAL build with DFMM>0 compiles cleanly -- the extra ivars are
+# just array slots and the host side is compiler-agnostic -- and then
+# dispatches to the ordinary godunov_fine, which knows nothing about
+# ivar 6..NVAR.  The dfmm fields sit unadvected and unsourced while the run
+# prints "hydro solver with nvar = $(NVAR)", completes, and says
+# "Run completed".  The absence of any dfmm diagnostic line is the only
+# outward sign.
+#
+# This was hit for real with COMPILER=GNU DFMM=1: exit 0, run completed, zero
+# dfmm output.  So guard every compiler, not just NVHPC.
+ifneq ($(NDFMM),0)
+   ifneq ($(strip $(COMPILER)),METAL)
+      $(error DFMM=$(DFMM) needs COMPILER=METAL.  The dfmm kernels are \
+Metal-only, so a '$(COMPILER)' build would dispatch to godunov_fine and \
+leave ivar 6..$(NVAR) unadvected while still calling itself a dfmm run -- \
+exiting 0 and printing no dfmm diagnostics at all.  Either build with \
+COMPILER=METAL, or port metal/kernels/dfmm.metal to gpu/ (see \
+doc/dfmm_3d.md).  Note METAL implies NPRE=4, so double precision for the \
+dfmm rungs requires finishing the CUDA port.)
+   endif
+endif
+#############################################################################
 # GNU compiler (gfortran)
 ifeq ($(COMPILER),GNU)
    FFLAGS = -cpp $(DEFINES)
@@ -215,17 +242,6 @@ endif
 #############################################################################
 # NVHPC compiler (optional -gpu=$(CUDA_ARCH),fastmath in FFLAGS and LIBS)
 ifeq ($(COMPILER),NVHPC)
-   # The dfmm sector has Metal kernels only (metal/kernels/dfmm.metal); there
-   # is no gpu_dfmm_godunov.  A DFMM>0 NVHPC build would compile -- the host
-   # side is compiler-agnostic -- and then dispatch to gpu_godunov, which
-   # knows nothing about ivar 6..NVAR, so the dfmm fields would sit unadvected
-   # while the run reported itself as a dfmm run.  Fail instead.
-   ifneq ($(NDFMM),0)
-      $(error DFMM is not ported to CUDA: the kernels are Metal-only, and an \
-NVHPC build would dispatch to gpu_godunov and leave ivar 6..$(NVAR) \
-unadvected.  Build the dfmm rungs with COMPILER=METAL, or port \
-metal/kernels/dfmm.metal to gpu/.)
-   endif
    ifeq ($(PAPER),1)
       DEFINES += -DPAPER
    endif
