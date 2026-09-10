@@ -1,6 +1,9 @@
 module courant_fine_module
 #ifdef _CUDA
   use gpu_runner, only: gpu_cmpdt
+#ifdef DFMM
+  use gpu_runner, only: gpu_dfmm_cmpdt
+#endif
 #endif
 #ifdef _METAL
   use metal_runner, only: metal_cmpdt
@@ -16,6 +19,7 @@ contains
 !###########################################################
 !###########################################################
 recursive subroutine r_courant_fine(pst,ilevel,input_size,output,output_size)
+  use incomp_step_module, only: incomp_cmpdt
   use mdl_module
   use ramses_commons, only: pst_t
   use mdl_parameters
@@ -37,9 +41,21 @@ recursive subroutine r_courant_fine(pst,ilevel,input_size,output,output_size)
      output%eint=output%eint+next_output%eint
      output%emag=output%emag+next_output%emag
      output%dt=MIN(output%dt,next_output%dt)
+  else if(pst%s%r%incompressible)then
+     ! The incompressible rungs set dt from the advective and viscous limits,
+     ! not the acoustic one (doc/incompressible.md Section 2), plus the
+     ! moment-sector hyperbolic limb once Q is carried.
+     call incomp_cmpdt(pst%s%r,pst%s%g,pst%s%m,ilevel, &
+          output%mass,output%ekin,output%eint,output%emag,output%dt)
   else
 #ifdef _CUDA
+#ifdef DFMM
+     ! The emag slot carries the volume integral of |Pi|_F in a dfmm build;
+     ! update_time.f90 relabels it accordingly.
+     call gpu_dfmm_cmpdt(pst%s,ilevel,output%mass,output%ekin,output%eint,output%emag,output%dt)
+#else
      call gpu_cmpdt(pst%s,ilevel,output%mass,output%ekin,output%eint,output%emag,output%dt)
+#endif
 #elif defined(_METAL)
      call metal_cmpdt(pst%s,ilevel,output%mass,output%ekin,output%eint,output%emag,output%dt)
 #else

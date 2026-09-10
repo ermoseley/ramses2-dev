@@ -122,7 +122,13 @@ subroutine m_update_time(pst,ilevel,done)
         if(r%sink)write(*,'(" Total mass in sinks=",1PE14.7)')g%mass_sink_tot
 777     format(' Main step= ',i0,' mcons=',1pe9.2,' econs=',1pe9.2,' epot=',1pe9.2,' ekin=',1pe9.2)
 778     format(' Main step= ',i0,' mcons=',1pe9.2,' econs=',1pe9.2,' epot=',1pe9.2,' ekin=',1pe9.2,' eint=',1pe9.2)
+#ifdef DFMM
+        ! In a dfmm build the last slot carries the volume integral of |Pi|_F,
+        ! not magnetic energy (see courant_fine.f90).
+779     format(' Main step= ',i0,' mcons=',1pe9.2,' econs=',1pe9.2,' epot=',1pe9.2,' ekin=',1pe9.2,' eint=',1pe9.2,' |Pi|=',1pe9.2)
+#else
 779     format(' Main step= ',i0,' mcons=',1pe9.2,' econs=',1pe9.2,' epot=',1pe9.2,' ekin=',1pe9.2,' eint=',1pe9.2,' emag=',1pe9.2)
+#endif
 
         !----------------------------------------------
         ! Output fine step information and used memory

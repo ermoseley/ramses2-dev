@@ -1,0 +1,160 @@
+The finite-time-blowup test problem (doc/dfmm_3d.md Sec. 7, Stage 5), from
+Downloads/before_blowup_ideal_gas_pedagogical.pdf.
+
+Compile:
+  cd bin && make COMPILER=METAL NDIM=3 HYDRO=1 DFMM=2 INIT=13 ramses   (moments)
+  cd bin && make COMPILER=METAL NDIM=3 HYDRO=1        INIT=13 ramses   (Euler)
+Both builds read this namelist; the DFMM_PARAMS block is simply ignored when
+the binary was compiled with DFMM=0.  Do not write an ampersand-prefixed group
+name anywhere in this header: gfortran's namelist reader will treat it as the
+start of that group and then fail on the surrounding prose.
+
+Axisymmetric straining flow, exactly divergence-free and periodic, with the
+strain of the note's Eq. (19) at the box centre:
+    S = (1/Delta) diag(-2,-2,4),  ||S||_op = 4/Delta,  t_def = Delta/4.
+The strain tensor is diagonal EVERYWHERE in this field -- no shear strain
+anywhere, though the vorticity is nonzero.  See hydro/condinit.f90,
+#if INIT==BLOWUP.
+
+VISCOSITY.  The note fixes no numerical value for mu; it takes the velocity
+construction as given from its Ref. [1] and audits it.  What it does fix, and
+what is reproduced here exactly, is the dilute hard-sphere model of its
+Eqs. (15)-(16):
+    mu = p_g * (5/4) t_c,   kappa = (15/4)(k_B/m) mu,   Pr = 2/3,
+    nu = (5 pi/32) cbar lambda = 0.6068 c_s lambda.
+In this scheme mu = p * dfmm_tau, so dfmm_tau = (5/4) t_c and
+dfmm_prandtl = 2/3 IS the note's transport model.  There is no separate
+viscosity number to import.
+
+THE GOVERNING GROUP.  In code units boxlen = rho0 = p0 = 1, gamma = 5/3
+(c_s = 1.29099), everything depends on one number:
+    K = 8 mu / (p Delta) = 8 dfmm_tau / Delta = Delta_P / Delta
+with Delta_P = 8 mu/p_g = 10 t_c the note's Eq. (25) threshold.  Then
+    lam_min(P_NS)/p = 1 - K           (note Eq. 23; NS predicts negative
+                                       absolute pressure for K > 1)
+    t_c / t_def     = 0.4 K
+    Kn              = 0.4944824 K / Ma        <-- forced by a one-mode field
+    t_diss / t_def  = gamma Ma^2 / (2 K)
+
+Those last two identities are why a fixed-flow ladder does not work.  A single
+wavenumber ties Kn, K and Ma together: you cannot make K large while keeping
+both Kn and Ma small.  Worse, at Ma = 0.3 the third identity gives
+t_diss/t_def = 0.075 at K = 1, so the flow viscously dissipates thirteen times
+faster than it deforms and Pi never equilibrates -- such a ladder returns a
+spuriously benign null result with |Pi|/p falling as 1/K.
+
+The ladder below therefore holds t_diss = t_def by setting Ma = 1.1 sqrt(K),
+i.e. Delta = 0.4483/sqrt(K) and dfmm_tau = 0.056037 sqrt(K).  The price is
+that the high-K rungs are transonic; that coupling is a property of the
+one-mode initial condition, not of the scheme, and raising blowup_nwave trades
+it against resolution.
+
+   K     Ma     blowup_delta  dfmm_tau     Kn    lam_min(P_NS)/p   ten-moment
+                                                    (Navier-Stokes)  prediction
+  ---------------------------------------------------------------------------
+  0.10  0.348     1.4176      0.01772    0.142       +0.90           +0.905
+  0.25  0.550     0.8966      0.02802    0.225       +0.75           +0.778
+  0.50  0.778     0.6340      0.03962    0.318       +0.50           +0.600
+  1.00  1.100     0.4483      0.05604    0.450        0.00           +0.333
+  1.50  1.347     0.3660      0.06863    0.551       -0.50           +0.143
+  2.00  1.556     0.3170      0.07925    0.636       -1.00            0.000
+  3.00  1.905     0.2588      0.09706    0.779       -2.00           -0.200
+
+The last column is the analytic fixed point of the ten-moment strain box for
+this field.  With S = sigma diag(-1/2,-1/2,1) and Pi = y p diag(-1/2,-1/2,1),
+the Sec. 4 source gives dPi_zz/dt = -2 p sigma - y p sigma - Pi_zz/tau, whose
+steady state is
+    Pi_zz/p = -2K/(2+K),   min lam(P)/p = (2-K)/(2+K),
+    |Pi - Pi_NS| / |Pi| = K/2.
+So the falsifiable claim this problem tests is: the Newtonian stress is already
+50% wrong at K = 1, the note's own zero-crossing, and the evolved pressure
+tensor does not reach the cone edge until K = 2 -- twice as far -- because the
+nonlinear term -[Pi G]^dev saturates the anisotropy that the Newtonian
+extrapolation grows without bound.  Run each rung with dfmm_closure='ns' and
+'evolve' and compare against those two columns.
+
+MEMORY.  Size ngridtot to the level, not generously: a uniform level L needs
+sum_{l<=L} 2^(3l-3) ~ 1.15 * 2^(3L-3) octs, i.e. about 600 (L=4), 4700 (L=5),
+37500 (L=6), 300000 (L=7).  ngridtot drives the allocation directly and a
+DFMM=2 build carries four times the fields of plain hydro, so an
+over-allocation is expensive: ngridtot=2000000 at level 5 measured 2.6 GB of
+resident memory where ngridtot=20000 measured 92 MB, with bit-identical
+results.  The values below are for level 4-5; raise them for level 6+.
+
+Run for one deformation time: tout = Delta/4.  With Delta = 0.4483 that is
+tout = 0.1121; set it per rung.
+
+EXACT OUTPUT TIME.  tout_exact=.true. clips the coarse timestep so the
+snapshot lands ON tout rather than on the first step past it.  Without it the
+overshoot is up to a full dt -- 0.9% of t in a measured level-5 run -- and for
+a blowup study the deliverable IS the state at a predicted time t_star, where
+the realizability and Knudsen indicators change on the timestep scale.  With
+it the landing is exact to 2e-14 relative.  It costs at most one shortened
+step per output and is off by default, so set it in every run whose answer is
+a value AT a time rather than a trend.
+
+&RUN_PARAMS
+hydro=.true.
+ncontrol=10
+nrestart=0
+nremap=0
+nsubcycle=10*1
+verbose=.false.
+nstepmax=100000
+nsuperoct=2
+/
+
+&AMR_PARAMS
+levelmin=5
+levelmax=5
+ngridtot=20000
+ncachemax=10000
+nexpand=1
+boxlen=1.0
+/
+
+&INIT_PARAMS
+nregion=1
+region_type(1)='square'
+x_center=0.5
+y_center=0.5
+z_center=0.5
+length_x=10.0
+length_y=10.0
+length_z=10.0
+exp_region=10.0
+d_region=1.0
+u_region=0.0
+v_region=0.0
+w_region=0.0
+p_region=1.0
+/
+
+&BLOWUP_PARAMS
+blowup_delta=0.4483
+blowup_rho0=1.0
+blowup_p0=1.0
+blowup_nwave=1
+blowup_init_ns=.false.
+/
+
+&OUTPUT_PARAMS
+foutput=1000000   ! >0 so the tout-driven snapshot fires (amr_step.f90:107)
+tout=0.1121
+tout_exact=.true.   ! land the snapshot ON tout, not one step past it
+/
+
+&HYDRO_PARAMS
+gamma=1.6666666666666667
+courant_factor=0.8
+slope_type=1
+riemann='hll'
+/
+
+&DFMM_PARAMS
+dfmm_tau=0.05604
+dfmm_prandtl=0.6666666666666667
+dfmm_source=.true.
+dfmm_diag=.true.
+dfmm_fatal_realizability=.false.
+/

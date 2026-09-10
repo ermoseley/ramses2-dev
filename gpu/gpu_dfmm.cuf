@@ -1,0 +1,622 @@
+module dfmm_device
+  !===========================================================================
+  ! CUDA Fortran port of the dual-frame moment method (doc/dfmm_3d.md).
+  !
+  ! STATUS: partial.  This module currently implements the SOURCE half of the
+  ! scheme -- everything that is local to a cell plus a centred stencil in
+  ! uold -- and the timestep kernel.  The TRANSPORT half (the MUSCL predictor,
+  ! the HLL solver over the extended state, the passive-tower upwind kernel,
+  ! and the fine/coarse flux bookkeeping) is not ported yet.  gpu_dfmm_godunov
+  ! in gpu_runner.cuf therefore refuses rather than dispatching to
+  ! gpu_godunov, which knows nothing about ivar 6..nvar and would leave the
+  ! dfmm fields unadvected while the run called itself a dfmm run.  See
+  ! doc/dfmm_3d.md for what remains.
+  !
+  ! The reference implementation is metal/kernels/dfmm.metal on branch
+  ! dfmm_3d_metal.  That file is deliberately absent here: this branch is the
+  ! CUDA Fortran port, not a copy of the Metal work.  Two differences from the
+  ! reference are structural rather than incidental:
+  !
+  !   * NPRE=8 is available.  The Metal path is float32 because Apple GPUs
+  !     have no float64, which forced the cancellation-avoidance care recorded
+  !     in doc/dfmm_3d.md Section 5 (the series form of tau(1-exp(-dt/tau)),
+  !     the sym6 eigenvalue routine).  All of that is kept -- it costs
+  !     nothing and it keeps an NPRE=4 build honest -- but at NPRE=8 the
+  !     realizability diagnostics are trustworthy without a float64 recheck.
+  !   * uold/unew are module-level device arrays indexed
+  !     uold(cell, ivar, oct), not flat buffers with a hand-computed stride.
+  !     So the df_u_get/df_u_set accessors of the reference collapse to direct
+  !     array references and are not reproduced.
+  !===========================================================================
+  use amr_parameters, only: dp, ndim, twotondim
+  use hydro_parameters
+  use oct_commons, only: oct
+  use gpu_utils
+  use cudafor
+  implicit none
+
+#ifdef DFMM
+
+  ! Primitive-vector slots, matching the reference packing.
+  integer, parameter :: DI_RHO = 1, DI_UX = 2, DI_UY = 3, DI_UZ = 4, DI_P = 5
+  integer, parameter :: DI_PI  = 6      ! DI_PI..DI_PI+4 = Pi_xx,yy,xy,xz,yz
+
+  ! Deviatoric pressure slots within the 5-vector (1-based here).
+  integer, parameter :: PI_XX = 1, PI_YY = 2, PI_XY = 3, PI_XZ = 4, PI_YZ = 5
+
+  ! Density-like block size: Pi (5) and, from stage 2, Q (10).
+#if NDFMM > 15
+  integer, parameter :: DF_NDENS = 15
+#else
+  integer, parameter :: DF_NDENS = NDFMM
+#endif
+  integer, parameter :: DF_NMASS = ndfmm - DF_NDENS
+  integer, parameter :: DF_NV    = 5 + DF_NDENS
+
+#if NDFMM >= 15
+  integer, parameter :: DF_NQ = 10
+  ! (i,j,k) of each packed Q slot, in the doc/dfmm_3d.md Section 2 order
+  ! xxx, yyy, zzz, xxy, xxz, yyx, yyz, zzx, zzy, xyz.
+  integer, parameter, dimension(3,DF_NQ) :: DF_QIJK = reshape( (/ &
+       1,1,1,  2,2,2,  3,3,3, &
+       1,1,2,  1,1,3,  2,2,1,  2,2,3,  3,3,1,  3,3,2, &
+       1,2,3 /), (/3,DF_NQ/) )
+  ! Packed slot of an arbitrary (i,j,k), addressed DF_QMAP(k,j,i).  Q is fully
+  ! symmetric so this is invariant under every permutation of its indices.
+  integer, parameter, dimension(3,3,3) :: DF_QMAP = reshape( (/ &
+       1,4,5,  4,6,10, 5,10,8, &
+       4,6,10, 6,2,7,  10,7,9, &
+       5,10,8, 10,7,9, 8,9,3 /), (/3,3,3/) )
+  ! sym6 slot of (a,b) for the (xx,yy,zz,xy,xz,yz) packing.
+  integer, parameter, dimension(3,3) :: DF_S6 = reshape( (/ &
+       1,4,5,  4,2,6,  5,6,3 /), (/3,3/) )
+#else
+  integer, parameter :: DF_NQ = 0
+#endif
+
+  ! Mass-like tower offsets within the DF_NMASS block (1-based).
+#if NDFMM >= 18
+  integer, parameter :: DP_L = 1
+#endif
+#if NDFMM >= 33
+  integer, parameter :: DP_SXX = 4, DP_SXV = 10
+#endif
+
+  ! Shared-stencil slots: u_x,u_y,u_z, p, theta, and (stage 2+) Pi.
+  integer, parameter :: DF_ST_UX = 1, DF_ST_P = 4, DF_ST_TH = 5
+#if NDFMM >= 15
+  integer, parameter :: DF_ST_PI = 6
+  integer, parameter :: DF_NSRC  = 10
+#else
+  integer, parameter :: DF_NSRC  = 5
+#endif
+
+  ! Closure selector, mirroring run_t%dfmm_closure.
+  integer, parameter :: DF_CLOSURE_EVOLVE = 0, DF_CLOSURE_NS = 1
+
+  ! Fastest characteristic of the twenty-moment system along a face normal is
+  ! sqrt((3+sqrt 6) P_nn/rho).  Stage 1 uses the same coefficient so that dt
+  ! does not change when Q lands -- see doc/dfmm_3d.md Section 7.
+  real(kind=dp), parameter :: DF_CSCOEF = 3.0_dp + sqrt(6.0_dp)
+
+contains
+
+  ! ==========================================================================
+  !> Pack the 5-vector Pi into sym6 (xx,yy,zz,xy,xz,yz), with
+  !> Pi_zz = -(Pi_xx + Pi_yy) so the trace-free property is exact.
+  attributes(device) subroutine df_pi_to_sym6(pi5, s)
+    real(kind=dp), intent(in)  :: pi5(5)
+    real(kind=dp), intent(out) :: s(6)
+    s(1) = pi5(PI_XX)
+    s(2) = pi5(PI_YY)
+    s(3) = -(pi5(PI_XX) + pi5(PI_YY))
+    s(4) = pi5(PI_XY)
+    s(5) = pi5(PI_XZ)
+    s(6) = pi5(PI_YZ)
+  end subroutine df_pi_to_sym6
+
+  ! ==========================================================================
+  !> P_ij = p delta_ij + Pi_ij in sym6 packing.
+  attributes(device) subroutine df_P_sym6(p, pi5, P)
+    real(kind=dp), intent(in), value :: p
+    real(kind=dp), intent(in)  :: pi5(5)
+    real(kind=dp), intent(out) :: P(6)
+    call df_pi_to_sym6(pi5, P)
+    P(1) = P(1) + p
+    P(2) = P(2) + p
+    P(3) = P(3) + p
+  end subroutine df_P_sym6
+
+  ! ==========================================================================
+  !> Expand sym6 into a full row-major 3x3, addressed M(b,a) = M_ab.
+  attributes(device) subroutine df_mat_from_sym6(s, M)
+    real(kind=dp), intent(in)  :: s(6)
+    real(kind=dp), intent(out) :: M(3,3)
+    M(1,1) = s(1); M(2,2) = s(2); M(3,3) = s(3)
+    M(2,1) = s(4); M(1,2) = s(4)
+    M(3,1) = s(5); M(1,3) = s(5)
+    M(3,2) = s(6); M(2,3) = s(6)
+  end subroutine df_mat_from_sym6
+
+  ! ==========================================================================
+  !> exp(-dt/tau) and tau(1 - exp(-dt/tau)), the asymptotic-preserving pair.
+  !>
+  !> The series branch below the cutoff is not an optimisation: for small
+  !> dt/tau the closed form loses every significant digit of 1 - exp(-x) to
+  !> cancellation, and the AP map needs tau(1-decay) -> dt to full precision
+  !> or the non-stiff limit is wrong.  Kept from the float32 reference because
+  !> it costs nothing and keeps an NPRE=4 build honest.
+  attributes(device) subroutine df_ap_weights(tau, dt, decay, tomd)
+    real(kind=dp), intent(in), value :: tau, dt
+    real(kind=dp), intent(out) :: decay, tomd
+    real(kind=dp) :: xr, omd
+    decay = 1.0_dp
+    tomd  = dt
+    if (tau > 0.0_dp) then
+       xr = dt/tau
+       if (xr < 1.0e-4_dp) then
+          omd   = xr*(1.0_dp - 0.5_dp*xr)
+          decay = 1.0_dp - omd
+       else
+          decay = exp(-xr)
+          omd   = 1.0_dp - decay
+       endif
+       tomd = tau*omd
+    endif
+  end subroutine df_ap_weights
+
+  ! ==========================================================================
+  !> Smallest eigenvalue of a symmetric 3x3 in sym6 packing, by the closed
+  !> trigonometric form.  Used by the realizability diagnostic
+  !> lam_min(p I + Pi) -- the note's decisive check 7.
+  attributes(device) function df_lam_min_sym6(A) result(lam)
+    real(kind=dp), intent(in) :: A(6)
+    real(kind=dp) :: lam
+    real(kind=dp) :: tr, q, p2, pp, r, phi, dd(6)
+    tr = (A(1) + A(2) + A(3))/3.0_dp
+    dd = A
+    dd(1) = dd(1) - tr; dd(2) = dd(2) - tr; dd(3) = dd(3) - tr
+    p2 = (dd(1)*dd(1) + dd(2)*dd(2) + dd(3)*dd(3))/6.0_dp &
+       + (dd(4)*dd(4) + dd(5)*dd(5) + dd(6)*dd(6))/3.0_dp
+    pp = sqrt(max(p2, 0.0_dp))
+    if (pp <= 0.0_dp) then
+       lam = tr
+       return
+    endif
+    ! det of the deviatoric part, divided by pp^3
+    q =   dd(1)*(dd(2)*dd(3) - dd(6)*dd(6)) &
+        - dd(4)*(dd(4)*dd(3) - dd(6)*dd(5)) &
+        + dd(5)*(dd(4)*dd(6) - dd(2)*dd(5))
+    r = 0.5_dp*q/(pp*pp*pp)
+    r = max(-1.0_dp, min(1.0_dp, r))
+    phi = acos(r)/3.0_dp
+    ! The smallest of the three roots
+    lam = tr + 2.0_dp*pp*cos(phi + 2.0_dp*acos(-1.0_dp)/3.0_dp)
+  end function df_lam_min_sym6
+
+  ! ==========================================================================
+  !> The second frame: phase-space covariance M = [[Sxx,Sxv],[Sxv^T,Svv]].
+  !>
+  !> Liouville gives D M/Dt = J M + M J^T with J = [[0,I],[0,-G]], hence
+  !>     D Sxx/Dt = Sxv + Sxv^T ,     D Sxv/Dt = Svv - Sxv G^T ,
+  !> with Svv = P/rho.  Sxv is NOT symmetrised: its antisymmetric part is the
+  !> packet's angular momentum, which any flow with vorticity generates from
+  !> an isotropic start.
+  !>
+  !> Sxx must be paired to the TRAPEZOIDAL average of Sxv across the step.
+  !> This is a correctness requirement, not an accuracy preference: forward
+  !> Euler makes Sxx lag Sxv by n dt^2, and the Schur complement
+  !> Gamma = Svv - Sxv^T Sxx^-1 Sxv then crosses zero at n dt^2 = sigma_x0^2 --
+  !> a spurious rank collapse at a predictable step number, which is how the
+  !> bug was found (doc/dfmm_3d.md Gate 6).
+  attributes(device) subroutine df_phase_space_update(uold, unew, oct_idx, cell_idx, &
+       rho_new, p_new, pi_new, Gm, relax, smallr, dt, invdt, decay, tomd)
+    real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
+    integer, intent(in), value :: oct_idx, cell_idx
+    real(kind=dp), intent(in), value :: rho_new, p_new, smallr, dt, invdt, decay, tomd
+    real(kind=dp), intent(in) :: pi_new(5), Gm(3,3)
+    logical, intent(in), value :: relax
+#if NDFMM >= 33
+    integer :: ivS, ivV, a, b, c, m
+    real(kind=dp) :: irn, iro, rho_old, acc, rate
+    real(kind=dp) :: avT(9), avN(9), Tv(9), Txx(6), Ps(6), SV(3,3)
+
+    ivS = DF_NV + DP_SXX
+    ivV = DF_NV + DP_SXV
+    irn = 1.0_dp/rho_new
+    do m = 1, 9
+       avT(m) = unew(cell_idx, ivV + m - 1, oct_idx)*irn
+    end do
+
+    ! Sxv production:  T_ab = Svv_ab - Sxv_ac G_bc,  Svv = P/rho
+    call df_P_sym6(p_new, pi_new, Ps)
+    call df_mat_from_sym6(Ps, SV)
+    do a = 1, 3
+       do b = 1, 3
+          acc = SV(b,a)*irn
+          do c = 1, 3
+             acc = acc - avT(3*(a-1)+c)*Gm(c,b)
+          end do
+          Tv(3*(a-1)+b) = acc
+       end do
+    end do
+
+    ! Advance Sxv first, keeping its new primitive value for Sxx's trapezoid.
+    if (.not. relax) then
+       do m = 1, 9
+          avN(m) = avT(m) + dt*Tv(m)
+          if (Tv(m) /= 0.0_dp) &
+               unew(cell_idx, ivV + m - 1, oct_idx) = &
+               unew(cell_idx, ivV + m - 1, oct_idx) + rho_new*dt*Tv(m)
+       end do
+    else
+       rho_old = max(uold(cell_idx, 1, oct_idx), smallr)
+       iro = 1.0_dp/rho_old
+       do m = 1, 9
+          rate   = (avT(m) - uold(cell_idx, ivV + m - 1, oct_idx)*iro)*invdt + Tv(m)
+          avN(m) = uold(cell_idx, ivV + m - 1, oct_idx)*iro*decay + tomd*rate
+          unew(cell_idx, ivV + m - 1, oct_idx) = rho_new*avN(m)
+       end do
+    endif
+
+    ! Sxx production with the trapezoidal average of (Sxv + Sxv^T), sym6.
+    Txx(1) = avT(1) + avN(1)
+    Txx(2) = avT(5) + avN(5)
+    Txx(3) = avT(9) + avN(9)
+    Txx(4) = 0.5_dp*(avT(2) + avT(4) + avN(2) + avN(4))
+    Txx(5) = 0.5_dp*(avT(3) + avT(7) + avN(3) + avN(7))
+    Txx(6) = 0.5_dp*(avT(6) + avT(8) + avN(6) + avN(8))
+
+    ! Sxx is never relaxed, so an increment on the transported conserved value
+    ! is both exact and the correct update.
+    do m = 1, 6
+       if (Txx(m) /= 0.0_dp) &
+            unew(cell_idx, ivS + m - 1, oct_idx) = &
+            unew(cell_idx, ivS + m - 1, oct_idx) + rho_new*dt*Txx(m)
+    end do
+#endif
+  end subroutine df_phase_space_update
+
+  ! ==========================================================================
+  !> @brief
+  !> dfmm source terms: strain production, BGK relaxation by the
+  !> asymptotic-preserving map, the Lagrangian displacement, and the
+  !> phase-space tower.  Runs after transport, on unew.
+  !>
+  !> @detail
+  !> The AP map relaxes toward the WHOLE non-stiff right-hand side, transport
+  !> rate included:  X <- X_old*decay + tau(1-decay)*rate  with
+  !> rate = (X_transported - X_old)/dt + production.  Relaxing toward the
+  !> production term alone is an O(tau^2) error for Pi but replaces the
+  !> Fourier heat flux entirely for Q, because R_ijkl in the Q flux is O(1)
+  !> (doc/dfmm_3d.md Section 5).
+  !>
+  !> One threadblock per oct.  The 6x6x6 shared stencil holds the velocity,
+  !> pressure, temperature and (stage 2+) Pi of the oct and its face
+  !> neighbours, so every gradient below is a centred difference in uold.
+  !>
+  !> @param[in] grid : oct descriptors, for the refined mask
+  !> @param[in] uold : pre-transport conserved state
+  !> @param[inout] unew : post-transport conserved state, updated in place
+  !> @param[in] nbor : neighbour table
+  !> @param[in] source_on : 0 disables the closure production (manufactured
+  !>            solutions); the displacement and phase-space sectors run
+  !>            regardless, since they are definitions, not models
+  !> @param[in] closure : DF_CLOSURE_EVOLVE or DF_CLOSURE_NS
+  attributes(global) subroutine dfmm_source_kernel(grid, uold, unew, nbor, &
+       head_idx, num_octs, smallr, smallc2, dt, dx, tau_pi, source_on, tau_q, closure)
+    type(oct), device :: grid(*)
+    real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: unew(1:twotondim,1:nvar,*)
+    integer(kind=4), device :: nbor(1:subgridsize,*)
+    integer(kind=4), intent(in), value :: head_idx, num_octs, source_on, closure
+    real(kind=dp), intent(in), value :: smallr, smallc2, dt, dx, tau_pi, tau_q
+
+    real(kind=dp), shared :: st(DF_NSRC,0:5,0:5,0:5)
+
+    integer :: block_idx, thread_idx, threads_per_tg, wi, total_work
+    integer :: i_sg, j_sg, k_sg, subgrid_idx, source_idx, cell_idx, cell
+    integer :: ib, jb, kb, i, j, k, iv, m, a, b, c, l, oct_idx
+    integer :: qi, qj, qk
+    real(kind=dp) :: cc(5), rho, ekin, pl, inv2dx, invdt, p, gamma_m1
+    real(kind=dp) :: decay_pi, tomd_pi, decay_q, tomd_q
+    real(kind=dp) :: G(3,3), S, PG, trT, TP(3,3), divu, c2, S0(3,3)
+    real(kind=dp) :: w(DF_NV), pis(6), PIm(3,3), uu
+    real(kind=dp) :: xo(DF_NDENS), xt(DF_NDENS), T(DF_NDENS), rate
+    real(kind=dp) :: gth(3), gp(3), gpi(3,5), divP(3), Ps(6), PM(3,3)
+    real(kind=dp) :: prod, dist, cq, v
+
+    block_idx = blockIdx%x - 1
+    if (block_idx >= num_octs) return
+    thread_idx     = threadIdx%x - 1
+    threads_per_tg = blockDim%x
+    gamma_m1 = 5.0_dp/3.0_dp - 1.0_dp
+
+    ! ---- load the 6x6x6 stencil ------------------------------------------
+    total_work = 6*6*6
+    wi = thread_idx
+    do while (wi < total_work)
+       call index_1Dto3D(wi/8, 3, 3, i_sg, j_sg, k_sg)
+       subgrid_idx = head_idx + block_idx
+       source_idx  = nbor(wi/8 + 1, subgrid_idx)
+       cell_idx    = mod(wi, 8) + 1
+       call index_1Dto3D(cell_idx - 1, 2, 2, ib, jb, kb)
+       i = ib + 2*i_sg; j = jb + 2*j_sg; k = kb + 2*k_sg
+       do iv = 1, 5
+          cc(iv) = uold(cell_idx, iv, source_idx)
+       end do
+       rho = max(cc(DI_RHO), smallr)
+       st(DF_ST_UX  , i, j, k) = cc(DI_UX)/rho
+       st(DF_ST_UX+1, i, j, k) = cc(DI_UY)/rho
+       st(DF_ST_UX+2, i, j, k) = cc(DI_UZ)/rho
+       ekin = 0.5_dp*(cc(DI_UX)**2 + cc(DI_UY)**2 + cc(DI_UZ)**2)/rho
+       pl = max(gamma_m1*(cc(DI_P) - ekin), rho*smallc2/(5.0_dp/3.0_dp))
+       st(DF_ST_P , i, j, k) = pl
+       st(DF_ST_TH, i, j, k) = pl/rho
+#if NDFMM >= 15
+       do m = 0, 4
+          st(DF_ST_PI+m, i, j, k) = uold(cell_idx, 6+m, source_idx)
+       end do
+#endif
+       wi = wi + threads_per_tg
+    end do
+    call syncthreads()
+
+    oct_idx = head_idx + block_idx
+    inv2dx  = 0.5_dp/dx
+    invdt   = 1.0_dp/dt
+    call df_ap_weights(tau_pi, dt, decay_pi, tomd_pi)
+    call df_ap_weights(tau_q,  dt, decay_q,  tomd_q)
+
+    cell = thread_idx
+    do while (cell < twotondim)
+       cell_idx = cell + 1
+       if (grid(oct_idx)%refined(cell_idx)) then
+          cell = cell + threads_per_tg
+          cycle
+       endif
+       call index_1Dto3D(cell, 2, 2, ib, jb, kb)
+       i = ib + 2; j = jb + 2; k = kb + 2       ! centre 2x2x2 of the stencil
+
+       ! Post-transport primitives of this cell.
+       rho = max(unew(cell_idx, 1, oct_idx), smallr)
+       w(DI_RHO) = rho
+       w(DI_UX)  = unew(cell_idx, 2, oct_idx)/rho
+       w(DI_UY)  = unew(cell_idx, 3, oct_idx)/rho
+       w(DI_UZ)  = unew(cell_idx, 4, oct_idx)/rho
+       ekin = 0.5_dp*rho*(w(DI_UX)**2 + w(DI_UY)**2 + w(DI_UZ)**2)
+       p = max(gamma_m1*(unew(cell_idx, 5, oct_idx) - ekin), rho*smallc2/(5.0_dp/3.0_dp))
+       w(DI_P) = p
+       do m = 1, DF_NDENS
+          w(5+m) = unew(cell_idx, 5+m, oct_idx)
+       end do
+
+       ! G(b,a) = G_ab = d_b u_a, centred, from uold.  Hoisted because the
+       ! phase-space sector needs it too.
+       do a = 1, 3
+          G(1,a) = (st(DF_ST_UX+a-1, i+1, j, k) - st(DF_ST_UX+a-1, i-1, j, k))*inv2dx
+          G(2,a) = (st(DF_ST_UX+a-1, i, j+1, k) - st(DF_ST_UX+a-1, i, j-1, k))*inv2dx
+          G(3,a) = (st(DF_ST_UX+a-1, i, j, k+1) - st(DF_ST_UX+a-1, i, j, k-1))*inv2dx
+       end do
+
+#if NDFMM >= 18
+       ! Lagrangian displacement: D D_i/Dt = -u_i, since D L_i/Dt = 0.
+       ! Unconditional, not under source_on: the label is a definition, not a
+       ! closure model, and switching it off would pin D_i at zero rather than
+       ! leave it un-modelled.  Written as an increment on the transported
+       ! conserved value so a static flow leaves it bit-exactly unchanged.
+       do m = 0, 2
+          uu = w(DI_UX + m)
+          if (uu /= 0.0_dp) then
+             iv = DF_NV + DP_L + m
+             unew(cell_idx, iv, oct_idx) = unew(cell_idx, iv, oct_idx) - rho*dt*uu
+          endif
+       end do
+#endif
+
+#if NDFMM >= 33
+       ! The second frame, advanced ahead of the closure branch so that it
+       ! evolves identically under both: the Chapman-Enskog substitution below
+       ! models Pi at this same time level, and the tower has no feedback on
+       ! the hyperbolic core either way.
+       call df_phase_space_update(uold, unew, oct_idx, cell_idx, &
+            rho, p, w(DI_PI:DI_PI+4), G, tau_pi > 0.0_dp, &
+            smallr, dt, invdt, decay_pi, tomd_pi)
+#endif
+
+       if (closure == DF_CLOSURE_NS) then
+          ! Navier-Stokes-Fourier closure: overwrite Pi and Q with their
+          ! Chapman-Enskog values instead of evolving them.  The flux ledger
+          ! already carries Pi in the momentum flux and u.Pi + q in the energy
+          ! flux, so the SAME kernel becomes a compressible NSF solver with
+          ! explicit mu = p tau_Pi -- not an inviscid Euler run with numerical
+          ! viscosity standing in.  That is the point: the comparison run
+          ! differs from the moment run in the closure alone.
+          divu = G(1,1) + G(2,2) + G(3,3)
+          c2 = -2.0_dp*p*max(tau_pi, 0.0_dp)
+          do a = 1, 3
+             do b = 1, 3
+                S0(b,a) = 0.5_dp*(G(b,a) + G(a,b))
+                if (a == b) S0(b,a) = S0(b,a) - divu/3.0_dp
+             end do
+          end do
+          unew(cell_idx, 5+PI_XX, oct_idx) = c2*S0(1,1)
+          unew(cell_idx, 5+PI_YY, oct_idx) = c2*S0(2,2)
+          unew(cell_idx, 5+PI_XY, oct_idx) = c2*S0(2,1)
+          unew(cell_idx, 5+PI_XZ, oct_idx) = c2*S0(3,1)
+          unew(cell_idx, 5+PI_YZ, oct_idx) = c2*S0(3,2)
+#if NDFMM >= 15
+          gth(1) = (st(DF_ST_TH, i+1, j, k) - st(DF_ST_TH, i-1, j, k))*inv2dx
+          gth(2) = (st(DF_ST_TH, i, j+1, k) - st(DF_ST_TH, i, j-1, k))*inv2dx
+          gth(3) = (st(DF_ST_TH, i, j, k+1) - st(DF_ST_TH, i, j, k-1))*inv2dx
+          cq = -max(tau_q, 0.0_dp)*p
+          do m = 1, DF_NQ
+             qi = DF_QIJK(1,m); qj = DF_QIJK(2,m); qk = DF_QIJK(3,m)
+             v = 0.0_dp
+             if (qj == qk) v = v + gth(qi)
+             if (qi == qk) v = v + gth(qj)
+             if (qi == qj) v = v + gth(qk)
+             unew(cell_idx, 10+m, oct_idx) = cq*v
+          end do
+#endif
+          cell = cell + threads_per_tg
+          cycle
+       endif
+
+       do m = 1, DF_NDENS
+          xo(m) = uold(cell_idx, 5+m, oct_idx)
+          xt(m) = w(5+m)
+          T(m)  = 0.0_dp
+       end do
+
+       if (source_on /= 0) then
+          call df_pi_to_sym6(xt(1:5), pis)
+          call df_mat_from_sym6(pis, PIm)
+
+          ! S[Pi_ij] = -2 p S0_ij - [Pi_ik G_jk + Pi_jk G_ik]^dev
+          do a = 1, 3
+             do b = 1, 3
+                S  = 0.5_dp*(G(b,a) + G(a,b))
+                PG = 0.0_dp
+                do c = 1, 3
+                   PG = PG + PIm(c,a)*G(c,b) + PIm(c,b)*G(c,a)
+                end do
+                TP(b,a) = -2.0_dp*p*S - PG
+             end do
+          end do
+          trT = (TP(1,1) + TP(2,2) + TP(3,3))/3.0_dp
+          TP(1,1) = TP(1,1) - trT; TP(2,2) = TP(2,2) - trT; TP(3,3) = TP(3,3) - trT
+          T(PI_XX) = TP(1,1)
+          T(PI_YY) = TP(2,2)
+          T(PI_XY) = TP(2,1)
+          T(PI_XZ) = TP(3,1)
+          T(PI_YZ) = TP(3,2)
+
+#if NDFMM >= 15
+          ! div P from uold: d_l P_li = d_i p + d_l Pi_li
+          gp(1) = (st(DF_ST_P, i+1, j, k) - st(DF_ST_P, i-1, j, k))*inv2dx
+          gp(2) = (st(DF_ST_P, i, j+1, k) - st(DF_ST_P, i, j-1, k))*inv2dx
+          gp(3) = (st(DF_ST_P, i, j, k+1) - st(DF_ST_P, i, j, k-1))*inv2dx
+          do m = 1, 5
+             gpi(1,m) = (st(DF_ST_PI+m-1, i+1, j, k) - st(DF_ST_PI+m-1, i-1, j, k))*inv2dx
+             gpi(2,m) = (st(DF_ST_PI+m-1, i, j+1, k) - st(DF_ST_PI+m-1, i, j-1, k))*inv2dx
+             gpi(3,m) = (st(DF_ST_PI+m-1, i, j, k+1) - st(DF_ST_PI+m-1, i, j, k-1))*inv2dx
+          end do
+          divP(1) = gp(1) + gpi(1,PI_XX) + gpi(2,PI_XY) + gpi(3,PI_XZ)
+          divP(2) = gp(2) + gpi(1,PI_XY) + gpi(2,PI_YY) + gpi(3,PI_YZ)
+          divP(3) = gp(3) + gpi(1,PI_XZ) + gpi(2,PI_YZ) &
+                  - (gpi(3,PI_XX) + gpi(3,PI_YY))
+
+          call df_P_sym6(p, xt(1:5), Ps)
+          call df_mat_from_sym6(Ps, PM)
+
+          ! S[Q_ijk] = (1/rho)( P_jk d_l P_li + P_ik d_l P_lj + P_ij d_l P_lk )
+          !            - ( Q_jkl G_il + Q_ikl G_jl + Q_ijl G_kl )
+          ! The -d_l R_ijkl companion of the first term is carried by the flux
+          ! and enters here through the transport rate.  The two are O(1) and
+          ! cancel to O(grad theta), so they must both be present or both
+          ! absent -- see doc/dfmm_3d.md Section 4.
+          do m = 1, DF_NQ
+             qi = DF_QIJK(1,m); qj = DF_QIJK(2,m); qk = DF_QIJK(3,m)
+             prod = (PM(qk,qj)*divP(qi) + PM(qk,qi)*divP(qj) &
+                   + PM(qj,qi)*divP(qk))/rho
+             dist = 0.0_dp
+             do l = 1, 3
+                dist = dist + xt(5 + DF_QMAP(l,qk,qj))*G(l,qi) &
+                            + xt(5 + DF_QMAP(l,qk,qi))*G(l,qj) &
+                            + xt(5 + DF_QMAP(l,qj,qi))*G(l,qk)
+             end do
+             T(5+m) = prod - dist
+          end do
+#endif
+       endif
+
+       do m = 1, 5
+          rate = (xt(m) - xo(m))*invdt + T(m)
+          unew(cell_idx, 5+m, oct_idx) = xo(m)*decay_pi + tomd_pi*rate
+       end do
+#if NDFMM >= 15
+       do m = 6, DF_NDENS
+          rate = (xt(m) - xo(m))*invdt + T(m)
+          unew(cell_idx, 5+m, oct_idx) = xo(m)*decay_q + tomd_q*rate
+       end do
+#endif
+       cell = cell + threads_per_tg
+    end do
+  end subroutine dfmm_source_kernel
+
+  ! ==========================================================================
+  !> @brief
+  !> dfmm timestep: the twenty-moment wave speed, plus the parabolic limit the
+  !> Navier-Stokes closure reintroduces.
+  !>
+  !> @detail
+  !> The fastest characteristic along a face normal is sqrt(3 P_nn/rho), not
+  !> the adiabatic sqrt(gamma p/rho): with the pressure tensor free,
+  !> compression along one axis does not share energy with the transverse
+  !> directions on the fast timescale.  DF_CSCOEF = 3 + sqrt(6) is the
+  !> twenty-moment value and is used at every stage so dt does not jump when Q
+  !> lands.  The dt reduction relative to Euler is physics, not a defect.
+  !>
+  !> dfmm_closure='ns' additionally needs dt < dx^2/(2 ndim D) because it puts
+  !> an explicit viscosity back in -- one of the practical arguments for the
+  !> evolved system, which is hyperbolic and has no such constraint.
+  attributes(global) subroutine dfmm_cmpdt_kernel(grid, uold, head_idx, num_octs, &
+       dx, courant, smallr, smallc2, tau_pi, tau_q, closure, dt_out, pinorm_out)
+    type(oct), device :: grid(*)
+    real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+    integer(kind=4), intent(in), value :: head_idx, num_octs, closure
+    real(kind=dp), intent(in), value :: dx, courant, smallr, smallc2, tau_pi, tau_q
+    real(kind=dp), device :: dt_out(*), pinorm_out(*)
+
+    integer :: block_idx, cell_idx, oct_idx, idim, m
+    real(kind=dp) :: rho, ux, uy, uz, ekin, p, pnn, cs, vmax, dtc, dtv, dif
+    real(kind=dp) :: pi5(5), pis(6), gamma_m1, unorm
+
+    block_idx = blockIdx%x - 1
+    if (block_idx >= num_octs) return
+    oct_idx  = head_idx + block_idx
+    cell_idx = threadIdx%x
+    gamma_m1 = 5.0_dp/3.0_dp - 1.0_dp
+
+    dtc = 1.0e30_dp
+    unorm = 0.0_dp
+    if (.not. grid(oct_idx)%refined(cell_idx)) then
+       rho = max(uold(cell_idx, 1, oct_idx), smallr)
+       ux = uold(cell_idx, 2, oct_idx)/rho
+       uy = uold(cell_idx, 3, oct_idx)/rho
+       uz = uold(cell_idx, 4, oct_idx)/rho
+       ekin = 0.5_dp*rho*(ux*ux + uy*uy + uz*uz)
+       p = max(gamma_m1*(uold(cell_idx, 5, oct_idx) - ekin), rho*smallc2/(5.0_dp/3.0_dp))
+       do m = 1, 5
+          pi5(m) = uold(cell_idx, 5+m, oct_idx)
+       end do
+       call df_pi_to_sym6(pi5, pis)
+       unorm = sqrt(pis(1)**2 + pis(2)**2 + pis(3)**2 &
+                  + 2.0_dp*(pis(4)**2 + pis(5)**2 + pis(6)**2))
+       vmax = 0.0_dp
+       do idim = 1, 3
+          pnn = max(p + pis(idim), rho*smallc2/(5.0_dp/3.0_dp))
+          cs  = sqrt(DF_CSCOEF*pnn/rho)
+          if (idim == 1) vmax = max(vmax, abs(ux) + cs)
+          if (idim == 2) vmax = max(vmax, abs(uy) + cs)
+          if (idim == 3) vmax = max(vmax, abs(uz) + cs)
+       end do
+       dtc = courant*dx/(real(ndim, dp)*max(vmax, 1.0e-30_dp))
+       if (closure == DF_CLOSURE_NS) then
+          ! mu = p tau_Pi and kappa/(rho c_p) = tau_q p/rho: take the larger
+          ! diffusivity, since both are explicit in this branch.
+          dif = max(max(tau_pi, 0.0_dp)*p/rho, max(tau_q, 0.0_dp)*p/rho)
+          if (dif > 0.0_dp) then
+             dtv = courant*dx*dx/(2.0_dp*real(ndim, dp)*dif)
+             dtc = min(dtc, dtv)
+          endif
+       endif
+    endif
+    dt_out(cell_idx + twotondim*block_idx)     = dtc
+    pinorm_out(cell_idx + twotondim*block_idx) = unorm
+  end subroutine dfmm_cmpdt_kernel
+
+#endif
+end module dfmm_device

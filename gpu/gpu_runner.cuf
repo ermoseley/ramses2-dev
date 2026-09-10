@@ -180,6 +180,47 @@ contains
   !> @param[in] sim : The simulation object
   !> @param[in] ilevel : The refinement level to update
   !>
+  !> @brief
+  !> Copy the device hydro state back to the host.
+  !>
+  !> @detail
+  !> The incompressible rungs (incomp/incomp_step.f90) run on the host: the
+  !> spectral solver needs the whole level as one array in float64, which is
+  !> not a shape the device state has.  So incomp_step brackets itself with
+  !> these two routines.  Without them the gather reads a stale host shadow
+  !> and the run evolves the initial condition while looking plausible --
+  !> which is exactly how this failed once on the Metal path before the
+  !> equivalent pair was added there.
+  !>
+  !> These are cheap in CUDA Fortran: uold/unew are device arrays declared in
+  !> this module, so a whole-array assignment is the transfer.
+  !>
+  !> @param[in] sim : The simulation object
+  !>
+  subroutine gpu_uold_to_host(sim)
+    use ramses_commons, only: ramses_t
+    type(ramses_t), intent(inout)::sim
+    sim%m%uold = uold
+  end subroutine gpu_uold_to_host
+
+  !> @brief
+  !> Push the host hydro state to the device after a host-side step.
+  !>
+  !> @detail
+  !> Both uold and unew are sent: incomp_scatter writes unew (the step runs
+  !> where the hyperbolic solver would, and r_set_uold copies unew -> uold
+  !> immediately afterwards), but uold must also be current because the
+  !> diagnostics and the next gather read it.
+  !>
+  !> @param[in] sim : The simulation object
+  !>
+  subroutine gpu_unew_to_device(sim)
+    use ramses_commons, only: ramses_t
+    type(ramses_t), intent(inout)::sim
+    uold = sim%m%uold
+    unew = sim%m%unew
+  end subroutine gpu_unew_to_device
+
   subroutine gpu_set_uold(sim, ilevel)
     use nvtx
     use hydro_device, only: set_uold_kernel
@@ -538,6 +579,97 @@ contains
   !> @param[in] sim : The simulation object
   !> @param[in] ilevel : The refinement level to update
   !>
+#ifdef DFMM
+  !> @brief
+  !> dfmm hyperbolic step.  NOT YET PORTED -- refuses rather than dispatching.
+  !>
+  !> @detail
+  !> gpu_dfmm.cuf currently implements the source half of the scheme and the
+  !> timestep.  The transport half -- the MUSCL predictor over the extended
+  !> state, the HLL solver on the twenty-moment flux, the upwind-on-mass-flux
+  !> kernel for the passive tower, and the fine/coarse flux bookkeeping -- is
+  !> still to come.
+  !>
+  !> Falling through to gpu_godunov would be worse than failing: it knows
+  !> nothing about ivar 6..nvar, so the dfmm fields would sit unadvected while
+  !> the run reported itself as a dfmm run and produced plausible numbers.
+  !> The source kernel alone is exercisable through gpu_dfmm_source below, so
+  !> the ported half can be gated before the rest lands.
+  !>
+  !> @param[in] sim : The simulation object
+  !> @param[in] ilevel : The refinement level to update
+  !>
+  subroutine gpu_dfmm_godunov(sim, ilevel)
+    use ramses_commons, only: ramses_t
+    type(ramses_t), intent(inout)::sim
+    integer, intent(in)::ilevel
+    write(*,*)'gpu_dfmm_godunov: the dfmm transport half is not ported to', &
+         ' CUDA yet (gpu/gpu_dfmm.cuf implements the sources and the', &
+         ' timestep only).  Refusing rather than dispatching to gpu_godunov,', &
+         ' which would leave ivar 6..nvar unadvected.  Level ',ilevel
+    error stop
+  end subroutine gpu_dfmm_godunov
+
+  !> @brief
+  !> Apply the dfmm source terms to one level.  This half IS ported.
+  !>
+  !> @param[in] sim : The simulation object
+  !> @param[in] ilevel : The refinement level to update
+  !> @param[in] dt : The timestep
+  !>
+  subroutine gpu_dfmm_source(sim, ilevel, dt)
+    use nvtx
+    use dfmm_device, only: dfmm_source_kernel
+    use ramses_commons, only: ramses_t
+    type(ramses_t), intent(inout)::sim
+    integer, intent(in)::ilevel
+    real(dp), intent(in)::dt
+    integer(kind=4) :: head_idx, num_subgrids
+    integer :: threads_per_block, num_blocks
+
+    head_idx = (sim%m%head(ilevel) - 1) / nsubgridtondim + 1
+    num_subgrids = sim%m%noct(ilevel) / nsubgridtondim
+    num_blocks = num_subgrids
+    if (num_blocks <= 0) return
+    threads_per_block = 64
+    if (nsubgrid == 2) threads_per_block = 256
+    if (nsubgrid == 4) threads_per_block = 512
+
+    call nvtxStartRange("GPU dfmm source", color=1)
+    call dfmm_source_kernel<<<num_blocks, threads_per_block>>>(grid, uold, unew, nbor, &
+         & head_idx, num_subgrids, sim%r%smallr, sim%r%smallc**2, dt, &
+         & sim%r%boxlen/2**ilevel, sim%r%dfmm_tau, &
+         & merge(1, 0, sim%r%dfmm_source), sim%r%dfmm_tau/max(sim%r%dfmm_prandtl,1.0d-30), &
+         & sim%r%dfmm_closure)
+    call GPU_Error_Check(__FILE__, __LINE__)
+    call nvtxEndRange()
+  end subroutine gpu_dfmm_source
+
+  !> @brief
+  !> dfmm timestep and the |Pi|_F volume integral update_time.f90 reports in
+  !> the emag slot.
+  !>
+  !> @param[in] sim : The simulation object
+  !> @param[in] ilevel : The refinement level
+  !> @param[out] mass, ekin, eint, emag, dt : the conserved sums and dt
+  !>
+  subroutine gpu_dfmm_cmpdt(sim, ilevel, mass, ekin, eint, emag, dt)
+    use ramses_commons, only: ramses_t
+    type(ramses_t), intent(inout)::sim
+    integer, intent(in)::ilevel
+    real(dp), intent(out)::mass, ekin, eint, emag, dt
+    ! The conserved sums come from the same reduction the plain hydro path
+    ! uses; only dt and the |Pi| norm are dfmm-specific.  Wiring the reduction
+    ! is part of the transport port, so until then defer to gpu_cmpdt for the
+    ! sums and leave the dfmm wave speed to be applied on top.
+    call gpu_cmpdt(sim, ilevel, mass, ekin, eint, emag, dt)
+    write(*,*)'gpu_dfmm_cmpdt: using the hydro wave speed; the dfmm', &
+         ' sqrt((3+sqrt6) P_nn/rho) limit is implemented in', &
+         ' dfmm_cmpdt_kernel but its reduction is not wired yet.  Level ',ilevel
+    error stop
+  end subroutine gpu_dfmm_cmpdt
+#endif
+
   subroutine gpu_upload(sim, ilevel)
     use nvtx
     use hydro_device, only: upload_kernel

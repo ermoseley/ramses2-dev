@@ -39,7 +39,7 @@ end subroutine r_output_hydro
 !###################################################
 subroutine output_hydro(s,filename)
   use amr_parameters, only: ndim, twotondim, flen
-  use hydro_parameters, only: nvar, nprim, nener,ie
+  use hydro_parameters, only: nvar, nprim, nener,ie, ndfmm, ndfmm_mass
   use ramses_commons, only: ramses_t, open_file, close_file
   implicit none
   type(ramses_t)::s
@@ -122,8 +122,18 @@ subroutine output_hydro(s,filename)
            end do
 #endif
 #if NVAR>5+NENER
-           ! Compute passive scalars
-           do n=1,nvar-5-nener
+           ! Compute passive scalars.  The density-like dfmm block (Pi_ij,
+           ! Q_ijk) must NOT be divided by rho -- otherwise snapshots store
+           ! Pi/rho and Q/rho.  The mass-like dfmm tower (rho L_i, rho Sxx,
+           ! rho Sxv) must be, so that snapshots store L_i, Sxx, Sxv.  Same
+           ! reasoning as hydro/input_hydro_condinit.f90.
+           do n=1,nvar-5-nener-ndfmm
+              qold(ind,ie+nener+n)=uold(ind,5+nener+n)/dd
+           end do
+           do n=nvar-nener-ndfmm+1-5,nvar-5-nener-ndfmm_mass
+              qold(ind,ie+nener+n)=uold(ind,5+nener+n)
+           end do
+           do n=nvar-5-nener-ndfmm_mass+1,nvar-5-nener
               qold(ind,ie+nener+n)=uold(ind,5+nener+n)/dd
            end do
 #endif

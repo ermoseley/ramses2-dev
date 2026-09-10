@@ -1,0 +1,362 @@
+module incomp_step_module
+  !---------------------------------------------------------------------------
+  ! RAMSES-facing incompressible step (doc/incompressible.md Section 3).
+  !
+  ! Operates on uold for one level through the Cartesian key, so it is a
+  ! *step*, not a fork of the mesh.  Requires levelmin == levelmax, periodic
+  ! boundaries, a power-of-two grid and no refinement; anything else is
+  ! rejected at startup rather than silently approximated.
+  !
+  ! rho = rho_0 and p = p_0 are constants of the motion by construction, so
+  ! the density and energy slots of uold carry rho_0 and
+  ! rho_0|u|^2/2 + 3 p_0/2 exactly.  That is deliberate: condinit, the
+  ! snapshot writer and every dfmm diagnostic keep working with no special
+  ! case, and an incompressible snapshot is directly comparable with a
+  ! compressible one.
+  !---------------------------------------------------------------------------
+  use incomp_ops_module
+  use incomp_solver_module
+  use incomp_moments_module
+  use hydro_parameters, only: ndfmm
+  implicit none
+  private
+  public :: incomp_validate, incomp_cmpdt, incomp_step, incomp_nu
+
+contains
+
+  integer function incomp_nside(r)
+    use amr_commons, only: run_t
+    type(run_t)::r
+    incomp_nside = 2**r%levelmin
+  end function incomp_nside
+
+  real(kind=8) function incomp_nu(r)
+    ! nu = mu / rho_0 with mu = p_0 tau, the SAME calibration the compressible
+    ! rungs use (doc/dfmm_3d.md Section 4), so that a given dfmm_tau means the
+    ! same physical viscosity in every rung.  That is the whole point of the
+    ! four-rung design.
+    use amr_commons, only: run_t
+    type(run_t)::r
+    if(r%dfmm_tau>0.0d0)then
+       incomp_nu = r%incomp_p0*r%dfmm_tau/r%incomp_rho0
+    else
+       incomp_nu = 0.0d0
+    endif
+  end function incomp_nu
+
+  subroutine incomp_validate(r)
+    use amr_commons, only: run_t
+    use incomp_fft_module, only: is_pow2
+    type(run_t)::r
+    integer::n
+    if(.not.r%incompressible) return
+    if(r%levelmin/=r%nlevelmax)then
+       write(*,*)'incompressible requires levelmin = levelmax; got ', &
+            r%levelmin, r%nlevelmax
+       stop 1
+    endif
+#ifdef _METAL
+    ! This is the CUDA branch.  incomp_step keeps the state on the host
+    ! between steps and syncs the device around itself; here those syncs are
+    ! gpu_uold_to_host / gpu_unew_to_device.  The Metal equivalents live on
+    ! dfmm_3d_metal and are deliberately not ported here, so a METAL build
+    ! would gather a stale host shadow and evolve the initial condition while
+    ! looking plausible.  Refuse instead.
+    write(*,*)'incompressible on this branch is the CUDA port: build with', &
+         ' COMPILER=NVHPC, or use the dfmm_3d_metal branch for Metal.'
+    stop 1
+#endif
+    n = incomp_nside(r)
+    if(.not.is_pow2(n))then
+       write(*,*)'incompressible requires a power-of-two grid; got n = ',n
+       stop 1
+    endif
+    if(r%incomp_p0<=0.0d0 .or. r%incomp_rho0<=0.0d0)then
+       write(*,*)'incompressible requires incomp_p0 > 0 and incomp_rho0 > 0'
+       stop 1
+    endif
+    if(trim(r%incomp_stress)/='viscous' .and. trim(r%incomp_stress)/='moment')then
+       write(*,*)"incomp_stress must be 'viscous' or 'moment'; got ", &
+            trim(r%incomp_stress)
+       stop 1
+    endif
+    ! The moment closure reads Pi from the hydro state, so it needs a binary
+    ! that carries those slots.  Without this check a DFMM=0 build reads past
+    ! the end of the variable list and segfaults on the first step, which is
+    ! an unhelpful way to learn that the namelist and the binary disagree.
+    if(trim(r%incomp_stress)=='moment' .and. ndfmm<5)then
+       write(*,*)"incomp_stress='moment' needs the Pi fields; rebuild with", &
+            " DFMM>=1 (this binary has ndfmm = ", ndfmm, ")"
+       stop 1
+    endif
+    write(*,'(" incompressible: n=",I5,"  p0=",1pe10.3,"  rho0=",1pe10.3, &
+         & "  nu=",1pe10.3,"  stress=",A)') &
+         n, r%incomp_p0, r%incomp_rho0, incomp_nu(r), trim(r%incomp_stress)
+    ! Say which moment system is running.  A DFMM=1 build with
+    ! incomp_stress='moment' is a legitimate rung, but it is the
+    ! incompressible limit of the TEN-moment system and is therefore not
+    ! comparable with a DFMM>=2 compressible run; saying so here is cheaper
+    ! than discovering it from a plot.
+    if(trim(r%incomp_stress)=='moment')then
+       if(ndfmm>=15)then
+          write(*,'(" incompressible: twenty-moment (Pi and Q evolved),", &
+               & "  tau=",1pe10.3,"  tau_q=tau/Pr=",1pe10.3)') &
+               r%dfmm_tau, r%dfmm_tau/max(r%dfmm_prandtl,1.0d-30)
+       else
+          write(*,*)'incompressible: TEN-moment (Pi only; Q not carried at', &
+               ' DFMM=1) -- not the incompressible limit of a DFMM>=2 run'
+       endif
+    endif
+  end subroutine incomp_validate
+
+  subroutine incomp_gather(r,m,ilevel,n,u,pi5,want_pi,q10,want_q, &
+                           tower,want_tower)
+    ! uold -> uniform lattice, by Cartesian key.  For levelmin == levelmax the
+    ! key is a bijection onto the lattice, so this is exact; the caller checks
+    ! that every site was written.
+    use amr_commons, only: run_t, mesh_t
+    use amr_parameters, only: ndim, twotondim
+    use hydro_parameters, only: ipi, iq, il
+    type(run_t)::r
+    type(mesh_t)::m
+    integer,intent(in)::ilevel,n
+    real(kind=8),intent(out)::u(3,n,n,n)
+    real(kind=8),intent(out)::pi5(5,n,n,n)
+    logical,intent(in)::want_pi
+    real(kind=8),intent(out)::q10(10,n,n,n)
+    logical,intent(in)::want_q
+    real(kind=8),intent(out)::tower(18,n,n,n)
+    logical,intent(in)::want_tower
+    integer::igrid,ind,idim,ic(3),nstride,i,j,k,iv
+    integer::nfilled
+    real(kind=8)::irho
+
+    u = 0.0d0; pi5 = 0.0d0; q10 = 0.0d0; tower = 0.0d0
+    nfilled = 0
+    irho = 1.0d0/r%incomp_rho0
+    do igrid=m%head(ilevel),m%tail(ilevel)
+       do ind=1,twotondim
+          do idim=1,ndim
+             nstride = 2**(idim-1)
+             ic(idim) = 2*m%grid(igrid)%ckey(idim) + MOD((ind-1)/nstride,2)
+          end do
+          i = ic(1)+1; j = ic(2)+1; k = ic(3)+1
+          if(i<1.or.i>n.or.j<1.or.j>n.or.k<1.or.k>n)then
+             write(*,*)'incomp_gather: cell outside the lattice',i,j,k,n
+             stop 1
+          endif
+          u(1,i,j,k) = m%uold(ind,2,igrid)*irho
+          u(2,i,j,k) = m%uold(ind,3,igrid)*irho
+          u(3,i,j,k) = m%uold(ind,4,igrid)*irho
+          if(want_pi)then
+             do iv=1,5
+                pi5(iv,i,j,k) = m%uold(ind,ipi+iv-1,igrid)
+             end do
+          endif
+          if(want_q)then
+             ! Q is density-like, like Pi: stored as the moment itself.
+             do iv=1,10
+                q10(iv,i,j,k) = m%uold(ind,iq+iv-1,igrid)
+             end do
+          endif
+          if(want_tower)then
+             ! The mass-like tower is stored as rho X, so divide it out.
+             do iv=1,18
+                tower(iv,i,j,k) = m%uold(ind,il+iv-1,igrid)*irho
+             end do
+          endif
+          nfilled = nfilled+1
+       end do
+    end do
+    if(nfilled/=n**3)then
+       write(*,*)'incomp_gather: filled ',nfilled,' of ',n**3, &
+            ' lattice sites -- the level is not a complete uniform grid'
+       stop 1
+    endif
+  end subroutine incomp_gather
+
+  subroutine incomp_scatter(r,m,ilevel,n,u,pi5,want_pi,q10,want_q, &
+                            tower,want_tower)
+    ! Uniform lattice -> unew, restoring the compressible slots to their
+    ! incompressible values so that every downstream tool keeps working.
+    !
+    ! Writes unew, not uold: the step runs where the hyperbolic solver would,
+    ! and r_set_uold copies unew -> uold immediately afterwards, so a write to
+    ! uold would be clobbered.
+    use amr_commons, only: run_t, mesh_t
+    use amr_parameters, only: ndim, twotondim
+    use hydro_parameters, only: ipi, iq, il
+    type(run_t)::r
+    type(mesh_t)::m
+    integer,intent(in)::ilevel,n
+    real(kind=8),intent(in)::u(3,n,n,n)
+    real(kind=8),intent(in)::pi5(5,n,n,n)
+    logical,intent(in)::want_pi
+    real(kind=8),intent(in)::q10(10,n,n,n)
+    logical,intent(in)::want_q
+    real(kind=8),intent(in)::tower(18,n,n,n)
+    logical,intent(in)::want_tower
+    integer::igrid,ind,idim,ic(3),nstride,i,j,k,iv
+    real(kind=8)::rho0,p0,ek
+
+    rho0 = r%incomp_rho0
+    p0   = r%incomp_p0
+    do igrid=m%head(ilevel),m%tail(ilevel)
+       do ind=1,twotondim
+          do idim=1,ndim
+             nstride = 2**(idim-1)
+             ic(idim) = 2*m%grid(igrid)%ckey(idim) + MOD((ind-1)/nstride,2)
+          end do
+          i = ic(1)+1; j = ic(2)+1; k = ic(3)+1
+          ek = 0.5d0*rho0*(u(1,i,j,k)**2+u(2,i,j,k)**2+u(3,i,j,k)**2)
+          m%unew(ind,1,igrid) = rho0
+          m%unew(ind,2,igrid) = rho0*u(1,i,j,k)
+          m%unew(ind,3,igrid) = rho0*u(2,i,j,k)
+          m%unew(ind,4,igrid) = rho0*u(3,i,j,k)
+          m%unew(ind,5,igrid) = ek + 1.5d0*p0
+          ! Every dfmm slot must be written: unew is not initialised from
+          ! uold on this path, and r_set_uold copies unew -> uold straight
+          ! afterwards, so an unwritten slot would propagate whatever was
+          ! left in the buffer.  Copy first, then overwrite what we evolved.
+          do iv=6,size(m%unew,2)
+             m%unew(ind,iv,igrid) = m%uold(ind,iv,igrid)
+          end do
+          if(want_pi)then
+             do iv=1,5
+                m%unew(ind,ipi+iv-1,igrid) = pi5(iv,i,j,k)
+             end do
+          endif
+          if(want_q)then
+             do iv=1,10
+                m%unew(ind,iq+iv-1,igrid) = q10(iv,i,j,k)
+             end do
+          endif
+          if(want_tower)then
+             do iv=1,18
+                m%unew(ind,il+iv-1,igrid) = rho0*tower(iv,i,j,k)
+             end do
+          endif
+       end do
+    end do
+  end subroutine incomp_scatter
+
+  subroutine incomp_cmpdt(r,g,m,ilevel,mass,ekin,eint,eani,dt)
+    ! Advective and viscous timestep, plus the conserved sums in the slots
+    ! update_time.f90 expects.  The ekin slot carries the TOTAL energy, as in
+    ! the compressible path.
+    use amr_commons, only: run_t, global_t, mesh_t
+    type(run_t)::r
+    type(global_t)::g
+    type(mesh_t)::m
+    integer,intent(in)::ilevel
+    real(kind=8),intent(out)::mass,ekin,eint,eani,dt
+    integer::n
+    logical::use_q
+    real(kind=8),allocatable::u(:,:,:,:),pi5(:,:,:,:),q10(:,:,:,:)
+    real(kind=8),allocatable::tw(:,:,:,:)
+    real(kind=8)::vol,e,cmom
+
+    n = incomp_nside(r)
+    ! Pi is gathered only when the timestep actually needs it, i.e. when the
+    ! third moment is evolved and the Pi <-> Q pair sets a wave speed.
+    use_q = (trim(r%incomp_stress)=='moment') .and. (ndfmm>=15)
+    allocate(u(3,n,n,n),pi5(5,n,n,n),q10(10,n,n,n),tw(18,n,n,n))
+    call incomp_gather(r,m,ilevel,n,u,pi5,use_q,q10,.false.,tw,.false.)
+    ! Note: the caller is responsible for the host copy being current.  On the
+    ! CUDA path r_courant_fine runs after r_set_uold, which has just been
+    ! followed by incomp_step's own device upload, so the host copy is one
+    ! r_set_uold behind: current in u (incomp_scatter wrote it) but one step
+    ! stale in Pi.  The advective limb only needs max|u|; c_mom only needs Pi
+    ! to set a wave speed, where a one-step lag is harmless.
+    vol  = (r%boxlen/dble(n))**3
+    e    = incomp_energy(u,n)*r%incomp_rho0
+    mass = r%incomp_rho0*r%boxlen**3
+    eint = 1.5d0*r%incomp_p0*r%boxlen**3
+    ekin = eint + e*r%boxlen**3
+    eani = 0.0d0
+    cmom = 0.0d0
+    if(use_q) cmom = incomp_qspeed(pi5,n,r%incomp_p0,r%incomp_rho0)
+    dt   = incomp_dt(u,n,r%boxlen,incomp_nu(r),r%courant_factor,cmom)
+    deallocate(u,pi5,q10,tw)
+  end subroutine incomp_cmpdt
+
+  subroutine incomp_step(sim,ilevel,dt)
+    use ramses_commons, only: ramses_t
+#ifdef _CUDA
+    use gpu_runner, only: gpu_uold_to_host, gpu_unew_to_device
+#endif
+    type(ramses_t)::sim
+    integer,intent(in)::ilevel
+    real(kind=8),intent(in)::dt
+    integer::n,nbad
+    logical::use_pi,use_q,use_tw
+    real(kind=8),allocatable::u(:,:,:,:),pi5(:,:,:,:),q10(:,:,:,:)
+    real(kind=8),allocatable::tw(:,:,:,:)
+    real(kind=8)::dv,ef,cmin,gmin,qmax,c0
+
+    n = incomp_nside(sim%r)
+    use_pi = (trim(sim%r%incomp_stress)=='moment')
+    use_q  = use_pi .and. (ndfmm>=15)
+    use_tw = use_pi .and. (ndfmm>=33)
+    allocate(u(3,n,n,n),pi5(5,n,n,n),q10(10,n,n,n),tw(18,n,n,n))
+#ifdef _CUDA
+    ! The device holds the state between steps; bring it home first.
+    call gpu_uold_to_host(sim)
+#endif
+    call incomp_gather(sim%r,sim%m,ilevel,n,u,pi5,use_pi,q10,use_q,tw,use_tw)
+    call incomp_step_rk2(u,n,sim%r%boxlen,dt,incomp_nu(sim%r),pi5, &
+         sim%r%incomp_rho0,use_pi)
+    ! The moment sector follows the velocity, as in the compressible code:
+    ! sources follow transport, and Pi is advected by the velocity that has
+    ! just been made divergence-free.
+    if(use_pi) &
+         call incomp_moment_step(u,pi5,q10,tw(1:3,:,:,:),tw(4:9,:,:,:), &
+              tw(10:18,:,:,:),n,sim%r%boxlen,dt,sim%r%incomp_p0, &
+              sim%r%incomp_rho0,sim%r%dfmm_tau,sim%r%dfmm_prandtl, &
+              use_q,use_tw)
+    call incomp_scatter(sim%r,sim%m,ilevel,n,u,pi5,use_pi,q10,use_q,tw,use_tw)
+#ifdef _CUDA
+    call gpu_unew_to_device(sim)
+#endif
+    if(sim%r%incomp_diag)then
+       dv = incomp_div_max(u,n,sim%r%boxlen)
+       ef = incomp_dealias_frac(u,n,sim%r%boxlen)
+       write(*,'(" incomp level=",I2,"  spectral div ",1pe10.3, &
+            & "  E_trunc/E ",1pe10.3,"  max|u| ",1pe10.3)') &
+            ilevel, dv, ef, maxval(abs(u))
+       if(use_pi)then
+          cmin = incomp_cone_min(pi5,n,sim%r%incomp_p0)
+          if(use_tw)then
+             gmin = incomp_rank_min(pi5,tw(4:9,:,:,:),tw(10:18,:,:,:),n, &
+                  sim%r%incomp_p0,sim%r%incomp_rho0,nbad)
+             write(*,'(" incomp level=",I2,"  min lam(P)/p0 ",1pe10.3, &
+                  & "  max |Pi|/p0 ",1pe10.3,"  min g(rank) ",1pe10.3, &
+                  & "  n(Gamma<0)=",I0)') &
+                  ilevel, cmin, maxval(abs(pi5))/sim%r%incomp_p0, gmin, nbad
+          else
+             write(*,'(" incomp level=",I2,"  min lam(P)/p0 ",1pe10.3, &
+                  & "  max |Pi|/p0 ",1pe10.3)') &
+                  ilevel, cmin, maxval(abs(pi5))/sim%r%incomp_p0
+          endif
+          if(use_q)then
+             ! q_i = Q_ijj/2 in the packed ordering
+             ! (xxx,yyy,zzz,xxy,xxz,yyx,yyz,zzx,zzy,xyz).  Its
+             ! Chapman-Enskog value is zero at first order here, so this
+             ! number IS the departure from the first-order closure -- it
+             ! plays the role that ||q - q_CE|| plays in the compressible
+             ! ledger, with q_CE = 0.
+             qmax = 0.5d0*max( &
+                  maxval(abs(q10(1,:,:,:)+q10(6,:,:,:)+q10(8,:,:,:))), &
+                  maxval(abs(q10(4,:,:,:)+q10(2,:,:,:)+q10(9,:,:,:))), &
+                  maxval(abs(q10(5,:,:,:)+q10(7,:,:,:)+q10(3,:,:,:))))
+             c0 = sqrt(sim%r%incomp_p0/sim%r%incomp_rho0)
+             write(*,'(" incomp level=",I2,"  max |q|/(p0 c0) ",1pe10.3, &
+                  & "  max |Q| ",1pe10.3)') &
+                  ilevel, qmax/(sim%r%incomp_p0*c0), maxval(abs(q10))
+          endif
+       endif
+    endif
+    deallocate(u,pi5,q10,tw)
+  end subroutine incomp_step
+
+end module incomp_step_module

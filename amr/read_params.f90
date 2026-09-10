@@ -10,6 +10,7 @@ subroutine m_read_params(pst)
   use ramses_commons, only: pst_t
   use mdl_module
   use movie_module, only: set_movie_vars
+  use incomp_step_module, only: incomp_validate
   use rt_params_module
   use cr_params_module
   use constants
@@ -106,6 +107,7 @@ subroutine m_read_params(pst)
   ! Output parameters
   integer::noutput=1          ! Total number of outputs
   integer::foutput=1000000    ! Frequency of outputs
+  logical::tout_exact=.false.  ! Clip dt to land exactly on the next tout
   integer::output_mode=0      ! Output mode (for hires runs)
   logical::gadget_output=.false. ! Output in gadget format
   real(kind=8)::bkp_time_hrs=2   ! Backup file frequency in hours
@@ -320,6 +322,32 @@ subroutine m_read_params(pst)
   real(kind=8)::smallr=1.d-10
   character(LEN=10)::scheme='muscl'
   character(LEN=10)::riemann='llf'
+  ! incompressible-rung parameters (doc/incompressible.md)
+  logical ::incompressible=.false.
+  real(kind=8)::incomp_p0=1.0d0
+  real(kind=8)::incomp_rho0=1.0d0
+  character(LEN=10)::incomp_stress='viscous'
+  logical ::incomp_diag=.true.
+  ! Transport coefficients, shared by every rung (see amr_commons.f90)
+  real(kind=8)::dfmm_tau=1.0d-3
+  real(kind=8)::dfmm_prandtl=0.6666666666666667d0
+#ifdef DFMM
+  logical ::dfmm_source=.true.
+  logical ::dfmm_diag=.true.
+  logical ::dfmm_fatal_realizability=.false.
+  character(LEN=10)::dfmm_closure='evolve'
+  real(kind=8)::dfmm_ic_shear=0.0d0
+  real(kind=8)::dfmm_ic_pi=0.0d0
+  real(kind=8)::dfmm_ic_drho=0.0d0
+  real(kind=8)::dfmm_ic_uadv=0.0d0
+  real(kind=8)::dfmm_ic_sigmax=2.0d-2
+#endif
+  ! INIT=BLOWUP parameters (available in every build, see amr_commons.f90)
+  real(kind=8)::blowup_delta=1.0d-1
+  real(kind=8)::blowup_rho0=1.0d0
+  real(kind=8)::blowup_p0=1.0d0
+  integer     ::blowup_nwave=1
+  logical     ::blowup_init_ns=.false.
   character(LEN=10)::riemann2d='none'
   logical ::induction=.false.
   logical ::entropy=.false.
@@ -594,7 +622,7 @@ subroutine m_read_params(pst)
        & ,static_mesh,static_gas,geom,overload,nsuperoct &
        & ,clump_only
   ! Output parameters
-  namelist/output_params/foutput,aout,tout,output_mode &
+  namelist/output_params/foutput,aout,tout,output_mode,tout_exact &
        & ,tend,delta_tout,aend,delta_aout,gadget_output &
        & ,run_time_hrs,bkp_time_hrs,bkp_last_min,bkp_modulo,nfile &
        & ,output_part,output_grav,output_hydro,output_amr
@@ -655,6 +683,19 @@ subroutine m_read_params(pst)
        & ,slope_type,slope_mag_type,difmag,etamag,gamma_rad &
        & ,dual_energy,T2_fix,induction,entropy,sgs_turb,equilibrium_sgs,riemann,riemann2d,constant_gravity &
        & ,niter_riemann,scheme,switch_llf_dmin,switch_llf_pmin,smagorinsky_lilly_constant
+  ! incompressible-rung parameters
+  namelist/incomp_params/incompressible,incomp_p0,incomp_rho0 &
+       & ,incomp_stress,incomp_diag,dfmm_tau,dfmm_prandtl
+#ifdef DFMM
+  ! dfmm solver parameters
+  namelist/dfmm_params/dfmm_tau,dfmm_prandtl,dfmm_source,dfmm_diag &
+       & ,dfmm_fatal_realizability,dfmm_closure &
+       & ,dfmm_ic_shear,dfmm_ic_pi,dfmm_ic_drho,dfmm_ic_uadv &
+       & ,dfmm_ic_sigmax
+#endif
+  ! INIT=BLOWUP test-problem parameters
+  namelist/blowup_params/blowup_delta,blowup_rho0,blowup_p0,blowup_nwave &
+       & ,blowup_init_ns
   ! Grid refinement parameters
   namelist/refine_params/x_refine,y_refine,z_refine,r_refine &
        & ,a_refine,b_refine,exp_refine,jeans_refine,mass_cut_refine &
@@ -1011,6 +1052,17 @@ subroutine m_read_params(pst)
   rewind(1)
   if(hydro)read(1,NML=hydro_params)
   rewind(1)
+#ifdef DFMM
+  read(1,NML=dfmm_params,END=1090)
+1090 continue
+  rewind(1)
+#endif
+  read(1,NML=blowup_params,END=1091)
+1091 continue
+  rewind(1)
+  read(1,NML=incomp_params,END=1092)
+1092 continue
+  rewind(1)
   read(1,NML=units_params,END=105)
 105 continue
   rewind(1)
@@ -1329,6 +1381,7 @@ subroutine m_read_params(pst)
 
   s%r%noutput=noutput
   s%r%foutput=foutput
+  s%r%tout_exact=tout_exact
   s%r%aout=aout
   s%r%tout=tout
   s%r%output_mode=output_mode
@@ -1463,6 +1516,82 @@ subroutine m_read_params(pst)
   if(riemann=='llf')s%r%riemann=solver_llf
   if(riemann=='hll')s%r%riemann=solver_hll
   if(riemann=='hllc')s%r%riemann=solver_hllc
+#endif
+  s%r%blowup_delta=blowup_delta
+  s%r%blowup_rho0=blowup_rho0
+  s%r%blowup_p0=blowup_p0
+  s%r%blowup_nwave=blowup_nwave
+  s%r%blowup_init_ns=blowup_init_ns
+  if(blowup_delta<=0.0d0)then
+     write(*,*)'blowup_delta must be > 0; got ',blowup_delta
+     call mdl_abort(s%mdl)
+  endif
+  ! Transport coefficients and the incompressible-rung selectors are shared
+  ! by every rung, so they sit outside the DFMM guard: rung 1 runs in a
+  ! DFMM=0 binary and must still take nu = incomp_p0*dfmm_tau/incomp_rho0.
+  s%r%dfmm_tau=dfmm_tau
+  s%r%dfmm_prandtl=dfmm_prandtl
+  s%r%incompressible=incompressible
+  s%r%incomp_p0=incomp_p0
+  s%r%incomp_rho0=incomp_rho0
+  s%r%incomp_stress=incomp_stress
+  s%r%incomp_diag=incomp_diag
+#ifdef DFMM
+  s%r%dfmm_source=dfmm_source
+  s%r%dfmm_diag=dfmm_diag
+  s%r%dfmm_fatal_realizability=dfmm_fatal_realizability
+  ! 'ns' turns the identical solver into compressible Navier-Stokes-Fourier
+  ! with explicit viscosity mu = p*dfmm_tau: Pi and Q are set to their
+  ! Chapman-Enskog values each step instead of being evolved.  That makes the
+  ! comparison run differ from the moment run in the closure ALONE -- same
+  ! initial condition, grid, Riemann solver and transport coefficients.
+  if(trim(dfmm_closure)=='evolve')then
+     s%r%dfmm_closure=0
+  else if(trim(dfmm_closure)=='ns')then
+     s%r%dfmm_closure=1
+     if(dfmm_tau<=0.0d0)then
+        write(*,*)"dfmm_closure='ns' needs dfmm_tau > 0 (mu = p*dfmm_tau)"
+        call mdl_abort(s%mdl)
+     endif
+  else
+     write(*,*)"dfmm_closure must be 'evolve' or 'ns'; got ",trim(dfmm_closure)
+     call mdl_abort(s%mdl)
+  endif
+  s%r%dfmm_ic_shear=dfmm_ic_shear
+  s%r%dfmm_ic_pi=dfmm_ic_pi
+  s%r%dfmm_ic_drho=dfmm_ic_drho
+  s%r%dfmm_ic_uadv=dfmm_ic_uadv
+  s%r%dfmm_ic_sigmax=dfmm_ic_sigmax
+  ! tau_q = tau_Pi / Pr, so a non-positive Prandtl number is meaningless.
+  ! Sxx_ij = sigma_x0^2 delta_ij must be invertible: the phase-space rank
+  ! indicator is the Schur complement Svv - Sxv^T Sxx^-1 Sxv, which is
+  ! undefined for a point packet.
+  if(ndfmm>=33 .and. dfmm_ic_sigmax<=0.0d0)then
+     write(*,*)'DFMM stage 4 requires dfmm_ic_sigmax > 0; got ',dfmm_ic_sigmax
+     call mdl_abort(s%mdl)
+  endif
+  if(dfmm_prandtl<=0.0d0)then
+     write(*,*)'DFMM requires dfmm_prandtl > 0; got ',dfmm_prandtl
+     call mdl_abort(s%mdl)
+  endif
+  ! The ten-moment trace identity tr P = 3p = 2 rho e fixes the adiabatic
+  ! index; any other value makes p and the internal energy inconsistent.
+  if(abs(gamma-5.0d0/3.0d0)>1.0d-12)then
+     write(*,*)'DFMM requires gamma = 5/3 (monatomic); got ',gamma
+     call mdl_abort(s%mdl)
+  endif
+  ! Only HLL and LLF are implemented for the moment system: HLLC's middle
+  ! state has no standard contact reconstruction for the pressure anisotropy.
+  if(riemann/='hll' .and. riemann/='llf')then
+     write(*,*)'DFMM requires riemann=hll or llf; got ',trim(riemann)
+     call mdl_abort(s%mdl)
+  endif
+  ! The Metal kernel hardwires the dfmm block to ivar 6..5+ndfmm, so no other
+  ! extra fields may be configured alongside it at Stage 1.
+  if(nvar/=5+ndfmm)then
+     write(*,*)'DFMM requires NVAR = 5 + NDFMM (no NENER/NPSCAL/NMETAL/NION); got nvar=',nvar
+     call mdl_abort(s%mdl)
+  endif
 #endif
 #ifdef MHD
   if(riemann=='llf')s%r%riemann=solver_llf
@@ -1620,6 +1749,10 @@ subroutine m_read_params(pst)
   s%r%no_inflow=no_inflow
   s%r%bound_levelmin=bound_levelmin
   s%r%box_size=box_size
+  ! The incompressible rungs impose a configuration (single level, periodic,
+  ! power-of-two grid); reject anything else here rather than approximating it
+  ! silently.  doc/incompressible.md Section 3.
+  call incomp_validate(s%r)
   s%r%box_xmin=box_xmin
   s%r%box_xmax=box_xmax
   s%r%box_ymin=box_ymin

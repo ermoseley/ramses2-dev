@@ -1,0 +1,156 @@
+The low-resolution sweep of the blowup ("vortex") problem across all four
+rungs and a ladder in K, run to t_star (doc/dfmm_3d.md Sec. 7 Stage 5,
+doc/incompressible.md Sec. 0).
+
+Compile ONE binary for all four rungs; ALWAYS make clean when changing INIT=
+or DFMM=.
+    cd bin && make clean && make COMPILER=METAL NDIM=3 HYDRO=1 DFMM=4 INIT=BLOWUP
+
+  rung 1  incompressible=.true.   incomp_stress='viscous'   (Newtonian, div u = 0)
+  rung 2  incompressible=.false.  dfmm_closure='ns'         (Newtonian, compressible)
+  rung 3  incompressible=.false.  dfmm_closure='evolve'     (moments,  compressible)
+  rung 4  incompressible=.true.   incomp_stress='moment'    (moments,  div u = 0)
+
+Each pair differs in ONE namelist entry, so the 2x2 isolates closure from
+compressibility.  Do not write an ampersand-prefixed group name in this
+header: gfortran's namelist reader treats it as the start of that group.
+
+WHAT t_star IS, AND WHY IT IS blowup_delta.
+The note parameterises the construction by the REMAINING time
+Delta = t_star - t (its Eq. 17), and the strain at the origin is exactly
+S(0,t) = (1/Delta) diag(-2,-2,4), ||S||_op = 4/Delta (its Eq. 19).  The
+initial condition here freezes that field at Delta = blowup_delta, so in the
+construction's own clock the remaining time at t = 0 IS blowup_delta and
+
+    t_star = blowup_delta ,        t_def = blowup_delta/4 .
+
+Running to t = t_star is therefore running four deformation times, i.e. all
+the way to the construction's singular time.  The earlier namelists
+(dfmm_blowup3d.nml, incomp_blowup3d.nml) stop at tout = Delta/4 = t_star/4,
+one deformation time; this sweep goes to t_star and samples the quarters, so
+the ORDERING of the indicator failures in time is visible rather than a
+single snapshot.
+
+IMPORTANT CAVEAT.  There is no forcing.  The construction needs a smooth
+external force to stay on its trajectory; condinit sets the instantaneous
+local strain field and lets the gas evolve freely from it (see
+hydro/condinit.f90, #if INIT==BLOWUP).  So this is NOT a simulation of the
+construction, and the flow does not actually blow up at t_star.  The
+question it answers is the note's question: starting from the constructed
+state at remaining time Delta, do the assumptions that make a velocity-only
+description possible survive?  t_star is the reference clock, not a
+predicted event in the run.
+
+CALIBRATION (Family B, holding the dissipation time equal to the deformation
+time; derivation in namelist/dfmm_blowup3d.nml).  With
+    Delta = 0.4483/sqrt(K) ,     dfmm_tau = 0.056037*sqrt(K)
+the governing group K = 8 mu/(p Delta) = 8 dfmm_tau/Delta is reproduced to
+1e-5, and the Newtonian prediction is lam_min(P_NS)/p = 1 - K, so rung 2
+should cross zero at K = 1 while rungs 3 and 4 should not.
+
+    K      Delta = t_star   dfmm_tau     Ma      lam_min(P_NS)/p
+   ------------------------------------------------------------
+   0.10       1.41765       0.01772     0.348        +0.90
+   0.25       0.89660       0.02802     0.550        +0.75
+   0.50       0.63399       0.03962     0.778        +0.50
+   1.00       0.44830       0.05604     1.100         0.00
+   2.00       0.31700       0.07925     1.556        -1.00
+   3.00       0.25883       0.09706     1.905        -2.00
+
+The Ma column is why the compressible rungs cannot be run at large K and
+small Mach at once: a one-mode field forces Kn*Ma = 0.494 K.  That confound
+is the reason rungs 1 and 4 exist.
+
+OUTPUT TIMES.  tout below is the K = 1 quarter ladder,
+t_star*(1/4, 1/2, 3/4, 1); scale all four by sqrt(1/K) for another rung of
+the ladder.  tout_exact=.true. is REQUIRED here, not optional: the
+deliverable is the value of an indicator AT a stated fraction of t_star, and
+without it the snapshot lands up to a full dt past the request (measured:
+0.9% on Metal, 11.9% on the CUDA sedov test).
+
+RESOLUTION.  levelmin = levelmax = 4 (16^3) is the low-resolution sweep --
+cheap enough to run 24 configurations, and adequate for the ORDERING of the
+indicators.  It is NOT adequate for their converged values: doc/dfmm_3d.md
+Sec. 7 shows sigma_max(dL/dx) and min g are resolution-limited extrema that
+keep growing with refinement, so treat Kn_local from this sweep as a lower
+bound.  min lam(P)/p does converge and is the number to trust here.
+
+&RUN_PARAMS
+hydro=.true.
+ncontrol=1000
+nrestart=0
+nremap=0
+nsubcycle=10*1
+verbose=.false.
+nstepmax=200000
+nsuperoct=2
+/
+
+&AMR_PARAMS
+levelmin=4
+levelmax=4
+ngridtot=800
+ncachemax=800
+nexpand=1
+boxlen=1.0
+/
+
+&INIT_PARAMS
+nregion=1
+region_type(1)='square'
+x_center=0.5
+y_center=0.5
+z_center=0.5
+length_x=10.0
+length_y=10.0
+length_z=10.0
+exp_region=10.0
+d_region=1.0
+u_region=0.0
+v_region=0.0
+w_region=0.0
+p_region=1.0
+/
+
+&BLOWUP_PARAMS
+blowup_delta=0.4483
+blowup_rho0=1.0
+blowup_p0=1.0
+blowup_nwave=1
+blowup_init_ns=.false.
+/
+
+&OUTPUT_PARAMS
+foutput=1000000   ! >0 so the tout-driven snapshot fires (amr_step.f90:107)
+tout=0.112075,0.22415,0.336225,0.4483
+tout_exact=.true. ! REQUIRED: the answer is an indicator AT a fraction of t_star
+/
+
+&HYDRO_PARAMS
+gamma=1.6666666666666667
+courant_factor=0.4
+slope_type=1
+riemann='hll'
+/
+
+&DFMM_PARAMS
+! dfmm_tau appears in BOTH groups below and read_params reads INCOMP_PARAMS
+! second (amr/read_params.f90:1063), so the INCOMP_PARAMS value wins.  Keep
+! them equal; the sweep driver sets both.
+dfmm_tau=0.056037
+dfmm_prandtl=0.6666666666666667
+dfmm_source=.true.
+dfmm_closure='evolve'
+dfmm_diag=.true.
+dfmm_fatal_realizability=.false.
+dfmm_ic_sigmax=0.02
+/
+
+&INCOMP_PARAMS
+incompressible=.false.
+incomp_p0=1.0
+incomp_rho0=1.0
+incomp_stress='moment'
+incomp_diag=.true.
+dfmm_tau=0.056037
+/

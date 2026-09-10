@@ -1,0 +1,122 @@
+This namelist runs the dfmm verification gates (doc/dfmm_3d.md Sec. 7).
+Compile using:
+  cd bin && make COMPILER=METAL NDIM=3 HYDRO=1 DFMM=1 INIT=DFMMTEST   (stage 1)
+  cd bin && make COMPILER=METAL NDIM=3 HYDRO=1 DFMM=2 INIT=DFMMTEST   (stage 2)
+  cd bin && make COMPILER=METAL NDIM=3 HYDRO=1 DFMM=3 INIT=DFMMTEST   (stage 3)
+  cd bin && make COMPILER=METAL NDIM=3 HYDRO=1 DFMM=4 INIT=DFMMTEST   (stage 4)
+
+ALWAYS run 'make clean' when changing INIT= or DFMM=.  The Makefile does not
+treat either as a dependency of condinit.o, so without it the binary silently
+keeps the previous problem's initial condition.
+
+Uniform p=1 with a divergence-free shear layer u_x = V0 sin(2 pi z / L), an
+optional initial pressure anisotropy Pi_xx = A, Pi_yy = Pi_zz = -A/2, and an
+optional isobaric density perturbation rho = 1 + D sin(2 pi z / L).
+
+  Gate 2 (relaxation):    dfmm_ic_shear=0.0  dfmm_ic_pi=0.1  dfmm_tau=0.05
+                          -> |Pi| must decay as exp(-t/tau)
+  Gate 3 (NS limit):      dfmm_ic_shear=0.1  dfmm_ic_pi=0.0  dfmm_tau=1e-4
+                          -> |Pi|/p -> 2 p tau |S0|, and |Pi-Pi_NS| -> 0
+  Gate 4 (collisionless): dfmm_ic_shear=0.5  dfmm_ic_pi=0.0  dfmm_tau=-1.0
+                          -> must stay realizable, min lam(P)/p > 0
+  Gate 5 (Fourier limit,  dfmm_ic_drho=0.1   dfmm_tau=1e-4
+          stage 2 only)   dfmm_prandtl=0.6666666666666667
+                          -> q_z -> -(5/2) tau_q p d_z theta with
+                             tau_q = tau/Pr, and |q-q_CE| -> 0
+
+  Gate 6 (uniform advect,  dfmm_ic_uadv=0.3   dfmm_tau=-1.0   tout=0.2
+          stage 3-4)       -> a flow with no velocity gradient, so everything
+                              has a closed form:
+                                D_i    = -uadv t
+                                Sxv_ij = theta t delta_ij
+                                Sxx_ij = (sigma_x0^2 + theta t^2) delta_ij
+                                g      = sigma_x0/sqrt(sigma_x0^2 + theta t^2)
+                              and |rho/detJ-1| = 0, max sig(dL/dx) = 1.
+                              Read the fields from the snapshot; the run log
+                              only carries the reduced diagnostics.
+
+  Gate 7 (frozen shear,    dfmm_ic_shear=0.01  dfmm_tau=-1.0  tout=0.037
+          stage 4)         dfmm_source=.false.
+                          -> with the closure production off, Pi and Q stay at
+                             zero, so Svv = theta I exactly and the velocity
+                             field u_x = V0 sin(2 pi z) is a steady solution.
+                             That isolates the -Sxv G^T term:
+                               Sxv_zx = -g theta t^2/2,  Sxx_xz = -g theta t^3/6
+                             with g = V0 [sin(k(z+dx))-sin(k(z-dx))]/(2dx), the
+                             code's own centred difference.  Sxv_xz, Sxv_xy and
+                             Sxx_xy must be identically zero.
+                             Keep t k c_s < ~0.3 so the numerical damping of
+                             the shear stays below the signal, and compare
+                             against the discrete sums, not the continuum
+                             limit -- the O(1/N) difference is not small at
+                             these step counts.
+
+  Gate 8 (diffusive limit, dfmm_ic_uadv=0.3   dfmm_tau=0.01   tout=0.5
+          stage 4)         -> t >> tau, so the AP map must reach
+                               Sxv -> tau theta,
+                               Sxx -> sigma_x0^2 + 2 tau theta (t - tau)
+                             i.e. Brownian spreading at D = tau theta = nu.
+                             This is the gate that distinguishes the AP map
+                             from the reference's post-source decay, which
+                             would give Sxv -> 0 instead.
+
+&RUN_PARAMS
+hydro=.true.
+ncontrol=1
+nrestart=0
+nremap=0
+nsubcycle=10*1
+verbose=.false.
+nstepmax=12
+nsuperoct=2
+/
+
+&AMR_PARAMS
+levelmin=4
+levelmax=4
+ngridtot=400000
+ncachemax=200000
+nexpand=1
+boxlen=1.0
+/
+
+&INIT_PARAMS
+nregion=1
+region_type(1)='square'
+x_center=0.5
+y_center=0.5
+z_center=0.5
+length_x=10.0
+length_y=10.0
+length_z=10.0
+exp_region=10.0
+d_region=1.0
+u_region=0.0
+v_region=0.0
+w_region=0.0
+p_region=1.0
+/
+
+&OUTPUT_PARAMS
+foutput=0
+tout=0.3
+/
+
+&HYDRO_PARAMS
+gamma=1.6666666666666667
+courant_factor=0.8
+slope_type=1
+riemann='hll'
+/
+
+&DFMM_PARAMS
+dfmm_tau=1e-4
+dfmm_prandtl=0.6666666666666667
+dfmm_source=.true.
+dfmm_diag=.true.
+dfmm_ic_shear=0.1
+dfmm_ic_pi=0.0
+dfmm_ic_drho=0.0
+dfmm_ic_uadv=0.0
+dfmm_ic_sigmax=0.02
+/

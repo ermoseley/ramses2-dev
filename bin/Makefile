@@ -18,6 +18,7 @@ NENER = 0
 NMETAL = 0
 TURB = 0
 TRCFLX = 0
+DFMM = 0
 N_HYDROGEN_IONS = 0
 N_H2 = 0
 N_HELIUM_IONS = 0
@@ -61,7 +62,40 @@ ifeq ($(DO_CR),1)
    NENER := $(NENER)+$(NCRGRP)
    DEFINES += -DMHD -DDO_CR -DNCRGRP=$(NCRGRP)
 endif
-NVAR := $(NHYDRO)+$(NENER)+$(NPSCAL)+$(NMETAL)+$(NION)
+# dfmm moment fields (see doc/dfmm_3d.md).  DFMM selects the stage:
+#   DFMM=1  NDFMM=5   Pi_xx, Pi_yy, Pi_xy, Pi_xz, Pi_yz            at ivar 6..10
+#   DFMM=2  NDFMM=15  the above plus the 10 components of Q_ijk     at ivar 11..20
+#   DFMM=3  NDFMM=18  the above plus the Lagrangian label rho L_i   at ivar 21..23
+#   DFMM=4  NDFMM=33  the above plus the phase-space covariance
+#                     rho Sxx_ij (6) at ivar 24..29 and
+#                     rho Sxv_ij (9) at ivar 30..38
+# This branch is the CUDA Fortran port: the kernels live in gpu/gpu_dfmm.cuf.
+# The Metal implementation is on dfmm_3d_metal and is deliberately not here.
+ifeq ($(strip $(DFMM)),1)
+   NDFMM = 5
+else ifeq ($(strip $(DFMM)),2)
+   NDFMM = 15
+else ifeq ($(strip $(DFMM)),3)
+   NDFMM = 18
+else ifeq ($(strip $(DFMM)),4)
+   NDFMM = 33
+else ifeq ($(strip $(DFMM)),0)
+   NDFMM = 0
+else ifeq ($(strip $(DFMM)),)
+   NDFMM = 0
+else
+   $(error DFMM must be 0, 1, 2, 3 or 4; got '$(DFMM)'. A value with a space \
+in it usually means a shell quoting bug -- zsh does not word-split an \
+unquoted "$$var", so `make $$cfg` with cfg="DFMM=4 INIT=BLOWUP" reaches make \
+as ONE argument and silently selects no dfmm fields.)
+endif
+# Gate on the resulting field count, not on the stage selector: an explicitly
+# empty DFMM= on the command line is not equal to 0 and would otherwise define
+# -DDFMM with an empty -DNDFMM=.
+ifneq ($(NDFMM),0)
+   DEFINES += -DDFMM -DNDFMM=$(NDFMM)
+endif
+NVAR := $(NHYDRO)+$(NENER)+$(NPSCAL)+$(NMETAL)+$(NION)+$(NDFMM)
 #############################################################################
 # Collect git version and Makefile options
 GITBRANCH = $(shell git rev-parse --abbrev-ref HEAD)
@@ -218,6 +252,17 @@ endif
 #############################################################################
 # Metal compiler (Apple Silicon, always NPRE=4/float32)
 ifeq ($(COMPILER),METAL)
+   # This is the CUDA branch: the dfmm kernels are CUDA Fortran
+   # (gpu/gpu_dfmm.cuf) and there is no dfmm.metal here.  A DFMM>0 METAL build
+   # would compile the compiler-agnostic host side and then dispatch to
+   # metal_godunov, which knows nothing about ivar 6..NVAR, leaving the dfmm
+   # fields unadvected while the run called itself a dfmm run.  Fail instead.
+   # This is the mirror of the guard dfmm_3d_metal puts on COMPILER=NVHPC.
+   ifneq ($(NDFMM),0)
+      $(error DFMM on this branch is the CUDA Fortran port; there is no \
+dfmm.metal here.  Build with COMPILER=NVHPC, or use the dfmm_3d_metal branch \
+for the Metal implementation.)
+   endif
    # _METAL define gates the Metal path in CPU source files.
    # NPRE=4 is hardcoded: Apple GPU has no float64.
    # No MPI support.
@@ -285,7 +330,7 @@ endif
 LIBS += $(LIBMPI) $(LIBFFTW)
 #############################################################################
 # Sources directories are searched in this exact order
-VPATH = $(PATCH):$(GPU_PATH):$(METAL_PATH):../feedback:../sink:../star:../cooling:../turb:../hydro:../pm:../poisson:../amr:../clump:../mdl1:../rt:../cr:../lightcone
+VPATH = $(PATCH):$(GPU_PATH):$(METAL_PATH):../incomp:../feedback:../sink:../star:../cooling:../turb:../hydro:../pm:../poisson:../amr:../clump:../mdl1:../rt:../cr:../lightcone
 #############################################################################
 # Modules
 MODOBJ = amr_parameters.o hydro_parameters.o rt_parameters.o cr_parameters.o oct_commons.o \
@@ -301,7 +346,8 @@ ifeq ($(DO_RTZ),1)
 else
    MODOBJ += neq_cooling_module.o
 endif
-MODOBJ += init_neq_chem.o clfind_commons.o turb_commons.o mdl_commons.o mdl.o \
+MODOBJ += incomp_fft.o incomp_ops.o incomp_solver.o incomp_moments.o \
+         init_neq_chem.o clfind_commons.o turb_commons.o mdl_commons.o mdl.o \
 	 cross_sections_module.o rt_spectra.o  \
 	 ramses_commons.o call_back.o cache_commons.o cache.o gadgetreadfile.o \
 	 boundaries.o output_hydro.o output_poisson.o output_part.o output_rt.o output_cr.o \
@@ -309,13 +355,14 @@ MODOBJ += init_neq_chem.o clfind_commons.o turb_commons.o mdl_commons.o mdl.o \
 ifeq ($(COMPILER),NVHPC)
    MODOBJ += cub_module_radix_sort_c.o cub_module_radix_sort_f.o \
       cub_inclusive_scan_c.o cub_inclusive_scan_f.o gpu_utils.o gpu_hydro.o \
-      gpu_cooling.o gpu_star.o gpu_feedback.o gpu_rho.o gpu_mg.o gpu_turb.o gpu_refine.o gpu_flag.o gpu_runner.o \
+      gpu_cooling.o gpu_star.o gpu_feedback.o gpu_rho.o gpu_mg.o gpu_turb.o gpu_refine.o gpu_flag.o \
+      gpu_dfmm.o gpu_runner.o \
       gpu_clump.o gpu_part.o gpu_manager.o
 endif
 ifeq ($(COMPILER),METAL)
    MODOBJ := metal_interface.o metal_bridge.o $(MODOBJ) metal_runner.o
 endif
-MODOBJ +=  multigrid_fine_coarse.o rho_fine.o upload.o init_xion.o \
+MODOBJ +=  incomp_step.o multigrid_fine_coarse.o rho_fine.o upload.o init_xion.o \
 	 rt_flux_module.o rt_godunov_fine.o rt_input_condinit.o rt_init_flow_fine.o rt_units.o  \
 	 rt_condinit.o rt_flag.o rt_upload.o interpol_rt.o rt_godunov_utils.o read_rt_params.o \
 	 cr_flux_module.o cr_godunov_fine.o cr_source_terms.o cr_input_condinit.o cr_init_flow_fine.o  \

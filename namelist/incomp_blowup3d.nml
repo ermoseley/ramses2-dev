@@ -1,0 +1,131 @@
+The blowup construction run with div u = 0 (doc/incompressible.md).
+
+Compile.  ALWAYS 'make clean' when changing INIT= or DFMM=; the Makefile does
+not treat either as a dependency of condinit.o.
+
+  rung 1, incompressible Navier-Stokes (no moment fields needed):
+    cd bin && make clean && make COMPILER=METAL NDIM=3 HYDRO=1 DFMM=0 INIT=BLOWUP
+    ... with incomp_stress='viscous'
+
+  rung 4, incompressible dfmm (evolved Pi, plus the second frame at DFMM=4):
+    cd bin && make clean && make COMPILER=METAL NDIM=3 HYDRO=1 DFMM=4 INIT=BLOWUP
+    ... with incomp_stress='moment'
+
+The two rungs differ in ONE namelist entry, incomp_stress, and share
+dfmm_tau, so they differ in the closure alone.  Rungs 2 and 3 (compressible)
+are namelist/dfmm_blowup3d.nml with dfmm_closure='ns' and 'evolve'
+respectively, which likewise differ in one entry.  That is the 2x2.
+
+CALIBRATION.  nu = incomp_p0*dfmm_tau/incomp_rho0, i.e. mu = p_0*tau, the same
+relation the compressible rungs use.  The governing group is unchanged,
+
+    K = 8 mu / (p_0 Delta) = 8 dfmm_tau / Delta
+
+so a rung here is comparable with the compressible rung of the same K.  The
+Family-B calibration (see namelist/dfmm_blowup3d.nml for the derivation) sets
+Delta = 0.4483/sqrt(K) and dfmm_tau = 0.056037*sqrt(K), holding the
+dissipation time equal to the deformation time.  Run for one deformation time,
+tout = Delta/4.  The values below are K = 1.
+
+WHAT IS DIFFERENT FROM THE COMPRESSIBLE RUNGS, and worth knowing before
+reading a log:
+  * There is no Mach number.  The Kn*Ma = 0.494 K identity that forces the
+    compressible runs transonic at K ~ 1 does not apply, which is the whole
+    point of these rungs.
+  * dt comes from the advective CFL, not the acoustic one, so courant_factor
+    means something different and 0.4 is a reasonable value.
+  * econs is meaningless: eint is pinned at 3 p_0/2, so dissipated kinetic
+    energy leaves the budget instead of heating the gas.  Watch mcons (exactly
+    zero) and the reported max|u|.
+  * The run prints the spectral divergence every step.  It should stay at
+    1e-15; anything larger is a bug, not a tolerance.
+  * Watch E_trunc/E, the energy in the band the 2/3 dealiasing removes.  It
+    announces under-resolution before any other diagnostic does.
+
+RESOLUTION.  levelmin must equal levelmax, and the grid must be a power of
+two; anything else is rejected at startup.  The solver is host-side float64,
+so cost scales as the FFT: level 5 (32^3) is ~0.2 s/step, level 6 (64^3) is
+~2 s/step.
+
+EXACT OUTPUT TIME.  tout_exact=.true. clips the coarse timestep so the
+snapshot lands ON tout rather than on the first step past it.  Without it the
+overshoot is up to a full dt -- 0.9% of t in a measured level-5 run -- and for
+a blowup study the deliverable IS the state at a predicted time t_star, where
+the realizability and Knudsen indicators change on the timestep scale.  With
+it the landing is exact to 2e-14 relative.  It costs at most one shortened
+step per output and is off by default, so set it in every run whose answer is
+a value AT a time rather than a trend.
+
+&RUN_PARAMS
+hydro=.true.
+ncontrol=1
+nrestart=0
+nremap=0
+nsubcycle=10*1
+verbose=.false.
+nstepmax=100000
+nsuperoct=2
+/
+
+&AMR_PARAMS
+levelmin=5
+levelmax=5
+ngridtot=6000
+ncachemax=3000
+nexpand=1
+boxlen=1.0
+/
+
+&INIT_PARAMS
+nregion=1
+region_type(1)='square'
+x_center=0.5
+y_center=0.5
+z_center=0.5
+length_x=10.0
+length_y=10.0
+length_z=10.0
+exp_region=10.0
+d_region=1.0
+u_region=0.0
+v_region=0.0
+w_region=0.0
+p_region=1.0
+/
+
+&BLOWUP_PARAMS
+blowup_delta=0.4483
+blowup_rho0=1.0
+blowup_p0=1.0
+blowup_nwave=1
+blowup_init_ns=.false.
+/
+
+&OUTPUT_PARAMS
+foutput=1000000
+tout=0.11207
+tout_exact=.true.   ! land the snapshot ON tout, not one step past it
+/
+
+&HYDRO_PARAMS
+gamma=1.6666666666666667
+courant_factor=0.4
+slope_type=1
+riemann='hll'
+/
+
+&INCOMP_PARAMS
+incompressible=.true.
+incomp_p0=1.0
+incomp_rho0=1.0
+incomp_stress='moment'
+incomp_diag=.true.
+dfmm_tau=0.056037
+/
+
+&DFMM_PARAMS
+dfmm_prandtl=0.6666666666666667
+dfmm_source=.true.
+dfmm_diag=.false.
+dfmm_ic_sigmax=0.02
+/

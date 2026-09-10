@@ -47,6 +47,12 @@ module amr_commons
      ! Output parameters
      integer::noutput=1          ! Total number of outputs
      integer::foutput=1000000    ! Frequency of outputs
+     ! Land the timestep exactly on the next requested tout, instead of
+     ! letting the output fire on the first step that has already passed it.
+     ! Off by default so no existing setup changes behaviour; turn it on for
+     ! any run whose deliverable is the state at a specific time, which is
+     ! every blowup run -- see doc/incompressible.md and the blowup namelists.
+     logical::tout_exact=.false.
      real(kind=8),dimension(1:MAXOUT)::aout=1.1 ! Output expansion factors
      real(kind=8),dimension(1:MAXOUT)::tout=0.0 ! Output times
      integer::output_mode=0      ! Output mode (for hires runs)
@@ -182,6 +188,75 @@ module amr_commons
      real(kind=8)::switch_llf_pmin=-1
      real(kind=8),dimension(1:3)::constant_gravity
      integer::inener,ientropy,imetal,iturb,ichem,iecr
+
+     ! Transport coefficients.  tau is the BGK relaxation time of the
+     ! anisotropic pressure, so mu = p*tau; a non-positive value means
+     ! collisionless (no relaxation).  dfmm_prandtl sets tau_q =
+     ! tau/dfmm_prandtl once the heat flux is evolved (Stage 2); 2/3
+     ! reproduces the hard-sphere value.
+     !
+     ! Deliberately OUTSIDE the DFMM guard, and deliberately not duplicated by
+     ! an incompressible-only viscosity knob: the incompressible
+     ! Navier-Stokes rung takes nu = incomp_p0*dfmm_tau/incomp_rho0, so one
+     ! dfmm_tau means the same physical viscosity in all four rungs
+     ! (doc/incompressible.md Section 0).  A second knob could drift and would
+     ! confound the closure comparison the rungs exist to make.
+     real(kind=8)::dfmm_tau=1.0d-3
+     real(kind=8)::dfmm_prandtl=0.6666666666666667d0
+#ifdef DFMM
+     logical ::dfmm_source=.true.
+     logical ::dfmm_diag=.true.
+     logical ::dfmm_fatal_realizability=.false.
+     ! Closure selector.  0 = evolve Pi (and Q) with the AP relaxation map;
+     ! 1 = overwrite them with their Chapman-Enskog values every step, which
+     ! makes the same solver compressible Navier-Stokes-Fourier with explicit
+     ! viscosity mu = p*dfmm_tau and Pr = dfmm_prandtl.  Selected in the
+     ! namelist as dfmm_closure='evolve' or 'ns'.
+     integer ::dfmm_closure=0
+     ! INIT=DFMMTEST amplitudes: shear velocity, initial Pi_xx, and the
+     ! isobaric density (hence temperature) perturbation used to drive the
+     ! Stage-2 Fourier heat-flux gate.
+     real(kind=8)::dfmm_ic_shear=0.0d0
+     real(kind=8)::dfmm_ic_pi=0.0d0
+     real(kind=8)::dfmm_ic_drho=0.0d0
+     ! Uniform velocity added to all three components of the DFMMTEST initial
+     ! condition.  A uniform flow has zero velocity gradient, so it isolates
+     ! pure advection: it is the Stage-3/4 exactness gate.
+     real(kind=8)::dfmm_ic_uadv=0.0d0
+     ! Initial position width of the Stage-4 phase-space packet:
+     ! Sxx_ij = dfmm_ic_sigmax**2 delta_ij, Sxv_ij = 0.  Matches the 1D
+     ! reference's sigma_x0 = 0.02.  Must be strictly positive, since Sxx has
+     ! to be invertible for the rank indicator to be defined at t = 0.
+     real(kind=8)::dfmm_ic_sigmax=2.0d-2
+#endif
+
+     ! INIT=BLOWUP parameters.  These are deliberately NOT inside #ifdef DFMM:
+     ! the whole point of the test is to run the same initial condition with a
+     ! plain-hydro (DFMM=0) build and with dfmm, so a DFMM=0 binary must be able
+     ! to read them.  blowup_delta is the note's Delta -- the strain at the
+     ! origin is S = (1/Delta) diag(-2,-2,4), hence ||S||_op = 4/Delta and a
+     ! deformation time t_def = Delta/4 (doc/dfmm_3d.md Section 7, Stage 5).
+     ! Incompressible rungs (doc/incompressible.md).  Kept outside the DFMM
+     ! guard so a DFMM=0 binary can run rung 1.  incomp_p0 is the KINETIC gas
+     ! pressure, not the Lagrange multiplier: it sets mu = incomp_p0*dfmm_tau
+     ! and it is the scale against which Pi is measured, which is what makes
+     ! the blowup note's check 7 well posed in the incompressible setting.
+     logical ::incompressible=.false.
+     real(kind=8)::incomp_p0=1.0d0
+     real(kind=8)::incomp_rho0=1.0d0
+     character(LEN=10)::incomp_stress='viscous'
+     logical ::incomp_diag=.true.
+     real(kind=8)::blowup_delta=1.0d-1
+     real(kind=8)::blowup_rho0=1.0d0
+     real(kind=8)::blowup_p0=1.0d0
+     integer     ::blowup_nwave=1
+     ! .true. initialises Pi at its Navier-Stokes value -2 p tau S, i.e. ON the
+     ! Newtonian manifold; .false. starts from local equilibrium Pi = 0 and lets
+     ! the strain drive it, which is the physical setup and the actual
+     ! measurement.  Setting .true. with Delta < 8 tau initialises a state that
+     ! no distribution function realises, which is the note's check 7 stated as
+     ! an initial condition rather than as a prediction.
+     logical     ::blowup_init_ns=.false.
 
      ! Physics parameters
      real(kind=8)::units_density=1.0 ! [g/cm^3]
