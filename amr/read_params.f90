@@ -316,6 +316,9 @@ subroutine m_read_params(pst)
   real(kind=8)::courant_factor=0.5d0
   real(kind=8)::difmag=0.0d0
   real(kind=8)::etamag=0.0d0
+  real(kind=8)::eta_ad=0.0d0
+  real(kind=8)::nimhd_courant=0.8d0
+  character(LEN=10)::nimhd_solver='unsplit'
   real(kind=8)::smallc=1.d-10
   real(kind=8)::smallr=1.d-10
   character(LEN=10)::scheme='muscl'
@@ -653,7 +656,7 @@ subroutine m_read_params(pst)
        & ,d_region,u_region,v_region,w_region,p_region
   ! Hydro solver parameters
   namelist/hydro_params/gamma,courant_factor,smallr,smallc &
-       & ,slope_type,slope_mag_type,difmag,etamag,gamma_rad &
+       & ,slope_type,slope_mag_type,difmag,etamag,eta_ad,nimhd_solver,nimhd_courant,gamma_rad &
        & ,dual_energy,T2_fix,induction,entropy,sgs_turb,equilibrium_sgs,riemann,riemann2d,constant_gravity &
        & ,niter_riemann,scheme,switch_llf_dmin,switch_llf_pmin,smagorinsky_lilly_constant
   ! Grid refinement parameters
@@ -1303,6 +1306,26 @@ subroutine m_read_params(pst)
      endif
   endif
 
+  ! Check that the split non-ideal MHD solver is consistent and available
+  if(nimhd_solver/='unsplit'.and.nimhd_solver/='explicit'.and.nimhd_solver/='sts')then
+     write(*,*)'Error: nimhd_solver must be unsplit, explicit or sts'
+     nml_ok=.false.
+  endif
+  if(eta_ad>0.0d0.and.nimhd_solver=='unsplit')then
+     write(*,*)'Error: eta_ad>0 needs nimhd_solver=explicit or sts'
+     nml_ok=.false.
+  endif
+  if(nimhd_solver/='unsplit'.and.nimhd_courant<=0.0d0)then
+     write(*,*)'Error: nimhd_courant must be positive'
+     nml_ok=.false.
+  endif
+#if !defined(_CUDA) || !defined(MHD) || NDIM!=3
+  if(nimhd_solver/='unsplit')then
+     write(*,*)'Error: nimhd_solver=explicit or sts is only supported by the 3D CUDA MHD solver'
+     nml_ok=.false.
+  endif
+#endif
+
   if(.not. nml_ok)then
      write(*,*)'Too many errors in the namelist'
      write(*,*)'Aborting...'
@@ -1456,6 +1479,9 @@ subroutine m_read_params(pst)
   endif
   s%r%difmag=difmag
   s%r%etamag=etamag
+  s%r%eta_ad=eta_ad
+  s%r%nimhd_courant=nimhd_courant
+  s%r%nimhd_solver=nimhd_solver
   s%r%gamma_rad=gamma_rad(1:nener+1)
   s%r%dual_energy=dual_energy
   s%r%T2_fix=T2_fix

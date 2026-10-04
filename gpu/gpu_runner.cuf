@@ -30,6 +30,10 @@ module gpu_runner
   !> Arrays to hold face-centred B (MHD) on the device
   real(kind=dp), device, allocatable, dimension(:,:,:) :: bold, bnew
 
+  !> Scratch arrays for the split non-ideal MHD substeps
+  real(kind=dp), device, allocatable, dimension(:,:,:) :: b_roll2, b_my0, eta_nimhd
+  real(kind=dp), device, allocatable, dimension(:,:) :: e_acc
+
   !> Arrays to hold Turbulent acceleration fields on the device
   real(kind=8), device, allocatable, dimension(:,:,:,:) :: afield_last_d, afield_next_d, afield_now_d
   real(kind=dp), device, allocatable, dimension(:,:,:) :: fturb
@@ -629,6 +633,7 @@ contains
     switch_llf_pmin_d = switch_llf_pmin
     induction = sim%r%induction
     etamag = sim%r%etamag
+    if (sim%r%nimhd_solver /= 'unsplit') etamag = 0.0_dp
 
     head_idx = (sim%m%head(ilevel) - 1) / nsubgridtondim + 1
     num_subgrids = sim%m%noct(ilevel) / nsubgridtondim
@@ -680,6 +685,181 @@ contains
     call nvtxEndRange()
 
   end subroutine gpu_godunov
+
+  !> @brief
+  !> Operator-split non-ideal MHD (Ohmic and ambipolar) update on a GPU
+  !>
+  !> @detail
+  !> Diffuses bold over dtnew(ilevel) after set_uold, with forward-Euler substeps
+  !> (nimhd_solver='explicit') or RKL2 super-time-stepping stages (nimhd_solver='sts').
+  !> The number of substeps follows from the explicit diffusion timestep and does not
+  !> limit the hydro timestep. The coefficients are frozen over the step. Total energy
+  !> is updated with the stage-weighted Poynting flux, and the fine EMF and energy
+  !> fluxes are added to the coarse level as in the Godunov step.
+  !>
+  !> @param[in] sim : The simulation object
+  !> @param[in] ilevel : The refinement level to update
+  !>
+  subroutine gpu_nimhd_fine(sim, ilevel)
+#ifdef MHD
+    use nvtx
+    use hydro_device, only: nimhd_stage_kernel, nimhd_coeff_kernel
+#endif
+    use ramses_commons, only: ramses_t
+    type(ramses_t), intent(inout) :: sim
+    integer, intent(in) :: ilevel
+#ifdef MHD
+    real(kind=8), parameter :: alpha = 0.5d0
+    integer(kind=4) :: head_oct, num_octs, head_sg, num_sg, head_cache, num_cache
+    integer :: threads_per_block, num_threads, num_blocks, info, s, j, ng
+    real(kind=8) :: dt_parab, tau, w1, mut1
+    real(kind=8), allocatable, dimension(:) :: bcoef, mu, nu, omn, mut, gt, q, lambda
+    real(dp) :: dt, dx, gamma, smallr, etamag, eta_ad, nimhd_courant
+    logical :: sts, heat
+    real(kind=8), device, dimension(1) :: d_dtp
+    real(kind=8), dimension(1) :: h_dtp
+
+    head_oct = sim%m%head(ilevel)
+    num_octs = sim%m%noct(ilevel)
+    if (num_octs <= 0) return
+
+    if(sim%r%verbose.and.sim%g%myid==1)write(*,'("   Entering gpu_nimhd_fine for level ",I2)')ilevel
+
+    dt = sim%g%dtnew(ilevel)
+    dx = sim%r%boxlen/2**ilevel
+    gamma = sim%r%gamma
+    smallr = sim%r%smallr
+    etamag = sim%r%etamag
+    eta_ad = sim%r%eta_ad
+    nimhd_courant = sim%r%nimhd_courant
+    sts = (sim%r%nimhd_solver == 'sts')
+    heat = .not.(sim%r%isothermal .or. sim%r%induction)
+    head_sg = (head_oct - 1) / nsubgridtondim + 1
+    num_sg = num_octs / nsubgridtondim
+    head_cache = sim%m%ngridmax + sim%m%head_cache(ilevel)
+    num_cache = sim%m%noct_cache(ilevel)
+    if(nsubgrid == 1)threads_per_block = 64
+    if(nsubgrid == 2)threads_per_block = 256
+
+    if (.not. allocated(b_roll2)) then
+       ng = size(bold, 3)
+       allocate(b_roll2(1:twotondim,1:6,1:ng), b_my0(1:twotondim,1:6,1:ng))
+       allocate(eta_nimhd(1:twotondim,1:2,1:ng), e_acc(1:twotondim,1:ng))
+    endif
+
+    call nvtxStartRange("GPU non-ideal MHD", color=1)
+
+    ! Coefficients and explicit diffusion timestep on level and ghost octs
+    d_dtp(1) = huge(0.0d0)
+    num_threads = 256
+    num_blocks = (num_octs*twotondim + num_threads - 1) / num_threads
+    call nimhd_coeff_kernel<<<num_blocks, num_threads>>>(grid, uold, bold, eta_nimhd, head_oct, num_octs, d_dtp, &
+         & dx, gamma, smallr, etamag, eta_ad, nimhd_courant)
+    if (num_cache > 0) then
+       num_blocks = (num_cache*twotondim + num_threads - 1) / num_threads
+       call nimhd_coeff_kernel<<<num_blocks, num_threads>>>(grid, uold, bold, eta_nimhd, head_cache, num_cache, d_dtp, &
+            & dx, gamma, smallr, etamag, eta_ad, nimhd_courant)
+    endif
+    h_dtp = d_dtp
+    dt_parab = h_dtp(1)
+    if (dt_parab >= 0.5d0*huge(0.0d0)) then
+       call nvtxEndRange()
+       return
+    endif
+
+    ! Number of substeps and stage coefficients
+    tau = dble(dt)/dt_parab
+    if (sts) then
+       s = max(3, ceiling(-alpha + sqrt((alpha + 1d0)**2 + tau*(3d0 + 2d0*alpha))))
+    else
+       s = max(1, ceiling(tau))
+    endif
+    if(sim%r%verbose.and.sim%g%myid==1)write(*,'("   Non-ideal MHD: dt/dt_parab=",ES10.3," -> ",I0," substeps")')tau,s
+
+    allocate(bcoef(0:s), mu(0:s), nu(0:s), omn(0:s), mut(0:s), gt(0:s), q(0:s-1), lambda(0:s))
+    mu = 0d0
+    nu = 0d0
+    omn = 0d0
+    mut = 0d0
+    gt = 0d0
+    if (sts) then
+       w1 = (3d0 + 2d0*alpha)/((dble(s) + 2d0*alpha + 1d0)*(dble(s) - 1d0))
+       mut1 = w1/3d0
+       bcoef(0) = 1d0/3d0
+       bcoef(1) = 1d0/3d0
+       do j = 2, s
+          bcoef(j) = (2d0*alpha + 1d0)/(dble(j)*(dble(j) + 2d0*alpha)) * &
+               & (dble(j) + 2d0*alpha + 1d0)*dble(j-1)/(3d0 + 2d0*alpha)
+          mu(j) = 2d0*(alpha + dble(j) - 1d0)/(dble(j) + 2d0*alpha - 1d0) * bcoef(j)/bcoef(j-1)
+          nu(j) = -dble(j-1)/(dble(j) + 2d0*alpha - 1d0) * bcoef(j)/bcoef(j-2)
+          mut(j) = mu(j)*w1
+          gt(j) = -(1d0 - bcoef(j-1))*mut(j)
+          omn(j) = 1d0 - mu(j) - nu(j)
+       end do
+    else
+       mut1 = 1d0/dble(s)
+       mu(2:s) = 1d0
+       mut(2:s) = mut1
+    endif
+
+    ! Weights q of the stage operators in Y_s - Y_0 = sum_k q_k M(Y_k)
+    q = 0d0
+    lambda = 0d0
+    lambda(s) = 1d0
+    do j = s, 2, -1
+       q(j-1) = q(j-1) + lambda(j)*mut(j)
+       q(0) = q(0) + lambda(j)*gt(j)
+       lambda(j-1) = lambda(j-1) + lambda(j)*mu(j)
+       lambda(j-2) = lambda(j-2) + lambda(j)*nu(j)
+    end do
+    q(0) = q(0) + lambda(1)*mut1
+
+    ! Y_0 is stashed in bnew; bold and b_roll2 alternate so that Y_s ends in bold.
+    ! Ghost octs keep Y_0 in all three buffers.
+    info = cudaMemcpy(bnew(1,1,head_oct), bold(1,1,head_oct), twotondim*6*num_octs)
+    if (num_cache > 0) then
+       info = cudaMemcpy(bnew(1,1,head_cache), bold(1,1,head_cache), twotondim*6*num_cache)
+       info = cudaMemcpy(b_roll2(1,1,head_cache), bold(1,1,head_cache), twotondim*6*num_cache)
+    endif
+    if (mod(s,2) == 1) then
+       call nimhd_stage(bnew, bnew, bold, 1)
+    else
+       call nimhd_stage(bnew, bnew, b_roll2, 1)
+    endif
+    do j = 2, s
+       if (mod(s-j,2) == 0) then
+          if (j == 2) then
+             call nimhd_stage(b_roll2, bnew, bold, j)
+          else
+             call nimhd_stage(b_roll2, bold, bold, j)
+          endif
+       else
+          if (j == 2) then
+             call nimhd_stage(bold, bnew, b_roll2, j)
+          else
+             call nimhd_stage(bold, b_roll2, b_roll2, j)
+          endif
+       endif
+    end do
+
+    deallocate(bcoef, mu, nu, omn, mut, gt, q, lambda)
+
+    call GPU_Error_Check(__FILE__, __LINE__)
+    call nvtxEndRange()
+
+  contains
+
+    subroutine nimhd_stage(yjm1, yjm2, yj, jstage)
+      real(kind=dp), device :: yjm1(1:twotondim,1:6,*), yjm2(1:twotondim,1:6,*), yj(1:twotondim,1:6,*)
+      integer, intent(in) :: jstage
+      call nimhd_stage_kernel<<<num_sg, threads_per_block>>>(grid, eta_nimhd, yjm1, yjm2, bnew, b_my0, yj, &
+           & uold, e_acc, unew, bnew, heat, jstage == 1, jstage == s, father, nbor, head_sg, num_sg, &
+           & sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, dt, dx, &
+           & real(mu(jstage),dp), real(nu(jstage),dp), real(omn(jstage),dp), real(mut(jstage),dp), &
+           & real(gt(jstage),dp), real(mut1,dp), real(q(jstage-1),dp))
+    end subroutine nimhd_stage
+#endif
+  end subroutine gpu_nimhd_fine
 
   !> @brief
   !> Restriction of fine cells hydro variable into the coarse level

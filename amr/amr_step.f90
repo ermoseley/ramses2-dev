@@ -22,7 +22,7 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   use synchro_hydro_fine_module, only: m_synchro_hydro_fine, r_gravity_hydro_fine
   use source_hydro_fine_module, only: r_source_hydro_fine
   use interpol_phi_module, only: r_save_phi_old
-  use godunov_fine_module, only: r_godunov_fine,r_set_unew,r_set_uold
+  use godunov_fine_module, only: r_godunov_fine,r_set_unew,r_set_uold,r_nimhd_fine
   use cooling_fine_module, only: r_cooling_fine
   use newdt_fine_module, only: m_newdt_fine,r_broadcast_dt,in_broadcast_dt_t
   use movie_module, only: m_output_frame
@@ -389,6 +389,12 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
         ! Set uold equal to unew
         call m_timer('hydro - set uold','start')
         call r_set_uold(pst,ilevel,1)
+
+        ! Operator-split non-ideal MHD diffusion of bold
+        if(r%nimhd_solver/='unsplit'.and..not.r%static_gas)then
+           call m_timer('hydro - non-ideal mhd','start')
+           call r_nimhd_fine(pst,ilevel,1)
+        endif
 
         if(r%cr)call r_conserve_cr_flux(pst,ilevel,1)
 

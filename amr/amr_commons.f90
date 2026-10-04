@@ -167,6 +167,9 @@ module amr_commons
      integer ::slope_mag_type=1
      real(kind=8)::difmag=0.0d0
      real(kind=8)::etamag=0.0d0
+     real(kind=8)::eta_ad=0.0d0
+     real(kind=8)::nimhd_courant=0.8d0
+     character(LEN=10)::nimhd_solver='unsplit'
      real(kind=8),dimension(1:nener+1)::gamma_rad=1.33333333334d0
      logical ::induction=.false.
      logical ::entropy=.false.
