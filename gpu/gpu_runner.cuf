@@ -31,7 +31,7 @@ module gpu_runner
   real(kind=dp), device, allocatable, dimension(:,:,:) :: bold, bnew
 
   !> Scratch arrays for the split non-ideal MHD substeps
-  real(kind=dp), device, allocatable, dimension(:,:,:) :: b_roll2, b_my0, eta_nimhd
+  real(kind=dp), device, allocatable, dimension(:,:,:) :: b_roll2, b_my0, b_y0, eta_nimhd
   real(kind=dp), device, allocatable, dimension(:,:) :: e_acc
 
   !> Arrays to hold Turbulent acceleration fields on the device
@@ -690,24 +690,28 @@ contains
   !> Operator-split non-ideal MHD (Ohmic and ambipolar) update on a GPU
   !>
   !> @detail
-  !> Diffuses bold over dtnew(ilevel) after set_uold, with forward-Euler substeps
-  !> (nimhd_solver='explicit') or RKL2 super-time-stepping stages (nimhd_solver='sts').
+  !> Diffuses bold with forward-Euler substeps (nimhd_solver='explicit') or RKL2
+  !> super-time-stepping stages (nimhd_solver='sts'), over dtnew(ilevel) after set_uold
+  !> (nimhd_split='godunov'), or over dtnew(ilevel)/2 before the Godunov step and again
+  !> after set_uold (nimhd_split='strang'). Before the Godunov step, the change is also
+  !> added to unew and bnew, which already hold the finer-level corrections.
   !> The number of substeps follows from the explicit diffusion timestep and does not
-  !> limit the hydro timestep. The coefficients are frozen over the step. Total energy
+  !> limit the hydro timestep. The coefficients are frozen over each call. Total energy
   !> is updated with the stage-weighted Poynting flux, and the fine EMF and energy
   !> fluxes are added to the coarse level as in the Godunov step.
   !>
   !> @param[in] sim : The simulation object
   !> @param[in] ilevel : The refinement level to update
+  !> @param[in] ipass : 1 before the Godunov step, 2 after set_uold
   !>
-  subroutine gpu_nimhd_fine(sim, ilevel)
+  subroutine gpu_nimhd_fine(sim, ilevel, ipass)
 #ifdef MHD
     use nvtx
     use hydro_device, only: nimhd_stage_kernel, nimhd_coeff_kernel
 #endif
     use ramses_commons, only: ramses_t
     type(ramses_t), intent(inout) :: sim
-    integer, intent(in) :: ilevel
+    integer, intent(in) :: ilevel, ipass
 #ifdef MHD
     real(kind=8), parameter :: alpha = 0.5d0
     integer(kind=4) :: head_oct, num_octs, head_sg, num_sg, head_cache, num_cache
@@ -715,7 +719,7 @@ contains
     real(kind=8) :: dt_parab, tau, w1, mut1
     real(kind=8), allocatable, dimension(:) :: bcoef, mu, nu, omn, mut, gt, q, lambda
     real(dp) :: dt, dx, gamma, smallr, etamag, eta_ad, nimhd_courant
-    logical :: sts, heat
+    logical :: sts, heat, pre
     real(kind=8), device, dimension(1) :: d_dtp
     real(kind=8), dimension(1) :: h_dtp
 
@@ -726,6 +730,8 @@ contains
     if(sim%r%verbose.and.sim%g%myid==1)write(*,'("   Entering gpu_nimhd_fine for level ",I2)')ilevel
 
     dt = sim%g%dtnew(ilevel)
+    if (sim%r%nimhd_split == 'strang') dt = 0.5_dp*dt
+    pre = (ipass == 1)
     dx = sim%r%boxlen/2**ilevel
     gamma = sim%r%gamma
     smallr = sim%r%smallr
@@ -746,6 +752,7 @@ contains
        allocate(b_roll2(1:twotondim,1:6,1:ng), b_my0(1:twotondim,1:6,1:ng))
        allocate(eta_nimhd(1:twotondim,1:2,1:ng), e_acc(1:twotondim,1:ng))
     endif
+    if (pre .and. .not. allocated(b_y0)) allocate(b_y0(1:twotondim,1:6,1:size(bold,3)))
 
     call nvtxStartRange("GPU non-ideal MHD", color=1)
 
@@ -814,33 +821,13 @@ contains
     end do
     q(0) = q(0) + lambda(1)*mut1
 
-    ! Y_0 is stashed in bnew; bold and b_roll2 alternate so that Y_s ends in bold.
-    ! Ghost octs keep Y_0 in all three buffers.
-    info = cudaMemcpy(bnew(1,1,head_oct), bold(1,1,head_oct), twotondim*6*num_octs)
-    if (num_cache > 0) then
-       info = cudaMemcpy(bnew(1,1,head_cache), bold(1,1,head_cache), twotondim*6*num_cache)
-       info = cudaMemcpy(b_roll2(1,1,head_cache), bold(1,1,head_cache), twotondim*6*num_cache)
-    endif
-    if (mod(s,2) == 1) then
-       call nimhd_stage(bnew, bnew, bold, 1)
+    ! Y_0 is stashed in bnew after set_uold, and in b_y0 before the Godunov step when
+    ! bnew holds the accumulated finer-level corrections
+    if (pre) then
+       call nimhd_stages(b_y0)
     else
-       call nimhd_stage(bnew, bnew, b_roll2, 1)
+       call nimhd_stages(bnew)
     endif
-    do j = 2, s
-       if (mod(s-j,2) == 0) then
-          if (j == 2) then
-             call nimhd_stage(b_roll2, bnew, bold, j)
-          else
-             call nimhd_stage(b_roll2, bold, bold, j)
-          endif
-       else
-          if (j == 2) then
-             call nimhd_stage(bold, bnew, b_roll2, j)
-          else
-             call nimhd_stage(bold, b_roll2, b_roll2, j)
-          endif
-       endif
-    end do
 
     deallocate(bcoef, mu, nu, omn, mut, gt, q, lambda)
 
@@ -849,11 +836,43 @@ contains
 
   contains
 
-    subroutine nimhd_stage(yjm1, yjm2, yj, jstage)
+    ! bold and b_roll2 alternate so that Y_s ends in bold. Ghost octs keep Y_0 in y0,
+    ! bold and b_roll2.
+    subroutine nimhd_stages(y0)
+      real(kind=dp), device :: y0(1:twotondim,1:6,*)
+      info = cudaMemcpy(y0(1,1,head_oct), bold(1,1,head_oct), twotondim*6*num_octs)
+      if (num_cache > 0) then
+         info = cudaMemcpy(y0(1,1,head_cache), bold(1,1,head_cache), twotondim*6*num_cache)
+         info = cudaMemcpy(b_roll2(1,1,head_cache), bold(1,1,head_cache), twotondim*6*num_cache)
+      endif
+      if (mod(s,2) == 1) then
+         call nimhd_stage(y0, y0, bold, y0, 1)
+      else
+         call nimhd_stage(y0, y0, b_roll2, y0, 1)
+      endif
+      do j = 2, s
+         if (mod(s-j,2) == 0) then
+            if (j == 2) then
+               call nimhd_stage(b_roll2, y0, bold, y0, j)
+            else
+               call nimhd_stage(b_roll2, bold, bold, y0, j)
+            endif
+         else
+            if (j == 2) then
+               call nimhd_stage(bold, y0, b_roll2, y0, j)
+            else
+               call nimhd_stage(bold, b_roll2, b_roll2, y0, j)
+            endif
+         endif
+      end do
+    end subroutine nimhd_stages
+
+    subroutine nimhd_stage(yjm1, yjm2, yj, y0, jstage)
       real(kind=dp), device :: yjm1(1:twotondim,1:6,*), yjm2(1:twotondim,1:6,*), yj(1:twotondim,1:6,*)
+      real(kind=dp), device :: y0(1:twotondim,1:6,*)
       integer, intent(in) :: jstage
-      call nimhd_stage_kernel<<<num_sg, threads_per_block>>>(grid, eta_nimhd, yjm1, yjm2, bnew, b_my0, yj, &
-           & uold, e_acc, unew, bnew, heat, jstage == 1, jstage == s, father, nbor, head_sg, num_sg, &
+      call nimhd_stage_kernel<<<num_sg, threads_per_block>>>(grid, eta_nimhd, yjm1, yjm2, y0, b_my0, yj, &
+           & uold, e_acc, unew, bnew, heat, jstage == 1, jstage == s, pre, father, nbor, head_sg, num_sg, &
            & sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, dt, dx, &
            & real(mu(jstage),dp), real(nu(jstage),dp), real(omn(jstage),dp), real(mut(jstage),dp), &
            & real(gt(jstage),dp), real(mut1,dp), real(q(jstage-1),dp))

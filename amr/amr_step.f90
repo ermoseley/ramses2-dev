@@ -362,6 +362,12 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   if(r%hydro)then
 
      !if(.not.r%static_gas)then
+        ! First half of the Strang-split non-ideal MHD diffusion of bold
+        if(r%nimhd_solver/='unsplit'.and.r%nimhd_split=='strang'.and..not.r%static_gas)then
+           call m_timer('hydro - non-ideal mhd','start')
+           call r_nimhd_fine(pst,(/ilevel,1/),2)
+        endif
+
         ! Hyperbolic solver
         call m_timer('hydro - godunov','start')
         if(.not. r%static_gas) call r_godunov_fine(pst,ilevel,1)
@@ -393,7 +399,7 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
         ! Operator-split non-ideal MHD diffusion of bold
         if(r%nimhd_solver/='unsplit'.and..not.r%static_gas)then
            call m_timer('hydro - non-ideal mhd','start')
-           call r_nimhd_fine(pst,ilevel,1)
+           call r_nimhd_fine(pst,(/ilevel,2/),2)
         endif
 
         if(r%cr)call r_conserve_cr_flux(pst,ilevel,1)

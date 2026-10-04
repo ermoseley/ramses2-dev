@@ -229,23 +229,23 @@ end subroutine set_uold
 !###########################################################
 !###########################################################
 !###########################################################
-recursive subroutine r_nimhd_fine(pst,ilevel,input_size)
+recursive subroutine r_nimhd_fine(pst,input_array,input_size)
   use mdl_module
   use ramses_commons, only: pst_t
   use mdl_parameters
   implicit none
   type(pst_t)::pst
   integer,VALUE::input_size
-  integer::ilevel
+  integer,dimension(1:input_size)::input_array
   integer::rID
 
   if(pst%nLower>0)then
-     rID = mdl_send_request(pst%s%mdl,MDL_NIMHD_FINE,pst%iUpper+1,input_size,0,ilevel)
-     call r_nimhd_fine(pst%pLower,ilevel,input_size)
+     rID = mdl_send_request(pst%s%mdl,MDL_NIMHD_FINE,pst%iUpper+1,input_size,0,input_array)
+     call r_nimhd_fine(pst%pLower,input_array,input_size)
      call mdl_get_reply(pst%s%mdl,rID,0)
   else
 #ifdef _CUDA
-     call gpu_nimhd_fine(pst%s, ilevel)
+     call gpu_nimhd_fine(pst%s, input_array(1), input_array(2))
 #endif
   endif
 

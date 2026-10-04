@@ -3863,17 +3863,18 @@ contains
 
   ! Stage update of face B: Y_j = mu*Y_{j-1} + nu*Y_{j-2} + omn*Y_0 + mut*M(Y_{j-1}) + gt*M(Y_0),
   ! and Y_1 = Y_0 + mut1*M(Y_0) on the first stage, which also stores M(Y_0) in bmy0.
-  attributes(device) subroutine nimhd_update_b(yj, yjm1, yjm2, y0, bmy0, nbor, emfx, emfy, emfz, &
-       & head_idx, block_idx, thread_idx, dtdx, first, mu, nu, omn, mut, gt, mut1)
+  ! With accumulate, the last stage also adds Y_s - Y_0 to bacc.
+  attributes(device) subroutine nimhd_update_b(yj, yjm1, yjm2, y0, bmy0, bacc, nbor, emfx, emfy, emfz, &
+       & head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, mu, nu, omn, mut, gt, mut1)
     real(kind=dp), device :: yj(1:twotondim,1:6,*), yjm1(1:twotondim,1:6,*), yjm2(1:twotondim,1:6,*)
-    real(kind=dp), device :: y0(1:twotondim,1:6,*), bmy0(1:twotondim,1:6,*)
+    real(kind=dp), device :: y0(1:twotondim,1:6,*), bmy0(1:twotondim,1:6,*), bacc(1:twotondim,1:6,*)
     integer(kind=4), device :: nbor(1:subgridsize,*)
     type(subgrid_2x3x3edge_primitive), intent(in) :: emfx
     type(subgrid_3x2x3edge_primitive), intent(in) :: emfy
     type(subgrid_3x3x2edge_primitive), intent(in) :: emfz
     integer(kind=4), value :: head_idx
     integer, value :: block_idx, thread_idx
-    logical, value :: first
+    logical, value :: first, last, accumulate
     real(kind=dp), value :: dtdx, mu, nu, omn, mut, gt, mut1
     integer :: work_size, i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
     integer :: work_idx, subgrid_idx, oct_idx, cell_idx, ind_nbor, n
@@ -3908,6 +3909,8 @@ contains
              yj(cell_idx,n,oct_idx) = mu*yjm1(cell_idx,n,oct_idx) + nu*yjm2(cell_idx,n,oct_idx) &
                   & + omn*y0(cell_idx,n,oct_idx) + mut*dflux(n) + gt*bmy0(cell_idx,n,oct_idx)
           endif
+          if (last .and. accumulate) bacc(cell_idx,n,oct_idx) = bacc(cell_idx,n,oct_idx) &
+               & + yj(cell_idx,n,oct_idx) - y0(cell_idx,n,oct_idx)
        end do
     end do
   end subroutine nimhd_update_b
@@ -3990,10 +3993,10 @@ contains
   end subroutine nimhd_poynting_fluxes
 
   ! Accumulate the stage-weighted Poynting divergence in eacc and add it to the
-  ! total energy on the last stage.
-  attributes(device) subroutine nimhd_update_e(energy, eacc, nbor, emfx, emfy, emfz, bf, &
-       & head_idx, block_idx, thread_idx, dtdx, first, last, weight)
-    real(kind=dp), device :: energy(1:twotondim,1:nvar,*), eacc(1:twotondim,*)
+  ! total energy on the last stage, and also to uacc with accumulate.
+  attributes(device) subroutine nimhd_update_e(energy, eacc, uacc, nbor, emfx, emfy, emfz, bf, &
+       & head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, weight)
+    real(kind=dp), device :: energy(1:twotondim,1:nvar,*), eacc(1:twotondim,*), uacc(1:twotondim,1:nvar,*)
     integer(kind=4), device :: nbor(1:subgridsize,*)
     type(subgrid_2x3x3edge_primitive), intent(in) :: emfx
     type(subgrid_3x2x3edge_primitive), intent(in) :: emfy
@@ -4001,7 +4004,7 @@ contains
     type(subgrid_face_b_t), intent(in) :: bf
     integer(kind=4), value :: head_idx
     integer, value :: block_idx, thread_idx
-    logical, value :: first, last
+    logical, value :: first, last, accumulate
     real(kind=dp), value :: dtdx, weight
     integer :: work_size, i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
     integer :: work_idx, subgrid_idx, oct_idx, cell_idx, ind_nbor
@@ -4030,13 +4033,18 @@ contains
        else
           eacc(cell_idx,oct_idx) = eacc(cell_idx,oct_idx) + weight*de
        endif
-       if (last) energy(cell_idx,5,oct_idx) = energy(cell_idx,5,oct_idx) + eacc(cell_idx,oct_idx)
+       if (last) then
+          energy(cell_idx,5,oct_idx) = energy(cell_idx,5,oct_idx) + eacc(cell_idx,oct_idx)
+          if (accumulate) uacc(cell_idx,5,oct_idx) = uacc(cell_idx,5,oct_idx) + eacc(cell_idx,oct_idx)
+       endif
     end do
   end subroutine nimhd_update_e
 
-  ! One explicit substep or super-time-stepping stage of the non-ideal MHD update.
+  ! One explicit substep or super-time-stepping stage of the non-ideal MHD update. coarse_u
+  ! and coarse_b are the full unew and bnew arrays; with accumulate, the last stage also adds
+  ! the change of the level octs to them.
   attributes(global) subroutine nimhd_stage_kernel(grid, eta, yjm1, yjm2, y0, bmy0, yj, energy, eacc, &
-       & coarse_u, coarse_b, heat, first, last, father, nbor, head_idx, num_subgrids, ngridmax, &
+       & coarse_u, coarse_b, heat, first, last, accumulate, father, nbor, head_idx, num_subgrids, ngridmax, &
        & ilevel, levelmin, levelmax, dt, dx, mu, nu, omn, mut, gt, mut1, weight)
     type(oct), device :: grid(*)
     integer, device :: father(*), nbor(1:subgridsize,*)
@@ -4045,7 +4053,7 @@ contains
     real(kind=dp), device :: y0(1:twotondim,1:6,*), bmy0(1:twotondim,1:6,*), yj(1:twotondim,1:6,*)
     real(kind=dp), device :: energy(1:twotondim,1:nvar,*), eacc(1:twotondim,*)
     real(kind=dp), device :: coarse_u(1:twotondim,1:nvar,*), coarse_b(1:twotondim,1:6,*)
-    logical, intent(in), value :: heat, first, last
+    logical, intent(in), value :: heat, first, last, accumulate
     integer(kind=4), intent(in), value :: head_idx, num_subgrids
     integer, intent(in), value :: ngridmax, ilevel, levelmin, levelmax
     real(kind=dp), intent(in), value :: dt, dx, mu, nu, omn, mut, gt, mut1, weight
@@ -4077,11 +4085,11 @@ contains
        call zero_fine_emf(refined, emfx, emfy, emfz, thread_idx)
     endif
 
-    call nimhd_update_b(yj, yjm1, yjm2, y0, bmy0, nbor, emfx, emfy, emfz, &
-         & head_idx, block_idx, thread_idx, dtdx, first, mu, nu, omn, mut, gt, mut1)
+    call nimhd_update_b(yj, yjm1, yjm2, y0, bmy0, coarse_b, nbor, emfx, emfy, emfz, &
+         & head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, mu, nu, omn, mut, gt, mut1)
 
-    if (heat) call nimhd_update_e(energy, eacc, nbor, emfx, emfy, emfz, bf, &
-         & head_idx, block_idx, thread_idx, dtdx, first, last, weight)
+    if (heat) call nimhd_update_e(energy, eacc, coarse_u, nbor, emfx, emfy, emfz, bf, &
+         & head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, weight)
 
     if (ilevel > levelmin) then
        call zero_euler_fluxes_mhd(fluxes_x, fluxes_y, fluxes_z, thread_idx)
