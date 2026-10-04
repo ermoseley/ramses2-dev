@@ -32,7 +32,7 @@ module gpu_runner
 
   !> Scratch arrays for the split non-ideal MHD substeps
   real(kind=dp), device, allocatable, dimension(:,:,:) :: b_roll2, b_my0, b_y0, eta_nimhd
-  real(kind=dp), device, allocatable, dimension(:,:) :: e_acc
+  real(kind=dp), device, allocatable, dimension(:,:) :: e_acc, e_acc0
 
   !> Arrays to hold Turbulent acceleration fields on the device
   real(kind=8), device, allocatable, dimension(:,:,:,:) :: afield_last_d, afield_next_d, afield_now_d
@@ -875,7 +875,7 @@ contains
       real(kind=dp), device :: y0(1:twotondim,1:6,*)
       integer, intent(in) :: jstage
       call nimhd_stage_kernel<<<num_sg, threads_per_block>>>(grid, eta_nimhd, yjm1, yjm2, y0, b_my0, yj, &
-           & uold, e_acc, unew, bnew, heat, jstage == 1, jstage == s, pre, father, nbor, head_sg, num_sg, &
+           & uold, e_acc, e_acc0, unew, bnew, heat, jstage == 1, jstage == s, pre, father, nbor, head_sg, num_sg, &
            & sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, dt, dx, &
            & real(mu(jstage),dp), real(nu(jstage),dp), real(mut(jstage),dp), &
            & real(gt(jstage),dp), real(mut1,dp), real(q(jstage-1),dp))
