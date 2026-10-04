@@ -707,17 +707,18 @@ contains
   subroutine gpu_nimhd_fine(sim, ilevel, ipass)
 #ifdef MHD
     use nvtx
-    use hydro_device, only: nimhd_stage_kernel, nimhd_coeff_kernel
+    use hydro_device, only: nimhd_stage_kernel, nimhd_coeff_kernel, nimhd_dt_kernel
 #endif
     use ramses_commons, only: ramses_t
     type(ramses_t), intent(inout) :: sim
     integer, intent(in) :: ilevel, ipass
 #ifdef MHD
     real(kind=8), parameter :: alpha = 0.5d0
+    integer, parameter :: smax = 100000
     integer(kind=4) :: head_oct, num_octs, head_sg, num_sg, head_cache, num_cache
-    integer :: threads_per_block, num_threads, num_blocks, info, s, j, ng
-    real(kind=8) :: dt_parab, tau, w1, mut1
-    real(kind=8), allocatable, dimension(:) :: bcoef, mu, nu, omn, mut, gt, q, lambda
+    integer :: threads_per_block, num_threads, num_blocks, info, s, j
+    real(kind=8) :: dt_parab, tau, sreal, w1, mut1
+    real(kind=8), allocatable, dimension(:) :: bcoef, mu, nu, mut, gt, q, lambda
     real(dp) :: dt, dx, gamma, smallr, etamag, eta_ad, nimhd_courant
     logical :: sts, heat, pre
     real(kind=8), device, dimension(1) :: d_dtp
@@ -747,26 +748,21 @@ contains
     if(nsubgrid == 1)threads_per_block = 64
     if(nsubgrid == 2)threads_per_block = 256
 
-    if (.not. allocated(b_roll2)) then
-       ng = size(bold, 3)
-       allocate(b_roll2(1:twotondim,1:6,1:ng), b_my0(1:twotondim,1:6,1:ng))
-       allocate(eta_nimhd(1:twotondim,1:2,1:ng), e_acc(1:twotondim,1:ng))
-    endif
-    if (pre .and. .not. allocated(b_y0)) allocate(b_y0(1:twotondim,1:6,1:size(bold,3)))
-
     call nvtxStartRange("GPU non-ideal MHD", color=1)
 
-    ! Coefficients and explicit diffusion timestep on level and ghost octs
-    d_dtp(1) = huge(0.0d0)
+    ! Coefficients on level and ghost octs, and explicit diffusion timestep
     num_threads = 256
     num_blocks = (num_octs*twotondim + num_threads - 1) / num_threads
-    call nimhd_coeff_kernel<<<num_blocks, num_threads>>>(grid, uold, bold, eta_nimhd, head_oct, num_octs, d_dtp, &
-         & dx, gamma, smallr, etamag, eta_ad, nimhd_courant)
+    call nimhd_coeff_kernel<<<num_blocks, num_threads>>>(uold, bold, eta_nimhd, head_oct, num_octs, &
+         & gamma, smallr, etamag, eta_ad)
     if (num_cache > 0) then
        num_blocks = (num_cache*twotondim + num_threads - 1) / num_threads
-       call nimhd_coeff_kernel<<<num_blocks, num_threads>>>(grid, uold, bold, eta_nimhd, head_cache, num_cache, d_dtp, &
-            & dx, gamma, smallr, etamag, eta_ad, nimhd_courant)
+       call nimhd_coeff_kernel<<<num_blocks, num_threads>>>(uold, bold, eta_nimhd, head_cache, num_cache, &
+            & gamma, smallr, etamag, eta_ad)
     endif
+    d_dtp(1) = huge(0.0d0)
+    call nimhd_dt_kernel<<<num_sg, threads_per_block>>>(grid, eta_nimhd, bold, nbor, head_sg, num_sg, d_dtp, &
+         & dx, nimhd_courant)
     h_dtp = d_dtp
     dt_parab = h_dtp(1)
     if (dt_parab >= 0.5d0*huge(0.0d0)) then
@@ -777,16 +773,24 @@ contains
     ! Number of substeps and stage coefficients
     tau = dble(dt)/dt_parab
     if (sts) then
-       s = max(3, ceiling(-alpha + sqrt((alpha + 1d0)**2 + tau*(3d0 + 2d0*alpha))))
+       sreal = -alpha + sqrt((alpha + 1d0)**2 + tau*(3d0 + 2d0*alpha))
     else
-       s = max(1, ceiling(tau))
+       sreal = tau
+    endif
+    if (.not. sreal <= dble(smax)) then
+       write(*,*)'gpu_nimhd_fine: dt/dt_parab=',tau,' needs more than ',smax,' substeps'
+       error stop
+    endif
+    if (sts) then
+       s = max(3, ceiling(sreal))
+    else
+       s = max(1, ceiling(sreal))
     endif
     if(sim%r%verbose.and.sim%g%myid==1)write(*,'("   Non-ideal MHD: dt/dt_parab=",ES10.3," -> ",I0," substeps")')tau,s
 
-    allocate(bcoef(0:s), mu(0:s), nu(0:s), omn(0:s), mut(0:s), gt(0:s), q(0:s-1), lambda(0:s))
+    allocate(bcoef(0:s), mu(0:s), nu(0:s), mut(0:s), gt(0:s), q(0:s-1), lambda(0:s))
     mu = 0d0
     nu = 0d0
-    omn = 0d0
     mut = 0d0
     gt = 0d0
     if (sts) then
@@ -801,7 +805,6 @@ contains
           nu(j) = -dble(j-1)/(dble(j) + 2d0*alpha - 1d0) * bcoef(j)/bcoef(j-2)
           mut(j) = mu(j)*w1
           gt(j) = -(1d0 - bcoef(j-1))*mut(j)
-          omn(j) = 1d0 - mu(j) - nu(j)
        end do
     else
        mut1 = 1d0/dble(s)
@@ -829,7 +832,7 @@ contains
        call nimhd_stages(bnew)
     endif
 
-    deallocate(bcoef, mu, nu, omn, mut, gt, q, lambda)
+    deallocate(bcoef, mu, nu, mut, gt, q, lambda)
 
     call GPU_Error_Check(__FILE__, __LINE__)
     call nvtxEndRange()
@@ -874,7 +877,7 @@ contains
       call nimhd_stage_kernel<<<num_sg, threads_per_block>>>(grid, eta_nimhd, yjm1, yjm2, y0, b_my0, yj, &
            & uold, e_acc, unew, bnew, heat, jstage == 1, jstage == s, pre, father, nbor, head_sg, num_sg, &
            & sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, dt, dx, &
-           & real(mu(jstage),dp), real(nu(jstage),dp), real(omn(jstage),dp), real(mut(jstage),dp), &
+           & real(mu(jstage),dp), real(nu(jstage),dp), real(mut(jstage),dp), &
            & real(gt(jstage),dp), real(mut1,dp), real(q(jstage-1),dp))
     end subroutine nimhd_stage
 #endif

@@ -2427,8 +2427,8 @@ contains
 
   ! =========================================================================
   !> Zero fluxes at refined faces (MHD: includes scalar and transverse-B slots).
-  attributes(device) subroutine zero_fine_fluxes(local_subgrid, fluxes_x, fluxes_y, fluxes_z, thread_idx)
-    type(subgrid_6x6x6cell_primitive), intent(in)    :: local_subgrid
+  attributes(device) subroutine zero_fine_fluxes(refined, fluxes_x, fluxes_y, fluxes_z, thread_idx)
+    logical(kind=1), intent(in) :: refined(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
     type(subgrid_3x2x2cell_primitive), intent(inout) :: fluxes_x
     type(subgrid_2x3x2cell_primitive), intent(inout) :: fluxes_y
     type(subgrid_2x2x3cell_primitive), intent(inout) :: fluxes_z
@@ -2448,7 +2448,7 @@ contains
           ! Compute the indices in the interface state arrays
           call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid, i, j, k)
 
-          if (local_subgrid%refined(i+1,j+2,k+2) .or. local_subgrid%refined(i+2,j+2,k+2))then
+          if (refined(i+1,j+2,k+2) .or. refined(i+2,j+2,k+2))then
              fluxes_x%density   (i, j, k) = 0_dp
              fluxes_x%velocity_x(i, j, k) = 0_dp
              fluxes_x%velocity_y(i, j, k) = 0_dp
@@ -2468,7 +2468,7 @@ contains
           ! Compute the indices in the interface state arrays
           call index_1Dto3D(work_idx - interface_array_size, 2*nsubgrid, 2*nsubgrid+1, i, j, k)
 
-          if (local_subgrid%refined(i+2,j+1,k+2) .or. local_subgrid%refined(i+2,j+2,k+2))then
+          if (refined(i+2,j+1,k+2) .or. refined(i+2,j+2,k+2))then
              fluxes_y%density   (i, j, k) = 0_dp
              fluxes_y%velocity_x(i, j, k) = 0_dp
              fluxes_y%velocity_y(i, j, k) = 0_dp
@@ -2488,7 +2488,7 @@ contains
           ! Compute the indices in the interface state arrays
           call index_1Dto3D(work_idx - 2 * interface_array_size, 2*nsubgrid, 2*nsubgrid, i, j, k)
 
-          if (local_subgrid%refined(i+2,j+2,k+1) .or. local_subgrid%refined(i+2,j+2,k+2))then
+          if (refined(i+2,j+2,k+1) .or. refined(i+2,j+2,k+2))then
              fluxes_z%density   (i, j, k) = 0_dp
              fluxes_z%velocity_x(i, j, k) = 0_dp
              fluxes_z%velocity_y(i, j, k) = 0_dp
@@ -3680,7 +3680,7 @@ contains
     ! Zero fluxes at boundaries with finer levels.
     ! =======================================================================
     if (ilevel < levelmax) then
-       call zero_fine_fluxes(local_subgrid, left_interfaces_x, left_interfaces_y, left_interfaces_z, thread_idx)
+       call zero_fine_fluxes(local_subgrid%refined, left_interfaces_x, left_interfaces_y, left_interfaces_z, thread_idx)
 #ifdef MHD
        call zero_fine_emf(local_subgrid%refined, emfx, emfy, emfz, thread_idx)
 #endif
@@ -3861,11 +3861,12 @@ contains
     call syncthreads()
   end subroutine subgrid_load_nimhd
 
-  ! Stage update of face B: Y_j = mu*Y_{j-1} + nu*Y_{j-2} + omn*Y_0 + mut*M(Y_{j-1}) + gt*M(Y_0),
+  ! Stage update of face B: Y_j = mu*Y_{j-1} + nu*Y_{j-2} + (1-mu-nu)*Y_0 + mut*M(Y_{j-1}) + gt*M(Y_0),
+  ! written relative to Y_0 so that a uniform field stays exact in single precision,
   ! and Y_1 = Y_0 + mut1*M(Y_0) on the first stage, which also stores M(Y_0) in bmy0.
   ! With accumulate, the last stage also adds Y_s - Y_0 to bacc.
   attributes(device) subroutine nimhd_update_b(yj, yjm1, yjm2, y0, bmy0, bacc, nbor, emfx, emfy, emfz, &
-       & head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, mu, nu, omn, mut, gt, mut1)
+       & head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, mu, nu, mut, gt, mut1)
     real(kind=dp), device :: yj(1:twotondim,1:6,*), yjm1(1:twotondim,1:6,*), yjm2(1:twotondim,1:6,*)
     real(kind=dp), device :: y0(1:twotondim,1:6,*), bmy0(1:twotondim,1:6,*), bacc(1:twotondim,1:6,*)
     integer(kind=4), device :: nbor(1:subgridsize,*)
@@ -3875,7 +3876,7 @@ contains
     integer(kind=4), value :: head_idx
     integer, value :: block_idx, thread_idx
     logical, value :: first, last, accumulate
-    real(kind=dp), value :: dtdx, mu, nu, omn, mut, gt, mut1
+    real(kind=dp), value :: dtdx, mu, nu, mut, gt, mut1
     integer :: work_size, i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
     integer :: work_idx, subgrid_idx, oct_idx, cell_idx, ind_nbor, n
     real(kind=dp) :: dflux(1:6)
@@ -3906,8 +3907,10 @@ contains
              bmy0(cell_idx,n,oct_idx) = dflux(n)
              yj(cell_idx,n,oct_idx) = y0(cell_idx,n,oct_idx) + mut1*dflux(n)
           else
-             yj(cell_idx,n,oct_idx) = mu*yjm1(cell_idx,n,oct_idx) + nu*yjm2(cell_idx,n,oct_idx) &
-                  & + omn*y0(cell_idx,n,oct_idx) + mut*dflux(n) + gt*bmy0(cell_idx,n,oct_idx)
+             yj(cell_idx,n,oct_idx) = y0(cell_idx,n,oct_idx) &
+                  & + mu*(yjm1(cell_idx,n,oct_idx) - y0(cell_idx,n,oct_idx)) &
+                  & + nu*(yjm2(cell_idx,n,oct_idx) - y0(cell_idx,n,oct_idx)) &
+                  & + mut*dflux(n) + gt*bmy0(cell_idx,n,oct_idx)
           endif
           if (last .and. accumulate) bacc(cell_idx,n,oct_idx) = bacc(cell_idx,n,oct_idx) &
                & + yj(cell_idx,n,oct_idx) - y0(cell_idx,n,oct_idx)
@@ -3992,16 +3995,15 @@ contains
     call syncthreads()
   end subroutine nimhd_poynting_fluxes
 
-  ! Accumulate the stage-weighted Poynting divergence in eacc and add it to the
+  ! Accumulate the stage-weighted divergence of the energy fluxes in eacc and add it to the
   ! total energy on the last stage, and also to uacc with accumulate.
-  attributes(device) subroutine nimhd_update_e(energy, eacc, uacc, nbor, emfx, emfy, emfz, bf, &
+  attributes(device) subroutine nimhd_update_e(energy, eacc, uacc, nbor, fluxes_x, fluxes_y, fluxes_z, &
        & head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, weight)
     real(kind=dp), device :: energy(1:twotondim,1:nvar,*), eacc(1:twotondim,*), uacc(1:twotondim,1:nvar,*)
     integer(kind=4), device :: nbor(1:subgridsize,*)
-    type(subgrid_2x3x3edge_primitive), intent(in) :: emfx
-    type(subgrid_3x2x3edge_primitive), intent(in) :: emfy
-    type(subgrid_3x3x2edge_primitive), intent(in) :: emfz
-    type(subgrid_face_b_t), intent(in) :: bf
+    type(subgrid_3x2x2cell_primitive), intent(in) :: fluxes_x
+    type(subgrid_2x3x2cell_primitive), intent(in) :: fluxes_y
+    type(subgrid_2x2x3cell_primitive), intent(in) :: fluxes_z
     integer(kind=4), value :: head_idx
     integer, value :: block_idx, thread_idx
     logical, value :: first, last, accumulate
@@ -4025,9 +4027,9 @@ contains
        j = j + 2*(j_subgrid_idx - 1)
        k = k + 2*(k_subgrid_idx - 1)
        de = ( &
-            & (poynting_x(emfy, emfz, bf, i+1, j,   k  ) - poynting_x(emfy, emfz, bf, i, j, k)) + &
-            & (poynting_y(emfz, emfx, bf, i,   j+1, k  ) - poynting_y(emfz, emfx, bf, i, j, k)) + &
-            & (poynting_z(emfx, emfy, bf, i,   j,   k+1) - poynting_z(emfx, emfy, bf, i, j, k)) ) * dtdx
+            & (fluxes_x%pressure(i, j, k) - fluxes_x%pressure(i+1, j,   k  )) + &
+            & (fluxes_y%pressure(i, j, k) - fluxes_y%pressure(i,   j+1, k  )) + &
+            & (fluxes_z%pressure(i, j, k) - fluxes_z%pressure(i,   j,   k+1)) ) * dtdx
        if (first) then
           eacc(cell_idx,oct_idx) = weight*de
        else
@@ -4042,10 +4044,12 @@ contains
 
   ! One explicit substep or super-time-stepping stage of the non-ideal MHD update. coarse_u
   ! and coarse_b are the full unew and bnew arrays; with accumulate, the last stage also adds
-  ! the change of the level octs to them.
+  ! the change of the level octs to them. As for the Godunov fluxes, the energy fluxes are
+  ! built from the EMF before the edges of refined cells are zeroed, and only the fluxes
+  ! through faces of refined cells are then zeroed.
   attributes(global) subroutine nimhd_stage_kernel(grid, eta, yjm1, yjm2, y0, bmy0, yj, energy, eacc, &
        & coarse_u, coarse_b, heat, first, last, accumulate, father, nbor, head_idx, num_subgrids, ngridmax, &
-       & ilevel, levelmin, levelmax, dt, dx, mu, nu, omn, mut, gt, mut1, weight)
+       & ilevel, levelmin, levelmax, dt, dx, mu, nu, mut, gt, mut1, weight)
     type(oct), device :: grid(*)
     integer, device :: father(*), nbor(1:subgridsize,*)
     real(kind=dp), device :: eta(1:twotondim,1:2,*)
@@ -4056,7 +4060,7 @@ contains
     logical, intent(in), value :: heat, first, last, accumulate
     integer(kind=4), intent(in), value :: head_idx, num_subgrids
     integer, intent(in), value :: ngridmax, ilevel, levelmin, levelmax
-    real(kind=dp), intent(in), value :: dt, dx, mu, nu, omn, mut, gt, mut1, weight
+    real(kind=dp), intent(in), value :: dt, dx, mu, nu, mut, gt, mut1, weight
 
     real(kind=dp), shared :: eta_o(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
     real(kind=dp), shared :: eta_a(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
@@ -4081,70 +4085,131 @@ contains
 
     call cmpnimhd_mhd(bf, eta_o, eta_a, emfx, emfy, emfz, dx, thread_idx)
 
+    if (ilevel > levelmin) call zero_euler_fluxes_mhd(fluxes_x, fluxes_y, fluxes_z, thread_idx)
+    if (heat) call nimhd_poynting_fluxes(fluxes_x, fluxes_y, fluxes_z, emfx, emfy, emfz, bf, thread_idx)
+
     if (ilevel < levelmax) then
+       if (heat) call zero_fine_fluxes(refined, fluxes_x, fluxes_y, fluxes_z, thread_idx)
        call zero_fine_emf(refined, emfx, emfy, emfz, thread_idx)
     endif
 
     call nimhd_update_b(yj, yjm1, yjm2, y0, bmy0, coarse_b, nbor, emfx, emfy, emfz, &
-         & head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, mu, nu, omn, mut, gt, mut1)
+         & head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, mu, nu, mut, gt, mut1)
 
-    if (heat) call nimhd_update_e(energy, eacc, coarse_u, nbor, emfx, emfy, emfz, bf, &
+    if (heat) call nimhd_update_e(energy, eacc, coarse_u, nbor, fluxes_x, fluxes_y, fluxes_z, &
          & head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, weight)
 
     if (ilevel > levelmin) then
-       call zero_euler_fluxes_mhd(fluxes_x, fluxes_y, fluxes_z, thread_idx)
-       if (heat) call nimhd_poynting_fluxes(fluxes_x, fluxes_y, fluxes_z, emfx, emfy, emfz, bf, thread_idx)
        call coarse_cell_update(grid, coarse_u, coarse_b, father, nbor, fluxes_x, fluxes_y, fluxes_z, &
             & emfx, emfy, emfz, head_idx, block_idx, thread_idx, ngridmax, dtdx*weight)
     endif
   end subroutine nimhd_stage_kernel
 
-  ! Cell coefficients from nimhd_coeff, frozen over the step, and the smallest explicit
-  ! diffusion timestep nimhd_courant*dx^2/(2*ndim*chi) over leaf cells, with
-  ! chi = eta_o + eta_a*B^2 bounded using the largest face value of each B component.
-  attributes(global) subroutine nimhd_coeff_kernel(grid, uold, bold, eta, head_idx, num_octs, data_out, &
-       & dx, gamma, smallr, etamag, eta_ad, nimhd_courant)
+  ! Cell coefficients from nimhd_coeff, frozen over the step.
+  attributes(global) subroutine nimhd_coeff_kernel(uold, bold, eta, head_idx, num_octs, &
+       & gamma, smallr, etamag, eta_ad)
     use nimhd_coeff_module, only: nimhd_coeff
-    type(oct), device :: grid(*)
     real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
     real(kind=dp), device :: bold(1:twotondim,1:6,*)
     real(kind=dp), device :: eta(1:twotondim,1:2,*)
     integer(kind=4), intent(in), value :: head_idx, num_octs
-    real(kind=8), device :: data_out(*)
-    real(kind=dp), value :: dx, gamma, smallr, etamag, eta_ad, nimhd_courant
-    integer :: info, tid, bid, cell_idx, oct_idx
-    real(kind=8) :: dt_loc
-    real(kind=dp) :: uu(1:nvar), bb(1:3), b2, chi, eo, ea
+    real(kind=dp), value :: gamma, smallr, etamag, eta_ad
+    integer :: tid, cell_idx, oct_idx
+    real(kind=dp) :: uu(1:nvar), bb(1:3), eo, ea
 
-    tid = threadIdx%x - 1
-    bid = blockIdx%x - 1
-    oct_idx = ( tid + bid * blockDim%x ) / twotondim
+    tid = threadIdx%x - 1 + (blockIdx%x - 1) * blockDim%x
+    oct_idx = tid / twotondim
+    if (oct_idx >= num_octs) return
+    oct_idx = head_idx + oct_idx
+    cell_idx = mod(tid, twotondim) + 1
+    uu(1:nvar) = uold(cell_idx,1:nvar,oct_idx)
+    uu(1) = max(uu(1), smallr)
+    bb(1) = 0.5_dp*(bold(cell_idx,1,oct_idx)+bold(cell_idx,4,oct_idx))
+    bb(2) = 0.5_dp*(bold(cell_idx,2,oct_idx)+bold(cell_idx,5,oct_idx))
+    bb(3) = 0.5_dp*(bold(cell_idx,3,oct_idx)+bold(cell_idx,6,oct_idx))
+    call nimhd_coeff(uu, bb, gamma, etamag, eta_ad, eo, ea)
+    eta(cell_idx,1,oct_idx) = eo
+    eta(cell_idx,2,oct_idx) = ea
+  end subroutine nimhd_coeff_kernel
+
+  ! Upper bound of eta_o + eta_a*B^2 for the edge shared by the four cells (X,Y,Z) - a*d1 - b*d2,
+  ! a,b in {0,1}, from the largest coefficients and face B components of these cells. It is
+  ! zero when the edge EMF is zeroed.
+  attributes(device) function nimhd_chi(bf, eta_o, eta_a, refined, X, Y, Z, i1, j1, k1, i2, j2, k2) result(chi)
+    type(subgrid_face_b_t), intent(in) :: bf
+    real(kind=dp), intent(in) :: eta_o(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    real(kind=dp), intent(in) :: eta_a(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    logical(kind=1), intent(in) :: refined(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    integer, value :: X, Y, Z, i1, j1, k1, i2, j2, k2
+    real(kind=dp) :: chi, eo, ea, bx2, by2, bz2
+    integer :: a, b, i, j, k
+
+    chi = 0.0_dp
+    eo = 0.0_dp; ea = 0.0_dp; bx2 = 0.0_dp; by2 = 0.0_dp; bz2 = 0.0_dp
+    do b = 0, 1
+       do a = 0, 1
+          i = X - a*i1 - b*i2
+          j = Y - a*j1 - b*j2
+          k = Z - a*k1 - b*k2
+          if (refined(i,j,k)) return
+          eo = max(eo, eta_o(i,j,k))
+          ea = max(ea, eta_a(i,j,k))
+          bx2 = max(bx2, bf%bx(i,j,k)**2, bf%bx(i+1,j,k)**2)
+          by2 = max(by2, bf%by(i,j,k)**2, bf%by(i,j+1,k)**2)
+          bz2 = max(bz2, bf%bz(i,j,k)**2, bf%bz(i,j,k+1)**2)
+       end do
+    end do
+    chi = eo + ea*(bx2 + by2 + bz2)
+  end function nimhd_chi
+
+  ! Smallest explicit diffusion timestep nimhd_courant*dx^2/(2*ndim*chi) over the edges of
+  ! the level, with chi from nimhd_chi.
+  attributes(global) subroutine nimhd_dt_kernel(grid, eta, bin, nbor, head_idx, num_subgrids, data_out, &
+       & dx, nimhd_courant)
+    type(oct), device :: grid(*)
+    real(kind=dp), device :: eta(1:twotondim,1:2,*)
+    real(kind=dp), device :: bin(1:twotondim,1:6,*)
+    integer, device :: nbor(1:subgridsize,*)
+    integer(kind=4), intent(in), value :: head_idx, num_subgrids
+    real(kind=8), device :: data_out(*)
+    real(kind=dp), value :: dx, nimhd_courant
+
+    real(kind=dp), shared :: eta_o(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    real(kind=dp), shared :: eta_a(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    logical(kind=1), shared :: refined(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    type(subgrid_face_b_t), shared :: bf
+    integer :: block_idx, thread_idx, work_idx, emf_size, info, I, J, K
+    real(kind=dp) :: chi
+    real(kind=8) :: dt_loc
+
+    block_idx = blockIdx%x - 1
+    thread_idx = threadIdx%x - 1
+    if (block_idx >= num_subgrids) return
+
+    call subgrid_load_nimhd(grid, eta, bin, nbor, head_idx, block_idx, thread_idx, &
+         & eta_o, eta_a, refined, bf)
+
     dt_loc = huge(0d0)
-    if (oct_idx < num_octs) then
-       oct_idx = head_idx + oct_idx
-       cell_idx = mod(tid, twotondim) + 1
-       uu(1:nvar) = uold(cell_idx,1:nvar,oct_idx)
-       uu(1) = max(uu(1), smallr)
-       bb(1) = 0.5_dp*(bold(cell_idx,1,oct_idx)+bold(cell_idx,4,oct_idx))
-       bb(2) = 0.5_dp*(bold(cell_idx,2,oct_idx)+bold(cell_idx,5,oct_idx))
-       bb(3) = 0.5_dp*(bold(cell_idx,3,oct_idx)+bold(cell_idx,6,oct_idx))
-       call nimhd_coeff(uu, bb, gamma, etamag, eta_ad, eo, ea)
-       eta(cell_idx,1,oct_idx) = eo
-       eta(cell_idx,2,oct_idx) = ea
-       if (.not. grid(oct_idx)%refined(cell_idx)) then
-          b2 = max(bold(cell_idx,1,oct_idx)**2, bold(cell_idx,4,oct_idx)**2) &
-               & + max(bold(cell_idx,2,oct_idx)**2, bold(cell_idx,5,oct_idx)**2) &
-               & + max(bold(cell_idx,3,oct_idx)**2, bold(cell_idx,6,oct_idx)**2)
-          chi = eo + ea*b2
-          if (chi > 0.0_dp) dt_loc = 0.5d0*nimhd_courant*dx*dx/(dble(ndim)*chi)
-       endif
-    endif
+    emf_size = (2*nsubgrid+1)**2 * (2*nsubgrid)
+    do work_idx = thread_idx, emf_size*3 - 1, blockDim%x
+       if (work_idx < emf_size) then
+          call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid+1, I, J, K)
+          chi = nimhd_chi(bf, eta_o, eta_a, refined, I+2, J+2, K+2, 1, 0, 0, 0, 1, 0)
+       else if (work_idx < 2*emf_size) then
+          call index_1Dto3D(work_idx - emf_size, 2*nsubgrid+1, 2*nsubgrid, I, J, K)
+          chi = nimhd_chi(bf, eta_o, eta_a, refined, I+2, J+2, K+2, 1, 0, 0, 0, 0, 1)
+       else
+          call index_1Dto3D(work_idx - 2*emf_size, 2*nsubgrid, 2*nsubgrid+1, I, J, K)
+          chi = nimhd_chi(bf, eta_o, eta_a, refined, I+2, J+2, K+2, 0, 1, 0, 0, 0, 1)
+       end if
+       if (chi > 0.0_dp) dt_loc = min(dt_loc, 0.5d0*nimhd_courant*dx*dx/(dble(ndim)*chi))
+    end do
 
     dt_loc = block_reduce_min(dt_loc)
-    if (tid == 0) then
+    if (thread_idx == 0) then
        info = atomicmin(data_out(1), dt_loc)
     endif
-  end subroutine nimhd_coeff_kernel
+  end subroutine nimhd_dt_kernel
 
 #endif
 

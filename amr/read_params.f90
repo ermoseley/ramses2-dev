@@ -1330,6 +1330,10 @@ subroutine m_read_params(pst)
      nml_ok=.false.
   endif
 #endif
+  if(nimhd_solver/='unsplit'.and.s%g%ncpu>1)then
+     write(*,*)'Error: nimhd_solver=explicit or sts only runs on a single rank'
+     nml_ok=.false.
+  endif
 
   if(.not. nml_ok)then
      write(*,*)'Too many errors in the namelist'
