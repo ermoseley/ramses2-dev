@@ -687,6 +687,74 @@ contains
   end subroutine gpu_godunov
 
   !> @brief
+  !> Limit the time step of a level with refined cells by the explicit diffusion time step
+  !> of the split non-ideal MHD solver at the edges between leaf and refined cells
+  !>
+  !> @detail
+  !> The finer levels add their non-ideal EMF on these edges once per coarse step, with
+  !> ghost cells frozen over it, which is only stable within the explicit time step.
+  !>
+  !> @param[in] sim : The simulation object
+  !> @param[in] ilevel : The refinement level
+  !> @param[inout] dt : The time step to limit
+  !>
+  subroutine gpu_nimhd_dt(sim, ilevel, dt)
+    use ramses_commons, only: ramses_t
+    type(ramses_t), intent(inout) :: sim
+    integer, intent(in) :: ilevel
+    real(kind=8), intent(inout) :: dt
+#ifdef MHD
+    if (sim%r%nimhd_solver == 'unsplit' .or. ilevel >= sim%r%nlevelmax) return
+    if (sim%m%noct(ilevel) <= 0) return
+    dt = min(dt, nimhd_dt_parab(sim, ilevel, .true.))
+#endif
+  end subroutine gpu_nimhd_dt
+
+#ifdef MHD
+  !> Coefficients of the split non-ideal MHD solver on the level and ghost octs, and the
+  !> explicit diffusion time step over the edges of the level, or with coarse_fine over the
+  !> edges between leaf and refined cells only.
+  function nimhd_dt_parab(sim, ilevel, coarse_fine) result(dt_parab)
+    use hydro_device, only: nimhd_coeff_kernel, nimhd_dt_kernel
+    use ramses_commons, only: ramses_t
+    type(ramses_t), intent(inout) :: sim
+    integer, intent(in) :: ilevel
+    logical, intent(in) :: coarse_fine
+    real(kind=8) :: dt_parab
+    integer(kind=4) :: head_oct, num_octs, head_sg, num_sg, head_cache, num_cache
+    integer :: threads_per_block, num_threads, num_blocks
+    real(dp) :: dx
+    real(kind=8), device, dimension(1) :: d_dtp
+    real(kind=8), dimension(1) :: h_dtp
+
+    head_oct = sim%m%head(ilevel)
+    num_octs = sim%m%noct(ilevel)
+    head_sg = (head_oct - 1) / nsubgridtondim + 1
+    num_sg = num_octs / nsubgridtondim
+    head_cache = sim%m%ngridmax + sim%m%head_cache(ilevel)
+    num_cache = sim%m%noct_cache(ilevel)
+    dx = sim%r%boxlen/2**ilevel
+    if(nsubgrid == 1)threads_per_block = 64
+    if(nsubgrid == 2)threads_per_block = 256
+
+    num_threads = 256
+    num_blocks = (num_octs*twotondim + num_threads - 1) / num_threads
+    call nimhd_coeff_kernel<<<num_blocks, num_threads>>>(uold, bold, eta_nimhd, head_oct, num_octs, &
+         & real(sim%r%gamma,dp), real(sim%r%smallr,dp), real(sim%r%etamag,dp), real(sim%r%eta_ad,dp))
+    if (num_cache > 0) then
+       num_blocks = (num_cache*twotondim + num_threads - 1) / num_threads
+       call nimhd_coeff_kernel<<<num_blocks, num_threads>>>(uold, bold, eta_nimhd, head_cache, num_cache, &
+            & real(sim%r%gamma,dp), real(sim%r%smallr,dp), real(sim%r%etamag,dp), real(sim%r%eta_ad,dp))
+    endif
+    d_dtp(1) = huge(0.0d0)
+    call nimhd_dt_kernel<<<num_sg, threads_per_block>>>(grid, eta_nimhd, bold, nbor, head_sg, num_sg, d_dtp, &
+         & dx, real(sim%r%nimhd_courant,dp), coarse_fine)
+    h_dtp = d_dtp
+    dt_parab = h_dtp(1)
+  end function nimhd_dt_parab
+#endif
+
+  !> @brief
   !> Operator-split non-ideal MHD (Ohmic and ambipolar) update on a GPU
   !>
   !> @detail
@@ -707,7 +775,7 @@ contains
   subroutine gpu_nimhd_fine(sim, ilevel, ipass)
 #ifdef MHD
     use nvtx
-    use hydro_device, only: nimhd_stage_kernel, nimhd_coeff_kernel, nimhd_dt_kernel
+    use hydro_device, only: nimhd_stage_kernel
 #endif
     use ramses_commons, only: ramses_t
     type(ramses_t), intent(inout) :: sim
@@ -716,13 +784,11 @@ contains
     real(kind=8), parameter :: alpha = 0.5d0
     integer, parameter :: smax = 100000
     integer(kind=4) :: head_oct, num_octs, head_sg, num_sg, head_cache, num_cache
-    integer :: threads_per_block, num_threads, num_blocks, info, s, j
+    integer :: threads_per_block, info, s, j
     real(kind=8) :: dt_parab, tau, sreal, w1, mut1
     real(kind=8), allocatable, dimension(:) :: bcoef, mu, nu, mut, gt, q, lambda
-    real(dp) :: dt, dx, gamma, smallr, etamag, eta_ad, nimhd_courant
+    real(dp) :: dt, dx
     logical :: sts, heat, pre
-    real(kind=8), device, dimension(1) :: d_dtp
-    real(kind=8), dimension(1) :: h_dtp
 
     head_oct = sim%m%head(ilevel)
     num_octs = sim%m%noct(ilevel)
@@ -734,11 +800,6 @@ contains
     if (sim%r%nimhd_split == 'strang') dt = 0.5_dp*dt
     pre = (ipass == 1)
     dx = sim%r%boxlen/2**ilevel
-    gamma = sim%r%gamma
-    smallr = sim%r%smallr
-    etamag = sim%r%etamag
-    eta_ad = sim%r%eta_ad
-    nimhd_courant = sim%r%nimhd_courant
     sts = (sim%r%nimhd_solver == 'sts')
     heat = .not.(sim%r%isothermal .or. sim%r%induction)
     head_sg = (head_oct - 1) / nsubgridtondim + 1
@@ -750,21 +811,7 @@ contains
 
     call nvtxStartRange("GPU non-ideal MHD", color=1)
 
-    ! Coefficients on level and ghost octs, and explicit diffusion timestep
-    num_threads = 256
-    num_blocks = (num_octs*twotondim + num_threads - 1) / num_threads
-    call nimhd_coeff_kernel<<<num_blocks, num_threads>>>(uold, bold, eta_nimhd, head_oct, num_octs, &
-         & gamma, smallr, etamag, eta_ad)
-    if (num_cache > 0) then
-       num_blocks = (num_cache*twotondim + num_threads - 1) / num_threads
-       call nimhd_coeff_kernel<<<num_blocks, num_threads>>>(uold, bold, eta_nimhd, head_cache, num_cache, &
-            & gamma, smallr, etamag, eta_ad)
-    endif
-    d_dtp(1) = huge(0.0d0)
-    call nimhd_dt_kernel<<<num_sg, threads_per_block>>>(grid, eta_nimhd, bold, nbor, head_sg, num_sg, d_dtp, &
-         & dx, nimhd_courant)
-    h_dtp = d_dtp
-    dt_parab = h_dtp(1)
+    dt_parab = nimhd_dt_parab(sim, ilevel, .false.)
     if (dt_parab >= 0.5d0*huge(0.0d0)) then
        call nvtxEndRange()
        return

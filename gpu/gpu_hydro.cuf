@@ -4172,24 +4172,28 @@ contains
 
   ! Upper bound of eta_o + eta_a*B^2 for the edge shared by the four cells (X,Y,Z) - a*d1 - b*d2,
   ! a,b in {0,1}, from the largest coefficients and face B components of these cells. It is
-  ! zero when the edge EMF is zeroed.
-  attributes(device) function nimhd_chi(bf, eta_o, eta_a, refined, X, Y, Z, i1, j1, k1, i2, j2, k2) result(chi)
+  ! zero when the edge EMF is zeroed, or with coarse_fine unless the edge lies between leaf
+  ! and refined cells.
+  attributes(device) function nimhd_chi(bf, eta_o, eta_a, refined, X, Y, Z, i1, j1, k1, i2, j2, k2, &
+       & coarse_fine) result(chi)
     type(subgrid_face_b_t), intent(in) :: bf
     real(kind=dp), intent(in) :: eta_o(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
     real(kind=dp), intent(in) :: eta_a(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
     logical(kind=1), intent(in) :: refined(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
     integer, value :: X, Y, Z, i1, j1, k1, i2, j2, k2
+    logical, value :: coarse_fine
     real(kind=dp) :: chi, eo, ea, bx2, by2, bz2
-    integer :: a, b, i, j, k
+    integer :: a, b, i, j, k, nref
 
     chi = 0.0_dp
     eo = 0.0_dp; ea = 0.0_dp; bx2 = 0.0_dp; by2 = 0.0_dp; bz2 = 0.0_dp
+    nref = 0
     do b = 0, 1
        do a = 0, 1
           i = X - a*i1 - b*i2
           j = Y - a*j1 - b*j2
           k = Z - a*k1 - b*k2
-          if (refined(i,j,k)) return
+          if (refined(i,j,k)) nref = nref + 1
           eo = max(eo, eta_o(i,j,k))
           ea = max(ea, eta_a(i,j,k))
           bx2 = max(bx2, bf%bx(i,j,k)**2, bf%bx(i+1,j,k)**2)
@@ -4197,13 +4201,18 @@ contains
           bz2 = max(bz2, bf%bz(i,j,k)**2, bf%bz(i,j,k+1)**2)
        end do
     end do
+    if (coarse_fine) then
+       if (nref == 0 .or. nref == 4) return
+    else
+       if (nref > 0) return
+    endif
     chi = eo + ea*(bx2 + by2 + bz2)
   end function nimhd_chi
 
   ! Smallest explicit diffusion timestep nimhd_courant*dx^2/(2*ndim*chi) over the edges of
   ! the level, with chi from nimhd_chi.
   attributes(global) subroutine nimhd_dt_kernel(grid, eta, bin, nbor, head_idx, num_subgrids, data_out, &
-       & dx, nimhd_courant)
+       & dx, nimhd_courant, coarse_fine)
     type(oct), device :: grid(*)
     real(kind=dp), device :: eta(1:twotondim,1:2,*)
     real(kind=dp), device :: bin(1:twotondim,1:6,*)
@@ -4211,6 +4220,7 @@ contains
     integer(kind=4), intent(in), value :: head_idx, num_subgrids
     real(kind=8), device :: data_out(*)
     real(kind=dp), value :: dx, nimhd_courant
+    logical, value :: coarse_fine
 
     real(kind=dp), shared :: eta_o(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
     real(kind=dp), shared :: eta_a(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
@@ -4232,13 +4242,13 @@ contains
     do work_idx = thread_idx, emf_size*3 - 1, blockDim%x
        if (work_idx < emf_size) then
           call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid+1, I, J, K)
-          chi = nimhd_chi(bf, eta_o, eta_a, refined, I+2, J+2, K+2, 1, 0, 0, 0, 1, 0)
+          chi = nimhd_chi(bf, eta_o, eta_a, refined, I+2, J+2, K+2, 1, 0, 0, 0, 1, 0, coarse_fine)
        else if (work_idx < 2*emf_size) then
           call index_1Dto3D(work_idx - emf_size, 2*nsubgrid+1, 2*nsubgrid, I, J, K)
-          chi = nimhd_chi(bf, eta_o, eta_a, refined, I+2, J+2, K+2, 1, 0, 0, 0, 0, 1)
+          chi = nimhd_chi(bf, eta_o, eta_a, refined, I+2, J+2, K+2, 1, 0, 0, 0, 0, 1, coarse_fine)
        else
           call index_1Dto3D(work_idx - 2*emf_size, 2*nsubgrid, 2*nsubgrid+1, I, J, K)
-          chi = nimhd_chi(bf, eta_o, eta_a, refined, I+2, J+2, K+2, 0, 1, 0, 0, 0, 1)
+          chi = nimhd_chi(bf, eta_o, eta_a, refined, I+2, J+2, K+2, 0, 1, 0, 0, 0, 1, coarse_fine)
        end if
        if (chi /= chi) then
           dt_loc = 0d0
