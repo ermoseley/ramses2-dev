@@ -740,11 +740,11 @@ contains
     num_threads = 256
     num_blocks = (num_octs*twotondim + num_threads - 1) / num_threads
     call nimhd_coeff_kernel<<<num_blocks, num_threads>>>(uold, bold, eta_nimhd, head_oct, num_octs, &
-         & real(sim%r%gamma,dp), real(sim%r%smallr,dp), real(sim%r%etamag,dp), real(sim%r%eta_ad,dp))
+         & real(sim%r%gamma,dp), real(sim%r%smallr,dp), real(sim%r%etamag,dp), real(sim%r%eta_a,dp))
     if (num_cache > 0) then
        num_blocks = (num_cache*twotondim + num_threads - 1) / num_threads
        call nimhd_coeff_kernel<<<num_blocks, num_threads>>>(uold, bold, eta_nimhd, head_cache, num_cache, &
-            & real(sim%r%gamma,dp), real(sim%r%smallr,dp), real(sim%r%etamag,dp), real(sim%r%eta_ad,dp))
+            & real(sim%r%gamma,dp), real(sim%r%smallr,dp), real(sim%r%etamag,dp), real(sim%r%eta_a,dp))
     endif
     d_dtp(1) = huge(0.0d0)
     call nimhd_dt_kernel<<<num_sg, threads_per_block>>>(grid, eta_nimhd, bold, nbor, head_sg, num_sg, d_dtp, &
