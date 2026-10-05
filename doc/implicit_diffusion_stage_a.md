@@ -179,11 +179,36 @@ the source and independently checked the saved solutions and residuals.
 This is scalar one-dimensional evidence, not a three-dimensional AD or
 time-dependent qualification. Alternatively, consistent nodal P1 edge
 masses give exact quadratic currents on the nonuniform chain, but change
-regular bulk metrics and evolution. Neither revision to the spatial
-contract is adopted pending the design decision. Independent Astra and
-Opus 5.5 high reviews confirm the conditional obstruction and recommend
-the solution-convergence gate; their reviews are mathematical evidence,
-without new three-dimensional runtime qualification.
+regular bulk metrics and evolution. Independent Astra and Opus 5.5 high
+reviews confirm the conditional obstruction and recommend the
+solution-convergence gate.
+
+On October 5 the user adopted that amendment, retaining native bulk.
+The interface must have at least first-order physical current/EMF
+consistency, exact constant-field current, symmetric positive energy,
+the physical nullspace and exact topology. Bounded conservative `O(1)`
+interface-operator errors are allowed only with demonstrated second-order
+global L1/L2 solution convergence for the actual three-dimensional Ohmic
+and AD operators, including planar interfaces, refined cubes, edges,
+corners and the declared coefficient variants. Complete-operator layer
+errors remain reported. The scalar example and mathematical reviews do
+not satisfy those tests. Stage A construction resumes under this contract;
+solver integration remains conditional on its spatial, thermodynamic
+and cost gates.
+
+The subsequent Opus 5.5 high and Astra review found published elliptic
+finite-volume precedent for second-order solution convergence with
+zeroth-order local truncation. That precedent does not qualify CT/AD.
+The fixed-domain 3D tests must measure the evolved magnetic field and its
+actual reconstructed current, EMF and deposited heat, reporting their
+orders separately. Exact curl structure and a conserved total do not
+replace quantitative weak cancellation or solution convergence. Include
+the full operator halo, deep native interiors, oblique/tangential pure AD
+and the declared coefficient variants; shrinking an isolated fixture
+cannot supply this evidence. If the required accuracy fails, consistent
+compatible mass metrics with sparse mixed equations are a fallback, with
+a new 3D construction and the existing thermal/cost gates still required.
+See [Diskin and Thomas's primary examples](https://ntrs.nasa.gov/api/citations/20110016434/downloads/20110016434.pdf).
 
 A finite positive AD reconstruction has also been tested on the wider
 isolated patch. Its gather and full weighted transpose reproduce the
