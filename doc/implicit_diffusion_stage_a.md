@@ -6,10 +6,11 @@ This branch starts from the split non-ideal MHD framework at
 the branch associated with the Claude conversation “RAMSES2 diffusion
 framework port.” Existing solver modes and their defaults are unchanged.
 
-That reference branch has since advanced to `8cb067f6`, adding synchronized
-all-level explicit/STS stages. This checkpoint has not incorporated that
-commit. Its scheduling is useful future infrastructure; limited coarse
-ghost interpolation does not establish the implicit operator's energy form.
+The reference branch tested synchronized all-level explicit/STS stages at
+`8cb067f6`, then reverted that coupling at `b540fe69`. The last inspected
+head was `cb9a979e`, adding the STS Gegenbauer parameter `nimhd_alpha`.
+This checkpoint has incorporated none of those commits. Their inspection
+does not establish the implicit operator's energy form or macro scheduling.
 
 The reviewed October 4 implicit-diffusion plan requires a consistent,
 accretive composite spatial operator and a local energy partition before
@@ -137,6 +138,52 @@ traces also cancels the complete affine energy Gram and retains SPD
 (minimum eigenvalue 0.80743). It nevertheless gives a constant-field
 adjoint-current residual of exactly `5/64` on a seam edge. This simple
 boundary form therefore does not supply the missing complete operator.
+
+A sparse coarse/detail construction subsequently passes the isolated real
+leaf-complex test without a moment fit. Commuting restriction/prolongation
+maps `R`, `P` and detail projection `D=I-P R` give the positive metrics
+`M=R^T M_coarse R+D^T M_native D` for faces and edges. Their current and
+quadratic diffusion errors are 5.33e-15 and 4.45e-15; changed-block minimum
+eigenvalues are 0.48672 and 0.73258. Root independently checked the saved
+maps, mass identities, moments and eigenvalues. Changes remain confined to
+the isolated 138-face/186-edge neighborhood.
+
+Extending this formula unchanged through a large refined region changes
+the native fine operator: `H P_face=P_face H_coarse`, so a prolonged fine
+`(+,+,-,-)` mode damps at `1/h^2` instead of native `2/h^2`. Adjusting only
+the positive detail masses cannot change that identity. The construction
+therefore remains an isolated prototype under the native-interior contract.
+
+A genuine scalar one-dimensional coarse/fine transition exposes a separate
+symmetry obstruction. Integrated interval fields use native face mass
+`1/length` and node mass `(left_length+right_length)/2`. Any compact symmetric
+correction retaining those exterior masses fails simultaneous constant,
+affine and quadratic current moments. The exact witness `(x^2,-2*x,1)`
+annihilates every correction by symmetry but pairs with the required load
+to -1; root reproduced this certificate. This result uses the physical
+nonuniform mesh, without a coarse/detail projection or translated caps.
+A separate mathematical review extends this obstruction to a periodic
+planar three-dimensional interface with compact metric changes and native
+diagonal exterior metrics. Even affine-current consistency plus quadratic
+Ohmic-operator consistency is incompatible there. The adjoint identity
+closes the possible curl-free current-error escape. This conditional result
+does not exclude alternative bulk metric factorizations or prove an AD-only
+impossibility. Opposing interface loads in an isolated refined island can
+cancel, explaining why the finite cube fits remain feasible.
+
+The pointwise interface-operator gate is stronger than solution convergence.
+A separate four-grid steady scalar test with native metrics has bounded
+`O(1)` layer truncation yet finest volume-weighted L1/L2 solution rates
+2.0064/1.9997. Its integrated linear residual is 3.86e-14. Root inspected
+the source and independently checked the saved solutions and residuals.
+This is scalar one-dimensional evidence, not a three-dimensional AD or
+time-dependent qualification. Alternatively, consistent nodal P1 edge
+masses give exact quadratic currents on the nonuniform chain, but change
+regular bulk metrics and evolution. Neither revision to the spatial
+contract is adopted pending the design decision. Independent Astra and
+Opus 5.5 high reviews confirm the conditional obstruction and recommend
+the solution-convergence gate; their reviews are mathematical evidence,
+without new three-dimensional runtime qualification.
 
 A finite positive AD reconstruction has also been tested on the wider
 isolated patch. Its gather and full weighted transpose reproduce the
