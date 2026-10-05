@@ -1633,6 +1633,49 @@ contains
     symmetry_error=abs(dot_host(x,my)-dot_host(mx,y))/scale
   end function
 
+  attributes(global) subroutine dump_kernel(n,e,f,ue,uf)
+    integer, value :: n
+    real(kind=8), device :: e(*),f(*),ue(54,*),uf(36,*)
+    real(kind=8) :: u(54),v(36)
+    integer :: id
+    id=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (id>n) return
+    call reconstruct_e(id,e,u,0); ue(:,id)=u
+    call reconstruct_f(id,f,v); uf(:,id)=v
+  end subroutine
+
+  ! Debug: write topology and leaf reconstructions of check vectors when IMP_DUMP is set.
+  subroutine imp_dump(e,f)
+    real(kind=8), device :: e(*),f(*)
+    real(kind=8), device, allocatable :: ue(:,:),uf(:,:)
+    real(kind=8), allocatable :: he(:),hf(:),hue(:,:),huf(:,:)
+    integer, allocatable :: a1(:),a2(:,:)
+    character(len=256) :: path
+    integer :: n,u
+    call get_environment_variable('IMP_DUMP',path,n)
+    if (n==0) return
+    allocate(ue(54,imp_nleaf),uf(36,imp_nleaf),he(imp_nedge),hf(imp_nface),hue(54,imp_nleaf),huf(36,imp_nleaf))
+    call dump_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,e,f,ue,uf)
+    he=e(1:imp_nedge); hf=f(1:imp_nface); hue=ue; huf=uf
+    open(newunit=u,file=trim(path),access='stream',form='unformatted',status='replace')
+    write(u) imp_nleaf,imp_nface,imp_nedge,nt,imp_ntr
+    allocate(a2(3,imp_nleaf)); a2=leaf_pos(:,1:imp_nleaf); write(u) a2; deallocate(a2)
+    allocate(a1(imp_nleaf)); a1=imp_leaf_lev(1:imp_nleaf); write(u) a1
+    a1=imp_leaf_cell(1:imp_nleaf); write(u) a1; a1=leaf_t(1:imp_nleaf); write(u) a1; deallocate(a1)
+    allocate(a2(7,imp_nface)); a2=face_rec(:,1:imp_nface); write(u) a2; deallocate(a2)
+    allocate(a2(6,imp_nedge)); a2=edge_rec(:,1:imp_nedge); write(u) a2; deallocate(a2)
+    allocate(a1(54*nt+1)); a1=rer(1:54*nt+1); write(u) a1; n=a1(54*nt+1)-1; deallocate(a1)
+    allocate(a1(n)); a1=rei(1:n); write(u) a1; deallocate(a1)
+    allocate(a1(36*nt+1)); a1=rfr(1:36*nt+1); write(u) a1; n=a1(36*nt+1)-1; deallocate(a1)
+    allocate(a1(n)); a1=rfi(1:n); write(u) a1; deallocate(a1)
+    allocate(a1(imp_nface+1)); a1=cr(1:imp_nface+1); write(u) a1; n=a1(imp_nface+1)-1; deallocate(a1)
+    allocate(a1(n)); a1=ci(1:n); write(u) a1; a1=cs(1:n); write(u) a1; deallocate(a1)
+    write(u) he,hf,hue,huf
+    close(u)
+    write(*,*) 'implicit topology dumped to ',trim(path)
+    deallocate(ue,uf,he,hf,hue,huf)
+  end subroutine
+
   ! Checks use temporary deterministic mobility and restore the caller's cache.
   subroutine imp_check(bold,info)
     real(kind=dp), device :: bold(8,6,*)
@@ -1670,6 +1713,7 @@ contains
     call random_kernel<<<(imp_nedge+255)/256,256>>>(imp_nedge,check_e(:,1),29)
     call random_kernel<<<(imp_nedge+255)/256,256>>>(imp_nedge,check_e(:,2),61)
     call imp_curl(check_e(:,1),check_f(:,3)); call imp_gather(bold,check_f(:,4))
+    call imp_dump(check_e(:,1),check_f(:,1))
     call identity_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,check_e(:,1),check_f(:,1), &
          check_f(:,3),check_f(:,4),bold)
     call GPU_Error_Check(__FILE__, __LINE__)
