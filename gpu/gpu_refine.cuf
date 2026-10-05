@@ -580,6 +580,47 @@ attributes(device) subroutine gather_twondim_parent_stencil( &
      end if
   end do
 end subroutine gather_twondim_parent_stencil
+
+! Prolongate the face-centred B of the ghost octs head_idx..head_idx+num_octs-1 from b of
+! the coarser level, as in make_cache_octs, so that the split non-ideal MHD solver can refresh
+! them at every stage.
+attributes(global) subroutine nimhd_ghost_b_kernel(grid, uold, b, father, hash_key, hash_val, hash_size, &
+     & ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, head_idx, num_octs, interpol_type)
+  implicit none
+  type(oct), device :: grid(*)
+  real(kind=dp), device :: uold(1:twotondim,1:nvar,*)
+  real(kind=dp), device :: b(1:twotondim,1:6,*)
+  integer(kind=4), device :: father(*)
+  integer(kind=8), device :: hash_key(*)
+  integer(kind=4), device :: hash_val(*)
+  integer(kind=4), value :: hash_size
+  integer(kind=4), device :: ckey_max(*)
+  integer(kind=8), device :: key_off(*)
+  integer(kind=4), device :: box_ckey_min(1:ndim,*)
+  integer(kind=4), device :: box_ckey_max(1:ndim,*)
+  logical, device :: periodic(1:3)
+  integer(kind=4), value :: head_idx, num_octs, interpol_type
+  integer(kind=4) :: cache_idx, cell_idx, ckey(1:ndim)
+  integer :: ind, ib
+  real(kind=dp) :: u1(0:twondim,1:nvar), B1(0:twondim,1:6), B2(1:twotondim,1:6)
+  real(kind=dp) :: B3(1:twondim,1:twotondim,1:6)
+  logical :: refined(1:twondim)
+
+  cache_idx = threadIdx%x - 1 + (blockIdx%x - 1) * blockDim%x
+  if (cache_idx >= num_octs) return
+  cache_idx = head_idx + cache_idx
+  ckey(1:ndim) = grid(cache_idx)%ckey(1:ndim)
+  cell_idx = 1 + (ckey(1) - 2*(ckey(1)/2)) + 2*(ckey(2) - 2*(ckey(2)/2)) + 4*(ckey(3) - 2*(ckey(3)/2))
+  call gather_twondim_parent_stencil(grid, uold, b, hash_key, hash_val, hash_size, &
+       & ckey_max, key_off, box_ckey_min, box_ckey_max, periodic, grid(cache_idx)%lev, ckey, &
+       & father(cache_idx), cell_idx, u1, B1, B3, refined)
+  call interpol_mag_d(B1, B2, B3, refined, interpol_type)
+  do ib = 1, 6
+     do ind = 1, twotondim
+        b(ind,ib,cache_idx) = B2(ind,ib)
+     end do
+  end do
+end subroutine nimhd_ghost_b_kernel
 #endif
 
   ! =========================================================================

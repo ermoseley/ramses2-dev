@@ -51,6 +51,7 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
 
   type(pst_t) :: pst
   integer :: ilevel,icount
+  integer :: ilev
   logical :: done,ok_fbk
   !-------------------------------------------------------------------!
   ! This routine is the adaptive-mesh/adaptive-time-step main driver. !
@@ -313,6 +314,20 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   end if
   if (done)return
 
+  !-----------------------------------------------------------------
+  ! First half of the Strang-split non-ideal MHD diffusion of all
+  ! levels, at the finest level once the common time step is known
+  !-----------------------------------------------------------------
+  if(r%hydro.and.r%nimhd_composite.and.r%nimhd_split=='strang'.and..not.r%static_gas)then
+     if(ilevel==r%nlevelmax.or.m%noct_tot(min(ilevel+1,r%nlevelmax))==0)then
+        call m_timer('hydro - non-ideal mhd','start')
+        call r_nimhd_fine(pst,(/ilevel,1/),2)
+        do ilev=r%levelmin,ilevel
+           call r_set_unew(pst,ilev,1)
+        end do
+     endif
+  endif
+
   !------------------
   ! Thermal feedback
   !------------------
@@ -363,7 +378,7 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
 
      !if(.not.r%static_gas)then
         ! First half of the Strang-split non-ideal MHD diffusion of bold
-        if(r%nimhd_solver/='unsplit'.and.r%nimhd_split=='strang'.and..not.r%static_gas)then
+        if(r%nimhd_solver/='unsplit'.and.r%nimhd_split=='strang'.and..not.r%nimhd_composite.and..not.r%static_gas)then
            call m_timer('hydro - non-ideal mhd','start')
            call r_nimhd_fine(pst,(/ilevel,1/),2)
         endif
@@ -397,7 +412,7 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
         call r_set_uold(pst,ilevel,1)
 
         ! Operator-split non-ideal MHD diffusion of bold
-        if(r%nimhd_solver/='unsplit'.and..not.r%static_gas)then
+        if(r%nimhd_solver/='unsplit'.and..not.r%nimhd_composite.and..not.r%static_gas)then
            call m_timer('hydro - non-ideal mhd','start')
            call r_nimhd_fine(pst,(/ilevel,2/),2)
         endif
@@ -422,6 +437,12 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
      if(ilevel<r%nlevelmax)then
         call m_timer('hydro - upload','start')
         call m_upload_fine(pst,ilevel)
+     endif
+
+     ! Second half of the Strang-split, or Godunov-split, non-ideal MHD diffusion of all levels
+     if(ilevel==r%levelmin.and.r%nimhd_composite.and..not.r%static_gas)then
+        call m_timer('hydro - non-ideal mhd','start')
+        call r_nimhd_fine(pst,(/ilevel,2/),2)
      endif
   endif
 
