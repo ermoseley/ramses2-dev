@@ -3717,25 +3717,34 @@ contains
   ! Non-ideal EMF on cell edges, E = -eta_o*J + eta_a*[(J.B)B - B^2*J]. The edge
   ! coefficients average the four cells sharing the edge. The current along the
   ! edge is the natural curl; the transverse currents average the curls of the
-  ! four bounding faces, and B is averaged from the faces to the edge.
-  attributes(device) subroutine cmpnimhd_mhd(bf, eta_o, eta_a, emfx, emfy, emfz, dx, thread_idx)
+  ! four bounding faces, and B is averaged from the faces to the edge. The ambipolar
+  ! EMF is formed on each edge for all three components, keeps a third of its own
+  ! component, and returns a third of the transverse ones to the edges whose curls
+  ! were averaged, with the same weights. The ambipolar operator is then symmetric
+  ! and dissipative for any coefficient field. The transverse components v are
+  ! needed one cell beyond the oct along each edge.
+  attributes(device) subroutine cmpnimhd_mhd(bf, eta_o, eta_a, emfx, emfy, emfz, vx, vy, vz, dx, thread_idx)
     type(subgrid_face_b_t), intent(in) :: bf
     real(kind=dp), intent(in) :: eta_o(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
     real(kind=dp), intent(in) :: eta_a(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
     type(subgrid_2x3x3edge_primitive), intent(inout) :: emfx
     type(subgrid_3x2x3edge_primitive), intent(inout) :: emfy
     type(subgrid_3x3x2edge_primitive), intent(inout) :: emfz
+    real(kind=dp), intent(inout) :: vx(1:2, 1:2*nsubgrid+2, 2:2*nsubgrid+2, 2:2*nsubgrid+2)
+    real(kind=dp), intent(inout) :: vy(1:2, 2:2*nsubgrid+2, 1:2*nsubgrid+2, 2:2*nsubgrid+2)
+    real(kind=dp), intent(inout) :: vz(1:2, 2:2*nsubgrid+2, 2:2*nsubgrid+2, 1:2*nsubgrid+2)
     real(kind=dp), value :: dx
     integer, value :: thread_idx
-    integer :: work_idx, emf_size, I, J, K, X, Y, Z
+    integer :: work_idx, emf_size, ext_size, I, J, K, X, Y, Z
     real(kind=dp) :: jx, jy, jz, bxe, bye, bze, jdotb, b2, eo, ea
 
     emf_size = (2*nsubgrid+1)**2 * (2*nsubgrid)
+    ext_size = (2*nsubgrid+1)**2 * (2*nsubgrid+2)
 
-    do work_idx = thread_idx, emf_size*3 - 1, blockDim%x
-       if (work_idx < emf_size) then
+    do work_idx = thread_idx, ext_size*3 - 1, blockDim%x
+       if (work_idx < ext_size) then
           call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid+1, I, J, K)
-          X = I+2; Y = J+2; Z = K+2
+          X = I+2; Y = J+2; Z = K+1
           jz = (bf%by(X,Y,Z)-bf%by(X-1,Y,Z)) - (bf%bx(X,Y,Z)-bf%bx(X,Y-1,Z))
           jx = 0.25_dp*( &
                & ((bf%bz(X-1,Y,Z  )-bf%bz(X-1,Y-1,Z  )) - (bf%by(X-1,Y,Z  )-bf%by(X-1,Y,Z-1))) + &
@@ -3755,10 +3764,13 @@ contains
           ea = 0.25_dp*(eta_a(X-1,Y-1,Z)+eta_a(X,Y-1,Z)+eta_a(X-1,Y,Z)+eta_a(X,Y,Z))
           jdotb = jx*bxe + jy*bye + jz*bze
           b2 = bxe*bxe + bye*bye + bze*bze
-          emfz%edge_e(I,J,K) = (ea*(jdotb*bze - b2*jz) - eo*jz)/dx
-       else if (work_idx < 2*emf_size) then
-          call index_1Dto3D(work_idx - emf_size, 2*nsubgrid+1, 2*nsubgrid, I, J, K)
-          X = I+2; Y = J+2; Z = K+2
+          ea = ea/dx
+          vz(1,X,Y,Z) = ea*(jdotb*bxe - b2*jx)
+          vz(2,X,Y,Z) = ea*(jdotb*bye - b2*jy)
+          if (K >= 1 .and. K <= 2*nsubgrid) emfz%edge_e(I,J,K-1) = ea*(jdotb*bze - b2*jz)/3.0_dp - eo*jz/dx
+       else if (work_idx < 2*ext_size) then
+          call index_1Dto3D(work_idx - ext_size, 2*nsubgrid+1, 2*nsubgrid+2, I, J, K)
+          X = I+2; Y = J+1; Z = K+2
           jy = (bf%bx(X,Y,Z)-bf%bx(X,Y,Z-1)) - (bf%bz(X,Y,Z)-bf%bz(X-1,Y,Z))
           jz = 0.25_dp*( &
                & ((bf%by(X,Y  ,Z-1)-bf%by(X-1,Y  ,Z-1)) - (bf%bx(X,Y  ,Z-1)-bf%bx(X,Y-1,Z-1))) + &
@@ -3778,10 +3790,13 @@ contains
           ea = 0.25_dp*(eta_a(X-1,Y,Z-1)+eta_a(X,Y,Z-1)+eta_a(X-1,Y,Z)+eta_a(X,Y,Z))
           jdotb = jx*bxe + jy*bye + jz*bze
           b2 = bxe*bxe + bye*bye + bze*bze
-          emfy%edge_e(I,J,K) = (ea*(jdotb*bye - b2*jy) - eo*jy)/dx
+          ea = ea/dx
+          vy(1,X,Y,Z) = ea*(jdotb*bxe - b2*jx)
+          vy(2,X,Y,Z) = ea*(jdotb*bze - b2*jz)
+          if (J >= 1 .and. J <= 2*nsubgrid) emfy%edge_e(I,J-1,K) = ea*(jdotb*bye - b2*jy)/3.0_dp - eo*jy/dx
        else
-          call index_1Dto3D(work_idx - 2*emf_size, 2*nsubgrid, 2*nsubgrid+1, I, J, K)
-          X = I+2; Y = J+2; Z = K+2
+          call index_1Dto3D(work_idx - 2*ext_size, 2*nsubgrid+2, 2*nsubgrid+1, I, J, K)
+          X = I+1; Y = J+2; Z = K+2
           jx = (bf%bz(X,Y,Z)-bf%bz(X,Y-1,Z)) - (bf%by(X,Y,Z)-bf%by(X,Y,Z-1))
           jy = 0.25_dp*( &
                & ((bf%bx(X  ,Y-1,Z)-bf%bx(X  ,Y-1,Z-1)) - (bf%bz(X  ,Y-1,Z)-bf%bz(X-1,Y-1,Z))) + &
@@ -3801,7 +3816,34 @@ contains
           ea = 0.25_dp*(eta_a(X,Y-1,Z-1)+eta_a(X,Y,Z-1)+eta_a(X,Y-1,Z)+eta_a(X,Y,Z))
           jdotb = jx*bxe + jy*bye + jz*bze
           b2 = bxe*bxe + bye*bye + bze*bze
-          emfx%edge_e(I,J,K) = (ea*(jdotb*bxe - b2*jx) - eo*jx)/dx
+          ea = ea/dx
+          vx(1,X,Y,Z) = ea*(jdotb*bye - b2*jy)
+          vx(2,X,Y,Z) = ea*(jdotb*bze - b2*jz)
+          if (I >= 1 .and. I <= 2*nsubgrid) emfx%edge_e(I-1,J,K) = ea*(jdotb*bxe - b2*jx)/3.0_dp - eo*jx/dx
+       end if
+    end do
+
+    call syncthreads()
+
+    do work_idx = thread_idx, emf_size*3 - 1, blockDim%x
+       if (work_idx < emf_size) then
+          call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid+1, I, J, K)
+          X = I+2; Y = J+2; Z = K+2
+          emfz%edge_e(I,J,K) = emfz%edge_e(I,J,K) + ( &
+               & vx(2,X-1,Y,Z  ) + vx(2,X,Y,Z  ) + vx(2,X-1,Y,Z+1) + vx(2,X,Y,Z+1) + &
+               & vy(2,X,Y-1,Z  ) + vy(2,X,Y,Z  ) + vy(2,X,Y-1,Z+1) + vy(2,X,Y,Z+1) )/12.0_dp
+       else if (work_idx < 2*emf_size) then
+          call index_1Dto3D(work_idx - emf_size, 2*nsubgrid+1, 2*nsubgrid, I, J, K)
+          X = I+2; Y = J+2; Z = K+2
+          emfy%edge_e(I,J,K) = emfy%edge_e(I,J,K) + ( &
+               & vz(2,X,Y,Z-1) + vz(2,X,Y+1,Z-1) + vz(2,X,Y,Z) + vz(2,X,Y+1,Z) + &
+               & vx(1,X-1,Y,Z) + vx(1,X,Y,Z) + vx(1,X-1,Y+1,Z) + vx(1,X,Y+1,Z) )/12.0_dp
+       else
+          call index_1Dto3D(work_idx - 2*emf_size, 2*nsubgrid, 2*nsubgrid+1, I, J, K)
+          X = I+2; Y = J+2; Z = K+2
+          emfx%edge_e(I,J,K) = emfx%edge_e(I,J,K) + ( &
+               & vy(1,X,Y-1,Z) + vy(1,X+1,Y-1,Z) + vy(1,X,Y,Z) + vy(1,X+1,Y,Z) + &
+               & vz(1,X,Y,Z-1) + vz(1,X+1,Y,Z-1) + vz(1,X,Y,Z) + vz(1,X+1,Y,Z) )/12.0_dp
        end if
     end do
 
@@ -4107,6 +4149,9 @@ contains
     type(subgrid_2x3x3edge_primitive), shared :: emfx
     type(subgrid_3x2x3edge_primitive), shared :: emfy
     type(subgrid_3x3x2edge_primitive), shared :: emfz
+    real(kind=dp), shared :: vx(1:2, 1:2*nsubgrid+2, 2:2*nsubgrid+2, 2:2*nsubgrid+2)
+    real(kind=dp), shared :: vy(1:2, 2:2*nsubgrid+2, 1:2*nsubgrid+2, 2:2*nsubgrid+2)
+    real(kind=dp), shared :: vz(1:2, 2:2*nsubgrid+2, 2:2*nsubgrid+2, 1:2*nsubgrid+2)
     type(subgrid_3x2x2cell_primitive), shared :: fluxes_x
     type(subgrid_2x3x2cell_primitive), shared :: fluxes_y
     type(subgrid_2x2x3cell_primitive), shared :: fluxes_z
@@ -4121,7 +4166,7 @@ contains
     call subgrid_load_nimhd(grid, eta, yjm1, nbor, head_idx, block_idx, thread_idx, &
          & eta_o, eta_a, refined, bf)
 
-    call cmpnimhd_mhd(bf, eta_o, eta_a, emfx, emfy, emfz, dx, thread_idx)
+    call cmpnimhd_mhd(bf, eta_o, eta_a, emfx, emfy, emfz, vx, vy, vz, dx, thread_idx)
 
     if (ilevel > levelmin) call zero_euler_fluxes_mhd(fluxes_x, fluxes_y, fluxes_z, thread_idx)
     if (heat) call nimhd_poynting_fluxes(fluxes_x, fluxes_y, fluxes_z, emfx, emfy, emfz, bf, thread_idx)
