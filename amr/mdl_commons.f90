@@ -76,6 +76,7 @@ module mdl_parameters
      enumerator::MDL_GODUNOV_FINE
      enumerator::MDL_SET_UNEW
      enumerator::MDL_SET_UOLD
+     enumerator::MDL_NIMHD_FINE
      enumerator::MDL_GRAVITY_HYDRO_FINE
      enumerator::MDL_SOURCE_HYDRO_FINE
      enumerator::MDL_COOLING_FINE

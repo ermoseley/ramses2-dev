@@ -84,6 +84,7 @@ movie.o: amr_commons.o amr_parameters.o hilbert.o hydro_parameters.o mdl.o mdl_c
 nbors_utils.o: amr_commons.o amr_parameters.o boundaries.o cache_commons.o hash.o hilbert.o hydro_parameters.o mdl.o ramses_commons.o
 neq_cooling_module.o: amr_commons.o amr_parameters.o constants.o coolrates_module.o hydro_parameters.o rt_parameters.o
 newdt_fine.o: amr_commons.o amr_parameters.o constants.o courant_fine.o cr_init_flow_fine.o mdl.o mdl_commons.o pm_commons.o pm_parameters.o ramses_commons.o
+nimhd_coeff.o: amr_parameters.o hydro_parameters.o
 oct_commons.o: amr_parameters.o
 output_amr.o: amr_commons.o amr_parameters.o cooling_module.o gadgetreadfile.o hydro_commons.o mdl.o mdl_commons.o output_cr.o output_hydro.o output_part.o output_poisson.o output_rt.o pm_commons.o ramses_commons.o turb_commons.o
 output_clump.o: amr_commons.o amr_parameters.o clfind_commons.o clump_merger.o mdl.o mdl_commons.o pm_commons.o ramses_commons.o
@@ -183,7 +184,7 @@ gpu_cooling.o: amr_parameters.o cooling_module.o hydro_parameters.o oct_commons.
 gpu_feedback.o: amr_parameters.o gpu_utils.o hydro_parameters.o oct_commons.o
 gpu_flag.o: amr_parameters.o gpu_utils.o hydro_parameters.o oct_commons.o
 gpu_hilbert.o: amr_parameters.o hilbert.o
-gpu_hydro.o: amr_parameters.o gpu_utils.o hydro_parameters.o oct_commons.o
+gpu_hydro.o: amr_parameters.o gpu_utils.o hydro_parameters.o nimhd_coeff.o oct_commons.o
 gpu_manager.o: amr_parameters.o gpu_part.o gpu_refine.o gpu_runner.o gpu_utils.o hydro_parameters.o mdl.o mdl_commons.o ramses_commons.o turb_commons.o
 gpu_mg.o: amr_parameters.o gpu_utils.o hydro_parameters.o oct_commons.o
 gpu_mpi.o: amr_parameters.o cache.o cache_commons.o gpu_hydro.o gpu_utils.o hash.o hydro_commons.o hydro_parameters.o marshal.o mdl.o nbors_utils.o oct_commons.o ramses_commons.o

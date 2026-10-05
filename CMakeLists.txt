@@ -515,6 +515,7 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
     # Order matches bin/Makefile MODOBJ: gpu_runner must precede gpu_part.
     set(gpu_cuf_files
         gpu/gpu_utils.cuf
+        hydro/nimhd_coeff.f90
         gpu/gpu_hydro.cuf
         gpu/gpu_cooling.cuf
         gpu/gpu_star.cuf
@@ -722,9 +723,12 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
     set(_gpu_obj_dir "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${EXEC}.dir/gpu")
 
     # Step 1: GPU module dependencies (using object files)
-    set_source_files_properties(gpu/gpu_hydro.cuf gpu/gpu_cooling.cuf gpu/gpu_star.cuf gpu/gpu_feedback.cuf gpu/gpu_rho.cuf
+    set_source_files_properties(gpu/gpu_cooling.cuf gpu/gpu_star.cuf gpu/gpu_feedback.cuf gpu/gpu_rho.cuf
                                 gpu/gpu_mg.cuf gpu/gpu_refine.cuf gpu/gpu_flag.cuf
         PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_utils.cuf.o")
+
+    set_source_files_properties(gpu/gpu_hydro.cuf
+        PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_utils.cuf.o;${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${EXEC}.dir/hydro/nimhd_coeff.f90.o")
 
     set_source_files_properties(gpu/gpu_runner.cuf
         PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_utils.cuf.o;${_gpu_obj_dir}/gpu_hydro.cuf.o;${_gpu_obj_dir}/gpu_cooling.cuf.o;${_gpu_obj_dir}/gpu_star.cuf.o;${_gpu_obj_dir}/gpu_feedback.cuf.o;${_gpu_obj_dir}/gpu_rho.cuf.o;${_gpu_obj_dir}/gpu_mg.cuf.o;${_gpu_obj_dir}/gpu_turb.cuf.o;${_gpu_obj_dir}/gpu_refine.cuf.o;${_gpu_obj_dir}/gpu_flag.cuf.o")

@@ -316,6 +316,12 @@ subroutine m_read_params(pst)
   real(kind=8)::courant_factor=0.5d0
   real(kind=8)::difmag=0.0d0
   real(kind=8)::etamag=0.0d0
+  real(kind=8)::eta_ohm=0.0d0
+  real(kind=8)::eta_ad=0.0d0
+  real(kind=8)::nimhd_courant=0.8d0
+  real(kind=8)::nimhd_alpha=0.5d0
+  character(LEN=10)::nimhd_solver='unsplit'
+  character(LEN=10)::nimhd_split='strang'
   real(kind=8)::smallc=1.d-10
   real(kind=8)::smallr=1.d-10
   character(LEN=10)::scheme='muscl'
@@ -653,7 +659,7 @@ subroutine m_read_params(pst)
        & ,d_region,u_region,v_region,w_region,p_region
   ! Hydro solver parameters
   namelist/hydro_params/gamma,courant_factor,smallr,smallc &
-       & ,slope_type,slope_mag_type,difmag,etamag,gamma_rad &
+       & ,slope_type,slope_mag_type,difmag,etamag,eta_ohm,eta_ad,nimhd_solver,nimhd_split,nimhd_courant,nimhd_alpha,gamma_rad &
        & ,dual_energy,T2_fix,induction,entropy,sgs_turb,equilibrium_sgs,riemann,riemann2d,constant_gravity &
        & ,niter_riemann,scheme,switch_llf_dmin,switch_llf_pmin,smagorinsky_lilly_constant
   ! Grid refinement parameters
@@ -1303,6 +1309,47 @@ subroutine m_read_params(pst)
      endif
   endif
 
+  ! eta_ohm is a synonym of etamag
+  if(eta_ohm/=0.0d0)then
+     if(etamag/=0.0d0.and.etamag/=eta_ohm)then
+        write(*,*)'Error: eta_ohm and etamag are synonyms but differ'
+        nml_ok=.false.
+     endif
+     etamag=eta_ohm
+  endif
+
+  ! Check that the split non-ideal MHD solver is consistent and available
+  if(nimhd_solver/='unsplit'.and.nimhd_solver/='explicit'.and.nimhd_solver/='sts')then
+     write(*,*)'Error: nimhd_solver must be unsplit, explicit or sts'
+     nml_ok=.false.
+  endif
+  if(nimhd_split/='strang'.and.nimhd_split/='godunov')then
+     write(*,*)'Error: nimhd_split must be strang or godunov'
+     nml_ok=.false.
+  endif
+  if(eta_ad>0.0d0.and.nimhd_solver=='unsplit')then
+     write(*,*)'Error: eta_ad>0 needs nimhd_solver=explicit or sts'
+     nml_ok=.false.
+  endif
+  if(nimhd_solver/='unsplit'.and.nimhd_courant<=0.0d0)then
+     write(*,*)'Error: nimhd_courant must be positive'
+     nml_ok=.false.
+  endif
+  if(nimhd_solver=='sts'.and.nimhd_alpha<0.5d0)then
+     write(*,*)'Error: nimhd_alpha must be at least 0.5'
+     nml_ok=.false.
+  endif
+#if !defined(_CUDA) || !defined(MHD) || NDIM!=3
+  if(nimhd_solver/='unsplit')then
+     write(*,*)'Error: nimhd_solver=explicit or sts is only supported by the 3D CUDA MHD solver'
+     nml_ok=.false.
+  endif
+#endif
+  if(nimhd_solver/='unsplit'.and.s%g%ncpu>1)then
+     write(*,*)'Error: nimhd_solver=explicit or sts only runs on a single rank'
+     nml_ok=.false.
+  endif
+
   if(.not. nml_ok)then
      write(*,*)'Too many errors in the namelist'
      write(*,*)'Aborting...'
@@ -1456,6 +1503,12 @@ subroutine m_read_params(pst)
   endif
   s%r%difmag=difmag
   s%r%etamag=etamag
+  s%r%eta_ad=eta_ad
+  s%r%nimhd_courant=nimhd_courant
+  s%r%nimhd_alpha=nimhd_alpha
+  s%r%nimhd_solver=nimhd_solver
+  s%r%nimhd_split=nimhd_split
+  s%r%nimhd_composite=nimhd_solver/='unsplit'.and.nlevelmax>levelmin.and.all(nsubcycle(levelmin:nlevelmax-1)==1)
   s%r%gamma_rad=gamma_rad(1:nener+1)
   s%r%dual_energy=dual_energy
   s%r%T2_fix=T2_fix

@@ -1,6 +1,6 @@
 module courant_fine_module
 #ifdef _CUDA
-  use gpu_runner, only: gpu_cmpdt, gpu_cmpdt_2
+  use gpu_runner, only: gpu_cmpdt, gpu_cmpdt_2, gpu_nimhd_dt
 #endif
 #ifdef _METAL
   use metal_runner, only: metal_cmpdt
@@ -41,6 +41,7 @@ recursive subroutine r_courant_fine(pst,ilevel,input_size,output,output_size)
 #ifdef _CUDA
 !     call gpu_cmpdt(pst%s,ilevel,output%mass,output%ekin,output%eint,output%emag,output%dt)
      call gpu_cmpdt_2(pst%s,ilevel,output%mass,output%ekin,output%eint,output%emag,output%dt)
+     call gpu_nimhd_dt(pst%s,ilevel,output%dt)
 #elif defined(_METAL)
      call metal_cmpdt(pst%s,ilevel,output%mass,output%ekin,output%eint,output%emag,output%dt)
 #else

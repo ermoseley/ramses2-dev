@@ -288,6 +288,9 @@ subroutine gpu_allocate_amr(sim)
   implicit none
   type(ramses_t) :: sim
   integer :: nborarrsize, ilevel
+#ifdef MHD
+  integer :: ng, nh, istat
+#endif
 
   allocate(grid(1:sim%m%ngridmax+sim%m%ncachemax))
   if(sim%r%nlevelmax > sim%r%levelmin)then
@@ -329,6 +332,21 @@ subroutine gpu_allocate_amr(sim)
   allocate(bnew(1:twotondim,1:6,1:sim%m%ngridmax+sim%m%ncachemax))
   bold=0d0
   bnew=0d0
+  if(sim%r%nimhd_solver/='unsplit')then
+     ng=sim%m%ngridmax+sim%m%ncachemax
+     allocate(b_roll2(1:twotondim,1:6,1:ng),b_my0(1:twotondim,1:6,1:ng),eta_nimhd(1:twotondim,1:2,1:ng),stat=istat)
+     if(istat==0.and.sim%r%nimhd_split=='strang'.and..not.sim%r%nimhd_composite)allocate(b_y0(1:twotondim,1:6,1:ng),stat=istat)
+     if(istat==0.and.sim%r%nimhd_composite)allocate(b_cf(1:twotondim,1:6,1:ng),stat=istat)
+     nh=1
+     if(.not.(sim%r%isothermal.or.sim%r%induction))nh=ng
+     if(istat==0)allocate(e_acc(1:twotondim,1:nh),stat=istat)
+     if(sim%r%nimhd_split/='strang')nh=1
+     if(istat==0)allocate(e_acc0(1:twotondim,1:nh),stat=istat)
+     if(istat/=0)then
+        write(*,*)'gpu_allocate_amr: not enough device memory for the split non-ideal MHD solver'
+        error stop
+     endif
+  endif
 #endif
 #ifdef TURB
   allocate(afield_last_d(1:ndim,0:TURB_GS-1,0:TURB_GS-1,0:TURB_GS-1))
