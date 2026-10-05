@@ -704,7 +704,8 @@ contains
     integer, intent(in) :: ilevel
     real(kind=8), intent(inout) :: dt
 #ifdef MHD
-    if (sim%r%nimhd_solver == 'unsplit' .or. sim%r%nimhd_composite .or. ilevel >= sim%r%nlevelmax) return
+    if (sim%r%nimhd_solver == 'unsplit' .or. sim%r%nimhd_solver == 'implicit' .or. &
+         & sim%r%nimhd_composite .or. ilevel >= sim%r%nlevelmax) return
     if (sim%m%noct(ilevel) <= 0) return
     dt = min(dt, nimhd_dt_parab(sim, ilevel, .true.))
 #endif
@@ -726,6 +727,9 @@ contains
     real(dp) :: dx
     real(kind=8), device, dimension(1) :: d_dtp
     real(kind=8), dimension(1) :: h_dtp
+
+    dt_parab = huge(0.0d0)
+    if (sim%r%nimhd_solver == 'implicit') return
 
     head_oct = sim%m%head(ilevel)
     num_octs = sim%m%noct(ilevel)
@@ -969,6 +973,7 @@ contains
   !> @param[in] ilevel : The level whose dtnew is the common time step
   !>
   subroutine gpu_nimhd_composite(sim, ilevel)
+    use implicit_solver, only: gpu_implicit_step
     use nvtx
     use hydro_device, only: nimhd_stage_kernel, nimhd_restrict_b_kernel, nimhd_scratch_kernel
     use refine_device, only: nimhd_ghost_b_kernel
@@ -997,6 +1002,27 @@ contains
     num_threads = 256
 
     call nvtxStartRange("GPU non-ideal MHD", color=1)
+
+    if (sim%r%nimhd_solver == 'implicit') then
+       call gpu_implicit_step(grid, hash_key, hash_val, sim%m%hash_size, ckey_max, key_off, &
+            & box_ckey_min, box_ckey_max, bold, uold, sim%m%head, sim%m%noct, sim%m%ngridmax, &
+            & lmin, lf, sim%r%boxlen, dble(dt), sim%r%gamma, sim%r%smallr, sim%r%etamag, &
+            & sim%r%eta_ad, heat, sim%r%nimhd_rtol, sim%r%nimhd_maxiter, sim%r%nimhd_check, &
+            & sim%r%verbose, sim%g%myid)
+       do l = lf - 1, lmin, -1
+          num_octs = sim%m%noct(l+1)
+          if (num_octs <= 0) cycle
+          call nimhd_restrict_b_kernel<<<(num_octs + num_threads - 1)/num_threads, num_threads>>>(grid, father, bold, &
+               & sim%m%head(l+1), num_octs)
+       end do
+       call refresh_ghosts(bold)
+       do l = lf - 1, lmin, -1
+          call gpu_upload(sim, l)
+       end do
+       call GPU_Error_Check(__FILE__, __LINE__)
+       call nvtxEndRange()
+       return
+    endif
 
     dt_parab = huge(0.0d0)
     do l = lmin, lf

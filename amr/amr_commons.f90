@@ -170,6 +170,9 @@ module amr_commons
      real(kind=8)::eta_ad=0.0d0
      real(kind=8)::nimhd_courant=0.8d0
      real(kind=8)::nimhd_alpha=0.5d0
+     real(kind=8)::nimhd_rtol=1d-8
+     integer::nimhd_maxiter=1000
+     logical::nimhd_check=.false.
      character(LEN=10)::nimhd_solver='unsplit'
      character(LEN=10)::nimhd_split='strang'
      logical::nimhd_composite=.false.

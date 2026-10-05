@@ -527,6 +527,9 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
         gpu/gpu_refine.cuf
         gpu/gpu_flag.cuf
         gpu/gpu_composite_incidence.cuf
+        gpu/gpu_implicit_tables.f90
+        gpu/gpu_implicit_ops.cuf
+        gpu/gpu_implicit.cuf
         gpu/gpu_runner.cuf
         gpu/gpu_clump.cuf
         gpu/gpu_part.cuf
@@ -731,8 +734,13 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
     set_source_files_properties(gpu/gpu_hydro.cuf
         PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_utils.cuf.o;${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${EXEC}.dir/hydro/nimhd_coeff.f90.o")
 
+    set_source_files_properties(gpu/gpu_implicit_ops.cuf
+        PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_refine.cuf.o;${_gpu_obj_dir}/gpu_implicit_tables.f90.o")
+    set_source_files_properties(gpu/gpu_implicit.cuf
+        PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_implicit_ops.cuf.o;${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${EXEC}.dir/hydro/nimhd_coeff.f90.o")
+
     set_source_files_properties(gpu/gpu_runner.cuf
-        PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_utils.cuf.o;${_gpu_obj_dir}/gpu_hydro.cuf.o;${_gpu_obj_dir}/gpu_cooling.cuf.o;${_gpu_obj_dir}/gpu_star.cuf.o;${_gpu_obj_dir}/gpu_feedback.cuf.o;${_gpu_obj_dir}/gpu_rho.cuf.o;${_gpu_obj_dir}/gpu_mg.cuf.o;${_gpu_obj_dir}/gpu_turb.cuf.o;${_gpu_obj_dir}/gpu_refine.cuf.o;${_gpu_obj_dir}/gpu_flag.cuf.o")
+        PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_utils.cuf.o;${_gpu_obj_dir}/gpu_hydro.cuf.o;${_gpu_obj_dir}/gpu_cooling.cuf.o;${_gpu_obj_dir}/gpu_star.cuf.o;${_gpu_obj_dir}/gpu_feedback.cuf.o;${_gpu_obj_dir}/gpu_rho.cuf.o;${_gpu_obj_dir}/gpu_mg.cuf.o;${_gpu_obj_dir}/gpu_turb.cuf.o;${_gpu_obj_dir}/gpu_refine.cuf.o;${_gpu_obj_dir}/gpu_flag.cuf.o;${_gpu_obj_dir}/gpu_composite_incidence.cuf.o;${_gpu_obj_dir}/gpu_implicit.cuf.o")
 
     set_source_files_properties(gpu/gpu_clump.cuf
         PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_utils.cuf.o;${_gpu_obj_dir}/gpu_runner.cuf.o")

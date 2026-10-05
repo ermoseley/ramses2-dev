@@ -1,0 +1,1626 @@
+module implicit_ops
+  use amr_parameters, only: dp
+  use oct_commons, only: oct
+  use cudafor
+  use gpu_utils, only: GPU_Error_Check
+  use refine_device, only: hash_get
+  use implicit_tables, only: lift_f, lift_e
+  implicit none
+  private
+  public :: imp_nleaf, imp_nface, imp_nedge, imp_ntr, imp_quad
+  public :: imp_leaf_oct, imp_leaf_cell, imp_leaf_lev, imp_eta
+  public :: imp_build, imp_free, imp_gather, imp_scatter, imp_leaf_bc, imp_leaf_slots
+  public :: imp_mf, imp_me, imp_me_diag, imp_curl, imp_curlt, imp_set_w, imp_k
+  public :: imp_leaf_mf_form, imp_leaf_k_form, imp_edge_owner_sum, imp_check
+
+  integer(kind=4) :: imp_nleaf=0, imp_nface=0, imp_nedge=0, imp_ntr=0, nt=0
+  logical :: imp_quad=.false., tables_ready=.false.
+  integer(kind=4), device :: ng_d, lf_d
+  real(kind=8), device :: box_d
+  integer(kind=4), device, allocatable :: imp_leaf_oct(:), imp_leaf_cell(:), imp_leaf_lev(:)
+  real(kind=8), device, allocatable :: imp_eta(:,:)
+  integer(kind=4), device, allocatable :: nx_d(:), blo(:,:), bhi(:,:)
+  integer(kind=8), device, allocatable :: off_d(:)
+  integer(kind=4), device, allocatable :: counts(:), prefix(:), oct_counts(:), oct_prefix(:)
+  integer(kind=4), device, allocatable :: leaf_id(:,:), oct_id(:), contributing(:), leaf_t(:), leaf_pos(:,:)
+  integer(kind=4), device, allocatable :: fc(:), ec(:), fp(:), ep(:), fid(:,:), eid(:,:)
+  integer(kind=4), device, allocatable :: face_rec(:,:), edge_rec(:,:)
+  integer(kind=4), device, allocatable :: cr(:), ci(:), cs(:), ctr(:), cti(:), cts(:), work(:)
+  integer(kind=4), device, allocatable :: rfr(:), rfi(:), rer(:), rei(:)
+  integer(kind=4), device, allocatable :: slots(:,:,:), slot_n(:,:), tr_id(:), tr_leaf(:)
+  integer(kind=4), device, allocatable :: sf(:,:), se(:,:), bf(:,:), be(:,:)
+  real(kind=8), device, allocatable :: width(:), cache_w(:,:)
+  integer(kind=4), device :: totals(4), bad(2)
+  integer(kind=4), device :: fa(36), fpos(3,36), ea(54), epos(3,54)
+  integer(kind=4), device :: fb(24), eb(48), cref(36,54), gref(54,27)
+  real(kind=8), device :: rf(36,36,8), re(54,54,8), mfref(36,36), meref(54,54)
+  real(kind=8), device :: lf_table(36,24), le_table(54,48)
+  real(kind=8), device :: gn(5), gw(5), bn(3,5), ba(2,5), gn3(3), gw3(3)
+  real(kind=8), device, allocatable :: check_f(:,:), check_e(:,:), check_l(:,:)
+  real(kind=8), device, allocatable :: saved_eta(:,:), saved_w(:,:)
+contains
+
+  ! Grow-only storage; topology is rebuilt after any growth.
+  subroutine grow_i1(a,n)
+    integer(kind=4), device, allocatable :: a(:)
+    integer :: n
+    if (allocated(a)) then
+       if (size(a)>=max(1,n)) return
+       deallocate(a)
+    endif
+    allocate(a(max(1,n)))
+  end subroutine
+
+  subroutine grow_i2(a,m,n)
+    integer(kind=4), device, allocatable :: a(:,:)
+    integer :: m,n
+    if (allocated(a)) then
+       if (size(a,1)==m.and.size(a,2)>=max(1,n)) return
+       deallocate(a)
+    endif
+    allocate(a(m,max(1,n)))
+  end subroutine
+
+  subroutine grow_i3(a,m,k,n)
+    integer(kind=4), device, allocatable :: a(:,:,:)
+    integer :: m,k,n
+    if (allocated(a)) then
+       if (size(a,1)==m.and.size(a,2)==k.and.size(a,3)>=max(1,n)) return
+       deallocate(a)
+    endif
+    allocate(a(m,k,max(1,n)))
+  end subroutine
+
+  subroutine grow_r1(a,n)
+    real(kind=8), device, allocatable :: a(:)
+    integer :: n
+    if (allocated(a)) then
+       if (size(a)>=max(1,n)) return
+       deallocate(a)
+    endif
+    allocate(a(max(1,n)))
+  end subroutine
+
+  subroutine grow_r2(a,m,n)
+    real(kind=8), device, allocatable :: a(:,:)
+    integer :: m,n
+    if (allocated(a)) then
+       if (size(a,1)>=m.and.size(a,2)>=max(1,n)) return
+       deallocate(a)
+    endif
+    allocate(a(m,max(1,n)))
+  end subroutine
+
+  real(kind=8) function nodal(i,s)
+    integer :: i
+    real(kind=8) :: s
+    nodal=0d0
+    select case(i)
+    case(0)
+       nodal=s*(s-1d0)/2d0
+    case(1)
+       nodal=1d0-s*s
+    case(2)
+       nodal=s*(s+1d0)/2d0
+    end select
+  end function
+
+  real(kind=8) function integral(i,lo,hi)
+    integer :: i
+    real(kind=8) :: lo,hi
+    integral=((hi-lo)+(2*i-1)*(hi*hi-lo*lo))/2d0
+  end function
+
+  ! Reference records are enumerated explicitly in the contract's local order.
+  subroutine init_tables()
+    integer :: af(36),pf(3,36),ae(54),pe(3,54),bfi(24),bei(48)
+    integer :: cc(36,54),gg(54,27),a,b,c,i,j,k,d,f,e,r,t,v,q(3),p(3),bit(3)
+    real(kind=8) :: m0(0:2,0:2),m1(0:1,0:1),fm(36,36),em(54,54)
+    real(kind=8) :: fr(36,36,8),er(54,54,8),lo(3),z,val
+    real(kind=8) :: nodes(5),weights(5),nn(3,5),aa(2,5)
+    if (tables_ready) return
+    f=0; e=0
+    do a=1,3
+       b=mod(a,3)+1; c=mod(a+1,3)+1
+       do i=0,2
+          do j=0,1
+             do k=0,1
+                f=f+1; af(f)=a; pf(a,f)=i; pf(b,f)=j; pf(c,f)=k
+             enddo
+          enddo
+       enddo
+       b=1; if (a==1) b=2
+       c=3; if (a==3) c=2
+       do i=0,1
+          do j=0,2
+             do k=0,2
+                e=e+1; ae(e)=a; pe(a,e)=i; pe(b,e)=j; pe(c,e)=k
+             enddo
+          enddo
+       enddo
+    enddo
+    r=0
+    do f=1,36
+       if (pf(af(f),f)==1) cycle
+       r=r+1; bfi(r)=f
+    enddo
+    r=0
+    do e=1,54
+       a=ae(e); b=1; if (a==1) b=2
+       c=3; if (a==3) c=2
+       if (pe(b,e)==1.and.pe(c,e)==1) cycle
+       r=r+1; bei(r)=e
+    enddo
+    cc=0; gg=0
+    do e=1,54
+       p=pe(:,e); v=1+9*p(1)+3*p(2)+p(3); gg(e,v)=-1
+       p(ae(e))=p(ae(e))+1
+       v=1+9*p(1)+3*p(2)+p(3); gg(e,v)=1
+    enddo
+    do f=1,36
+       a=af(f); b=mod(a,3)+1; c=mod(a+1,3)+1
+       do e=1,54
+          p=pf(:,f); q=p; q(b)=q(b)+1
+          if (ae(e)==b.and.all(pe(:,e)==p)) cc(f,e)=cc(f,e)+1
+          if (ae(e)==c.and.all(pe(:,e)==q)) cc(f,e)=cc(f,e)+1
+          q=p; q(c)=q(c)+1
+          if (ae(e)==b.and.all(pe(:,e)==q)) cc(f,e)=cc(f,e)-1
+          if (ae(e)==c.and.all(pe(:,e)==p)) cc(f,e)=cc(f,e)-1
+       enddo
+    enddo
+    m0=reshape((/4d0,2d0,-1d0,2d0,16d0,2d0,-1d0,2d0,4d0/),(/3,3/))/15d0
+    m1=reshape((/7d0,-1d0,-1d0,7d0/),(/2,2/))/6d0
+    fm=0d0; em=0d0; fr=0d0; er=0d0
+    do f=1,36
+       a=af(f)
+       do r=1,36
+          if (af(r)/=a) cycle
+          val=1d0
+          do d=1,3
+             if (d==a) then
+                val=val*m0(pf(d,f),pf(d,r))
+             else
+                val=val*m1(pf(d,f),pf(d,r))
+             endif
+          enddo
+          fm(f,r)=val
+       enddo
+    enddo
+    do e=1,54
+       a=ae(e)
+       do r=1,54
+          if (ae(r)/=a) cycle
+          val=1d0
+          do d=1,3
+             if (d==a) then
+                val=val*m1(pe(d,e),pe(d,r))
+             else
+                val=val*m0(pe(d,e),pe(d,r))
+             endif
+          enddo
+          em(e,r)=val
+       enddo
+    enddo
+    do t=1,8
+       bit=(/ibits(t-1,0,1),ibits(t-1,1,1),ibits(t-1,2,1)/)
+       do f=1,36
+          a=af(f); lo=real(bit,8)-1d0+real(pf(:,f),8)/2d0
+          do r=1,36
+             if (af(r)/=a) cycle
+             val=1d0
+             do d=1,3
+                if (d==a) then
+                   val=val*nodal(pf(d,r),lo(d))
+                else
+                   val=val*integral(pf(d,r),lo(d),lo(d)+0.5d0)
+                endif
+             enddo
+             fr(f,r,t)=val
+          enddo
+       enddo
+       do e=1,54
+          a=ae(e); lo=real(bit,8)-1d0+real(pe(:,e),8)/2d0
+          do r=1,54
+             if (ae(r)/=a) cycle
+             val=1d0
+             do d=1,3
+                if (d==a) then
+                   val=val*integral(pe(d,r),lo(d),lo(d)+0.5d0)
+                else
+                   val=val*nodal(pe(d,r),lo(d))
+                endif
+             enddo
+             er(e,r,t)=val
+          enddo
+       enddo
+    enddo
+    nodes=(/-sqrt(5d0+2d0*sqrt(10d0/7d0))/3d0, &
+         -sqrt(5d0-2d0*sqrt(10d0/7d0))/3d0,0d0, &
+          sqrt(5d0-2d0*sqrt(10d0/7d0))/3d0,sqrt(5d0+2d0*sqrt(10d0/7d0))/3d0/)
+    weights=(/(322d0-13d0*sqrt(70d0))/900d0,(322d0+13d0*sqrt(70d0))/900d0, &
+         128d0/225d0,(322d0+13d0*sqrt(70d0))/900d0,(322d0-13d0*sqrt(70d0))/900d0/)
+    do i=1,5
+       z=nodes(i)
+       do j=0,2
+          nn(j+1,i)=nodal(j,z)
+       enddo
+       aa(:,i)=(/0.5d0-z,0.5d0+z/)
+    enddo
+    fa=af; fpos=pf; ea=ae; epos=pe; fb=bfi; eb=bei
+    cref=cc; gref=gg; mfref=fm; meref=em; rf=fr; re=er
+    gn=nodes; gw=weights; bn=nn; ba=aa
+    gn3=(/-sqrt(3d0/5d0),0d0,sqrt(3d0/5d0)/); gw3=(/5d0/9d0,8d0/9d0,5d0/9d0/)
+    lf_table=lift_f; le_table=lift_e
+    tables_ready=.true.
+  end subroutine
+
+  ! Periodic real-oct lookup at the specified level.
+  attributes(device) integer function lookup(grid,hk,hv,hs,l,p)
+    type(oct), device :: grid(*)
+    integer(kind=8), device :: hk(*)
+    integer(kind=4), device :: hv(*)
+    integer, value :: hs,l
+    integer :: p(3),q(3),d,idx
+    integer(kind=8) :: nx,key
+    lookup=0
+    if (l<1.or.l>lf_d) return
+    do d=1,3
+       q(d)=blo(d,l)+modulo(p(d)-blo(d,l),bhi(d,l)-blo(d,l))
+    enddo
+    nx=int(nx_d(l),8)
+    key=off_d(l)+int(q(1),8)+int(q(2),8)*nx+int(q(3),8)*nx*nx
+    idx=hash_get(hk,hv,hs,key)
+    if (idx<1.or.idx>ng_d) return
+    if (grid(idx)%lev/=l) return
+    lookup=idx
+  end function
+
+  attributes(device) subroutine cell_state(grid,hk,hv,hs,l,p,id,refined)
+    type(oct), device :: grid(*)
+    integer(kind=8), device :: hk(*)
+    integer(kind=4), device :: hv(*)
+    integer, value :: hs,l
+    integer :: p(3),id,q(3),d,g,c
+    logical :: refined
+    id=0; refined=.false.
+    if (l<1.or.l>lf_d) return
+    do d=1,3
+       q(d)=2*blo(d,l)+modulo(p(d)-2*blo(d,l),2*(bhi(d,l)-blo(d,l)))
+    enddo
+    g=lookup(grid,hk,hv,hs,l,(q-modulo(q,2))/2)
+    if (g==0) return
+    refined=lookup(grid,hk,hv,hs,l+1,q)>0
+    if (refined) return
+    c=1+modulo(q(1),2)+2*modulo(q(2),2)+4*modulo(q(3),2)
+    id=leaf_id(c,g)
+  end subroutine
+
+  ! The returned slot belongs to the canonical owner, even across a periodic seam.
+  attributes(device) subroutine owner(grid,hk,hv,hs,face,l,a,p,id,slot)
+    type(oct), device :: grid(*)
+    integer(kind=8), device :: hk(*)
+    integer(kind=4), device :: hv(*)
+    integer, value :: hs,l,a
+    logical, value :: face
+    integer :: p(3),id,slot,q(3),j,k,b,c,n,ids(4),ss(4)
+    logical :: refined
+    id=0; slot=0; n=0
+    if (face) then
+       do j=0,1
+          q=p; q(a)=q(a)-j
+          call cell_state(grid,hk,hv,hs,l,q,ids(j+1),refined)
+          if (refined) return
+       enddo
+       if (ids(1)>0) then
+          id=ids(1); slot=a
+       else if (ids(2)>0) then
+          id=ids(2); slot=a+3
+       endif
+    else
+       b=1; if (a==1) b=2
+       c=3; if (a==3) c=2
+       do k=0,1
+          do j=0,1
+             q=p; q(b)=q(b)-j; q(c)=q(c)-k; n=n+1
+             call cell_state(grid,hk,hv,hs,l,q,ids(n),refined)
+             if (refined) return
+             ss(n)=4*(a-1)+1+j+2*k
+          enddo
+       enddo
+       do j=1,4
+          if (ids(j)==0) cycle
+          id=ids(j); slot=ss(j); return
+       enddo
+    endif
+  end subroutine
+
+  attributes(device) integer function physical_id(grid,hk,hv,hs,face,l,a,p)
+    type(oct), device :: grid(*)
+    integer(kind=8), device :: hk(*)
+    integer(kind=4), device :: hv(*)
+    integer, value :: hs,l,a
+    logical, value :: face
+    integer :: p(3),id,s
+    call owner(grid,hk,hv,hs,face,l,a,p,id,s)
+    physical_id=0
+    if (id==0) return
+    if (face) then
+       physical_id=fid(s,id)
+    else
+       physical_id=eid(s,id)
+    endif
+  end function
+
+  ! Explicit breadth descent, at most two levels below an oct skeleton.
+  attributes(device) subroutine fragments(grid,hk,hv,hs,face,l,a,p,maxdepth,ids,n)
+    type(oct), device :: grid(*)
+    integer(kind=8), device :: hk(*)
+    integer(kind=4), device :: hv(*)
+    integer, value :: hs,l,a,maxdepth
+    logical, value :: face
+    integer :: p(3),ids(16),n,depth,np,nq,pp(3,16),qq(3,16),q(3),i,j,k,b,c,id,tmp
+    n=0; np=1; pp(:,1)=p; ids=0
+    b=mod(a,3)+1; c=mod(a+1,3)+1
+    do depth=0,maxdepth
+       nq=0
+       do i=1,np
+          q=pp(:,i)
+          id=physical_id(grid,hk,hv,hs,face,l+depth,a,q)
+          if (id>0) then
+             n=n+1; ids(n)=id
+          else if (depth==maxdepth) then
+             tmp=atomicadd(bad(2),1)
+          else if (face) then
+             do j=0,1
+                do k=0,1
+                   nq=nq+1; qq(:,nq)=2*q
+                   qq(b,nq)=qq(b,nq)+j; qq(c,nq)=qq(c,nq)+k
+                enddo
+             enddo
+          else
+             do j=0,1
+                nq=nq+1; qq(:,nq)=2*q; qq(a,nq)=qq(a,nq)+j
+             enddo
+          endif
+       enddo
+       if (nq==0) exit
+       np=nq; pp(:,1:np)=qq(:,1:np)
+    enddo
+  end subroutine
+
+  attributes(global) subroutine scan_kernel(n,c,p,total,which)
+    integer, value :: n,which
+    integer(kind=4), device :: c(*),p(*),total(*)
+    integer :: i,s
+    if (threadIdx%x/=1.or.blockIdx%x/=1) return
+    s=1; p(1)=s
+    do i=1,n
+       s=s+c(i); p(i+1)=s
+    enddo
+    total(which)=s-1
+  end subroutine
+
+  ! Count leaves and check P without relying on cached refined flags.
+  attributes(global) subroutine enumerate_count_kernel(grid,hk,hv,hs,l,head,noct)
+    type(oct), device :: grid(*)
+    integer(kind=8), device :: hk(*)
+    integer(kind=4), device :: hv(*)
+    integer, value :: hs,l,head,noct
+    integer :: i,g,c,p(3),q(3),child,j,dx,dy,dz,tmp,n
+    logical :: grandchildren
+    i=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (i>noct) return
+    g=head+i-1
+    if (g<1.or.g>ng_d) return
+    if (grid(g)%lev/=l) return
+    n=0
+    do c=0,7
+       p=2*grid(g)%ckey+(/ibits(c,0,1),ibits(c,1,1),ibits(c,2,1)/)
+       child=lookup(grid,hk,hv,hs,l+1,p)
+       if (child==0) then
+          n=n+1; cycle
+       endif
+       grandchildren=.false.
+       do j=0,7
+          q=2*p+(/ibits(j,0,1),ibits(j,1,1),ibits(j,2,1)/)
+          if (lookup(grid,hk,hv,hs,l+2,q)>0) grandchildren=.true.
+       enddo
+       if (.not.grandchildren) cycle
+       do dz=-1,1
+          do dy=-1,1
+             do dx=-1,1
+                if (dx==0.and.dy==0.and.dz==0) cycle
+                q=p+(/dx,dy,dz/)
+                ! A refined neighbour is the real child oct, after cell-level wrap.
+                q=2*blo(:,l)+modulo(q-2*blo(:,l),2*(bhi(:,l)-blo(:,l)))
+                if (lookup(grid,hk,hv,hs,l+1,q)==0) tmp=atomicadd(bad(1),1)
+             enddo
+          enddo
+       enddo
+    enddo
+    counts(g)=n; oct_counts(g)=0
+    if (n>0) oct_counts(g)=1
+  end subroutine
+
+  attributes(global) subroutine enumerate_fill_kernel(grid,hk,hv,hs,n)
+    type(oct), device :: grid(*)
+    integer(kind=8), device :: hk(*)
+    integer(kind=4), device :: hv(*)
+    integer, value :: hs,n
+    integer :: g,c,p(3),id,l,t
+    g=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (g>n) return
+    if (counts(g)==0) return
+    id=prefix(g); t=oct_prefix(g); contributing(t)=g; oct_id(g)=t; l=grid(g)%lev
+    do c=0,7
+       p=2*grid(g)%ckey+(/ibits(c,0,1),ibits(c,1,1),ibits(c,2,1)/)
+       if (lookup(grid,hk,hv,hs,l+1,p)>0) cycle
+       leaf_id(c+1,g)=id; imp_leaf_oct(id)=g; imp_leaf_cell(id)=c+1
+       imp_leaf_lev(id)=l; leaf_t(id)=t; leaf_pos(:,id)=p
+       width(id)=box_d/(2d0**l); id=id+1
+    enddo
+  end subroutine
+
+  attributes(global) subroutine ownership_kernel(grid,hk,hv,hs,n,fill)
+    type(oct), device :: grid(*)
+    integer(kind=8), device :: hk(*)
+    integer(kind=4), device :: hv(*)
+    integer, value :: hs,n
+    logical, value :: fill
+    integer :: id,g,l,cell,p(3),q(3),a,b,c,s,j,k,who,os,nf,ne,f,e,d
+    id=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (id>n) return
+    g=imp_leaf_oct(id); l=imp_leaf_lev(id); cell=imp_leaf_cell(id)-1
+    p=2*grid(g)%ckey+(/ibits(cell,0,1),ibits(cell,1,1),ibits(cell,2,1)/)
+    nf=0; ne=0
+    do s=1,6
+       a=mod(s-1,3)+1; q=p
+       if (s>3) q(a)=q(a)+1
+       call owner(grid,hk,hv,hs,.true.,l,a,q,who,os)
+       if (who/=id.or.os/=s) cycle
+       nf=nf+1
+       if (.not.fill) cycle
+       f=fp(id)+nf-1; fid(s,id)=f
+       face_rec(1,f)=l; face_rec(2,f)=a
+       do d=1,3
+          face_rec(d+2,f)=2*blo(d,l)+modulo(q(d)-2*blo(d,l),2*(bhi(d,l)-blo(d,l)))
+       enddo
+       face_rec(6,f)=id; face_rec(7,f)=s
+    enddo
+    do a=1,3
+       b=1; if (a==1) b=2
+       c=3; if (a==3) c=2
+       do k=0,1
+          do j=0,1
+             s=4*(a-1)+1+j+2*k; q=p; q(b)=q(b)+j; q(c)=q(c)+k
+             call owner(grid,hk,hv,hs,.false.,l,a,q,who,os)
+             if (who/=id.or.os/=s) cycle
+             ne=ne+1
+             if (.not.fill) cycle
+             e=ep(id)+ne-1; eid(s,id)=e
+             edge_rec(1,e)=l; edge_rec(2,e)=a
+             do d=1,3
+                edge_rec(d+2,e)=2*blo(d,l)+modulo(q(d)-2*blo(d,l),2*(bhi(d,l)-blo(d,l)))
+             enddo
+             edge_rec(6,e)=id
+          enddo
+       enddo
+    enddo
+    fc(id)=nf; ec(id)=ne
+  end subroutine
+
+  attributes(global) subroutine skeleton_kernel(grid,hk,hv,hs,n,face,fill)
+    type(oct), device :: grid(*)
+    integer(kind=8), device :: hk(*)
+    integer(kind=4), device :: hv(*)
+    integer, value :: hs,n
+    logical, value :: face,fill
+    integer :: row,t,r,nlocal,g,l,p(3),a,ids(16),m,j
+    row=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (row>n) return
+    nlocal=54; if (face) nlocal=36
+    t=(row-1)/nlocal+1; r=mod(row-1,nlocal)+1; g=contributing(t); l=grid(g)%lev
+    if (face) then
+       a=fa(r); p=2*grid(g)%ckey+fpos(:,r)
+    else
+       a=ea(r); p=2*grid(g)%ckey+epos(:,r)
+    endif
+    call fragments(grid,hk,hv,hs,face,l,a,p,2,ids,m)
+    if (.not.fill) then
+       work(row)=m
+    else if (face) then
+       do j=1,m
+          rfi(rfr(row)+j-1)=ids(j)
+       enddo
+    else
+       do j=1,m
+          rei(rer(row)+j-1)=ids(j)
+       enddo
+    endif
+  end subroutine
+
+  attributes(global) subroutine incidence_kernel(grid,hk,hv,hs,n,fill)
+    type(oct), device :: grid(*)
+    integer(kind=8), device :: hk(*)
+    integer(kind=4), device :: hv(*)
+    integer, value :: hs,n
+    logical, value :: fill
+    integer :: f,l,a,b,c,p(3),q(3),side,d,sgn,ids(16),m,j,k,nn,tmp
+    f=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (f>n) return
+    l=face_rec(1,f); a=face_rec(2,f); b=mod(a,3)+1; c=mod(a+1,3)+1
+    p=face_rec(3:5,f); nn=0
+    do side=1,4
+       q=p; sgn=1
+       select case(side)
+       case(1)
+          d=b
+       case(2)
+          d=c; q(b)=q(b)+1
+       case(3)
+          d=b; q(c)=q(c)+1; sgn=-1
+       case(4)
+          d=c; sgn=-1
+       end select
+       call fragments(grid,hk,hv,hs,.false.,l,d,q,1,ids,m)
+       do j=1,m
+          nn=nn+1
+          if (.not.fill) cycle
+          k=cr(f)+nn-1; ci(k)=ids(j); cs(k)=sgn
+          tmp=atomicadd(work(ids(j)),1)
+       enddo
+    enddo
+    if (.not.fill) work(f)=nn
+  end subroutine
+
+  ! A serial fill preserves face/side order within every transpose row.
+  attributes(global) subroutine transpose_fill_kernel(n)
+    integer, value :: n
+    integer :: f,j,e,k
+    if (blockIdx%x/=1.or.threadIdx%x/=1) return
+    do f=1,n
+       do j=cr(f),cr(f+1)-1
+          e=ci(j); k=ctr(e)+work(e); work(e)=work(e)+1
+          cti(k)=f; cts(k)=cs(j)
+       enddo
+    enddo
+  end subroutine
+
+  attributes(global) subroutine leaf_topology_kernel(grid,hk,hv,hs,n)
+    type(oct), device :: grid(*)
+    integer(kind=8), device :: hk(*)
+    integer(kind=4), device :: hv(*)
+    integer, value :: hs,n
+    integer :: id,g,l,cell,p(3),q(3),s,a,b,c,j,k,ids(16),m,ntr
+    id=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (id>n) return
+    g=imp_leaf_oct(id); l=imp_leaf_lev(id); cell=imp_leaf_cell(id)-1
+    p=2*grid(g)%ckey+(/ibits(cell,0,1),ibits(cell,1,1),ibits(cell,2,1)/)
+    ntr=0
+    do s=1,6
+       a=mod(s-1,3)+1; q=p
+       if (s>3) q(a)=q(a)+1
+       call fragments(grid,hk,hv,hs,.true.,l,a,q,1,ids,m)
+       slot_n(s,id)=m; slots(:,s,id)=0; slots(1:m,s,id)=ids(1:m)
+       if (m>1) ntr=1
+    enddo
+    do a=1,3
+       b=1; if (a==1) b=2
+       c=3; if (a==3) c=2
+       do k=0,1
+          do j=0,1
+             q=p; q(b)=q(b)+j; q(c)=q(c)+k
+             call fragments(grid,hk,hv,hs,.false.,l,a,q,1,ids,m)
+             if (m>1) ntr=1
+          enddo
+       enddo
+    enddo
+    counts(id)=ntr
+  end subroutine
+
+  attributes(global) subroutine transition_kernel(grid,hk,hv,hs,n)
+    type(oct), device :: grid(*)
+    integer(kind=8), device :: hk(*)
+    integer(kind=4), device :: hv(*)
+    integer, value :: hs,n
+    integer :: id,t,g,l,cell,p(3),q(3),a,b,c,j,k,s,r,ids(16),m,f,e
+    id=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (id>n) return
+    tr_id(id)=0
+    if (counts(id)==0) return
+    t=prefix(id); tr_id(id)=t; tr_leaf(t)=id
+    g=imp_leaf_oct(id); l=imp_leaf_lev(id); cell=imp_leaf_cell(id)-1
+    p=2*grid(g)%ckey+(/ibits(cell,0,1),ibits(cell,1,1),ibits(cell,2,1)/)
+    do s=1,6
+       sf(s,t)=0
+       if (slot_n(s,id)>1) sf(s,t)=1
+    enddo
+    do a=1,3
+       b=1; if (a==1) b=2
+       c=3; if (a==3) c=2
+       do k=0,1
+          do j=0,1
+             q=p; q(b)=q(b)+j; q(c)=q(c)+k; s=4*(a-1)+1+j+2*k
+             call fragments(grid,hk,hv,hs,.false.,l,a,q,1,ids,m)
+             se(s,t)=0; if (m>1) se(s,t)=1
+          enddo
+       enddo
+    enddo
+    do r=1,24
+       f=fb(r); a=fa(f); q=2*p+fpos(:,f)
+       bf(r,t)=physical_id(grid,hk,hv,hs,.true.,l+1,a,q)
+    enddo
+    do r=1,48
+       e=eb(r); a=ea(e); q=2*p+epos(:,e)
+       be(r,t)=physical_id(grid,hk,hv,hs,.false.,l+1,a,q)
+    enddo
+  end subroutine
+
+  ! Build all physical topology on the device. head/noct are host level arrays.
+  subroutine imp_build(grid,hash_key,hash_val,hash_size,ckey_max,key_off, &
+       box_ckey_min,box_ckey_max,head,noct,ngridmax,lmin,lf,boxlen,info)
+    type(oct), device :: grid(*)
+    integer(kind=8), device :: hash_key(*),key_off(:)
+    integer(kind=4), device :: hash_val(*),ckey_max(:),box_ckey_min(:,:),box_ckey_max(:,:)
+    integer(kind=4) :: hash_size,head(:),noct(:),ngridmax,lmin,lf,info
+    real(kind=8) :: boxlen
+    integer :: l,h(4),errors(2),nfz,nez,ncz
+    call init_tables()
+    ng_d=ngridmax; lf_d=lf; box_d=boxlen
+    call grow_i1(nx_d,lf); call grow_i2(blo,3,lf); call grow_i2(bhi,3,lf)
+    if (allocated(off_d)) then
+       if (size(off_d)<lf) deallocate(off_d)
+    endif
+    if (.not.allocated(off_d)) allocate(off_d(lf))
+    nx_d(1:lf)=ckey_max(1:lf); off_d(1:lf)=key_off(1:lf)
+    blo(:,1:lf)=box_ckey_min(:,1:lf); bhi(:,1:lf)=box_ckey_max(:,1:lf)
+    call grow_i1(counts,max(ngridmax,imp_nleaf)); call grow_i1(prefix,max(ngridmax,imp_nleaf)+1)
+    call grow_i1(oct_counts,ngridmax); call grow_i1(oct_prefix,ngridmax+1)
+    call grow_i2(leaf_id,8,ngridmax); call grow_i1(oct_id,ngridmax)
+    counts=0; oct_counts=0; leaf_id=0; oct_id=0; bad=0; totals=0
+    do l=lmin,lf
+       if (noct(l)<=0) cycle
+       call enumerate_count_kernel<<<(noct(l)+255)/256,256>>>(grid,hash_key,hash_val,hash_size,l,head(l),noct(l))
+    enddo
+    call scan_kernel<<<1,1>>>(ngridmax,counts,prefix,totals,1)
+    call scan_kernel<<<1,1>>>(ngridmax,oct_counts,oct_prefix,totals,4)
+    call GPU_Error_Check(__FILE__, __LINE__)
+    h=totals; errors=bad; imp_nleaf=h(1); nt=h(4)
+    imp_nface=0; imp_nedge=0; imp_ntr=0; info=0
+    if (errors(1)>0) then
+       write(*,'(A,I0)') 'implicit P violation: missing refined neighbours = ',errors(1)
+       info=1; return
+    endif
+    call grow_i1(imp_leaf_oct,imp_nleaf); call grow_i1(imp_leaf_cell,imp_nleaf)
+    call grow_i1(imp_leaf_lev,imp_nleaf); call grow_i1(leaf_t,imp_nleaf); call grow_i1(contributing,nt)
+    call grow_i2(leaf_pos,3,imp_nleaf)
+    call grow_r1(width,imp_nleaf); call grow_r2(imp_eta,2,imp_nleaf); call grow_r2(cache_w,36,imp_nleaf)
+    imp_eta=0d0; cache_w=0d0
+    if (imp_nleaf==0) return
+    call enumerate_fill_kernel<<<(ngridmax+255)/256,256>>>(grid,hash_key,hash_val,hash_size,ngridmax)
+    call grow_i1(fc,imp_nleaf); call grow_i1(ec,imp_nleaf)
+    call grow_i1(fp,imp_nleaf+1); call grow_i1(ep,imp_nleaf+1)
+    call grow_i2(fid,6,imp_nleaf); call grow_i2(eid,12,imp_nleaf); fid=0; eid=0
+    call ownership_kernel<<<(imp_nleaf+255)/256,256>>>(grid,hash_key,hash_val,hash_size,imp_nleaf,.false.)
+    call scan_kernel<<<1,1>>>(imp_nleaf,fc,fp,totals,2)
+    call scan_kernel<<<1,1>>>(imp_nleaf,ec,ep,totals,3)
+    call GPU_Error_Check(__FILE__, __LINE__)
+    h=totals; imp_nface=h(2); imp_nedge=h(3)
+    call grow_i2(face_rec,7,imp_nface); call grow_i2(edge_rec,6,imp_nedge)
+    call ownership_kernel<<<(imp_nleaf+255)/256,256>>>(grid,hash_key,hash_val,hash_size,imp_nleaf,.true.)
+    call grow_i1(work,max(54*nt,imp_nface,imp_nedge))
+    call grow_i1(rfr,36*nt+1); call grow_i1(rer,54*nt+1)
+    call skeleton_kernel<<<(36*nt+255)/256,256>>>(grid,hash_key,hash_val,hash_size,36*nt,.true.,.false.)
+    call scan_kernel<<<1,1>>>(36*nt,work,rfr,totals,1)
+    h=totals; nfz=h(1); call grow_i1(rfi,nfz)
+    call skeleton_kernel<<<(36*nt+255)/256,256>>>(grid,hash_key,hash_val,hash_size,36*nt,.true.,.true.)
+    call skeleton_kernel<<<(54*nt+255)/256,256>>>(grid,hash_key,hash_val,hash_size,54*nt,.false.,.false.)
+    call scan_kernel<<<1,1>>>(54*nt,work,rer,totals,1)
+    h=totals; nez=h(1); call grow_i1(rei,nez)
+    call skeleton_kernel<<<(54*nt+255)/256,256>>>(grid,hash_key,hash_val,hash_size,54*nt,.false.,.true.)
+    call grow_i1(cr,imp_nface+1); call grow_i1(ctr,imp_nedge+1)
+    call incidence_kernel<<<(imp_nface+255)/256,256>>>(grid,hash_key,hash_val,hash_size,imp_nface,.false.)
+    call scan_kernel<<<1,1>>>(imp_nface,work,cr,totals,1)
+    h=totals; ncz=h(1)
+    call grow_i1(ci,ncz); call grow_i1(cs,ncz); call grow_i1(cti,ncz); call grow_i1(cts,ncz)
+    work=0
+    call incidence_kernel<<<(imp_nface+255)/256,256>>>(grid,hash_key,hash_val,hash_size,imp_nface,.true.)
+    call scan_kernel<<<1,1>>>(imp_nedge,work,ctr,totals,1)
+    work=0; call transpose_fill_kernel<<<1,1>>>(imp_nface)
+    call grow_i3(slots,4,6,imp_nleaf); call grow_i2(slot_n,6,imp_nleaf); call grow_i1(tr_id,imp_nleaf)
+    call grow_i1(counts,max(ngridmax,imp_nleaf)); call grow_i1(prefix,max(ngridmax,imp_nleaf)+1)
+    call leaf_topology_kernel<<<(imp_nleaf+255)/256,256>>>(grid,hash_key,hash_val,hash_size,imp_nleaf)
+    call scan_kernel<<<1,1>>>(imp_nleaf,counts,prefix,totals,1)
+    h=totals; imp_ntr=h(1)
+    call grow_i1(tr_leaf,imp_ntr); call grow_i2(sf,6,imp_ntr); call grow_i2(se,12,imp_ntr)
+    call grow_i2(bf,24,imp_ntr); call grow_i2(be,48,imp_ntr)
+    call transition_kernel<<<(imp_nleaf+255)/256,256>>>(grid,hash_key,hash_val,hash_size,imp_nleaf)
+    call GPU_Error_Check(__FILE__, __LINE__)
+    errors=bad
+    if (errors(2)>0) then
+       write(*,'(A,I0)') 'implicit unresolved physical fragments = ',errors(2)
+       error stop 'implicit topology resolution failed'
+    endif
+  end subroutine
+
+  attributes(device) real(kind=8) function entry(x,i,unit)
+    real(kind=8), device :: x(*)
+    integer, value :: i,unit
+    if (unit==0) then
+       entry=x(i)
+    else
+       entry=0d0; if (i==unit) entry=1d0
+    endif
+  end function
+
+  attributes(device) subroutine reconstruct_f(id,x,u)
+    integer, value :: id
+    real(kind=8), device :: x(*)
+    real(kind=8) :: u(36),v(36),nu(24)
+    integer :: t,bit,r,j,row,s,f,p
+    t=leaf_t(id); bit=imp_leaf_cell(id)
+    do r=1,36
+       row=36*(t-1)+r; v(r)=0d0
+       do p=rfr(row),rfr(row+1)-1
+          v(r)=v(r)+x(rfi(p))
+       enddo
+    enddo
+    do r=1,36
+       u(r)=0d0
+       do j=1,36
+          u(r)=u(r)+rf(r,j,bit)*v(j)
+       enddo
+    enddo
+    t=tr_id(id)
+    if (t==0) return
+    nu=0d0
+    do r=1,24
+       f=fb(r); s=fa(f)+3*(fpos(fa(f),f)/2)
+       if (sf(s,t)==0) cycle
+       if (bf(r,t)>0) nu(r)=x(bf(r,t))-u(f)
+    enddo
+    do r=1,36
+       do j=1,24
+          u(r)=u(r)+lf_table(r,j)*nu(j)
+       enddo
+    enddo
+  end subroutine
+
+  ! Tau and its transpose use the same split-face override predicate.
+  attributes(device) logical function overridden(t,e)
+    integer, value :: t,e
+    integer :: a,s,p
+    overridden=.false.
+    do a=1,3
+       if (a==ea(e)) cycle
+       p=epos(a,e)
+       if (p==1) cycle
+       s=a+3*(p/2)
+       if (sf(s,t)>0) overridden=.true.
+    enddo
+  end function
+
+  attributes(device) subroutine edge_tau(t,d,tau)
+    integer, value :: t
+    real(kind=8) :: d(48),tau(48),phi(27)
+    integer :: r,e,a,b,c,s,p(3),q(3),v,j,centre
+    phi=0d0
+    do r=1,48
+       e=eb(r); a=ea(e); b=1; if (a==1) b=2
+       c=3; if (a==3) c=2
+       p=epos(:,e)
+       if (p(a)/=0.or.p(b)==1.or.p(c)==1) cycle
+       s=4*(a-1)+1+p(b)/2+p(c)
+       if (se(s,t)==0) cycle
+       p(a)=1; v=1+9*p(1)+3*p(2)+p(3); phi(v)=d(r)
+    enddo
+    do a=1,3
+       do s=0,1
+          p=1; p(a)=2*s; centre=1+9*p(1)+3*p(2)+p(3)
+          do b=1,3
+             if (b==a) cycle
+             do j=0,1
+                q=p; q(b)=2*j; v=1+9*q(1)+3*q(2)+q(3)
+                phi(centre)=phi(centre)+0.25d0*phi(v)
+             enddo
+          enddo
+       enddo
+    enddo
+    do r=1,48
+       e=eb(r); tau(r)=0d0
+       if (overridden(t,e)) then
+          tau(r)=d(r)
+       else
+          do v=1,27
+             tau(r)=tau(r)+gref(e,v)*phi(v)
+          enddo
+       endif
+    enddo
+  end subroutine
+
+  attributes(device) subroutine edge_tau_t(t,tau,d)
+    integer, value :: t
+    real(kind=8) :: d(48),tau(48),phi(27)
+    integer :: r,e,a,b,c,s,p(3),q(3),v,j,centre
+    d=0d0; phi=0d0
+    do r=1,48
+       e=eb(r)
+       if (overridden(t,e)) then
+          d(r)=d(r)+tau(r)
+       else
+          do v=1,27
+             phi(v)=phi(v)+gref(e,v)*tau(r)
+          enddo
+       endif
+    enddo
+    do a=1,3
+       do s=0,1
+          p=1; p(a)=2*s; centre=1+9*p(1)+3*p(2)+p(3)
+          do b=1,3
+             if (b==a) cycle
+             do j=0,1
+                q=p; q(b)=2*j; v=1+9*q(1)+3*q(2)+q(3)
+                phi(v)=phi(v)+0.25d0*phi(centre)
+             enddo
+          enddo
+       enddo
+    enddo
+    do r=1,48
+       e=eb(r); a=ea(e); b=1; if (a==1) b=2
+       c=3; if (a==3) c=2
+       p=epos(:,e)
+       if (p(a)/=0.or.p(b)==1.or.p(c)==1) cycle
+       s=4*(a-1)+1+p(b)/2+p(c)
+       if (se(s,t)==0) cycle
+       p(a)=1; v=1+9*p(1)+3*p(2)+p(3); d(r)=d(r)+phi(v)
+    enddo
+  end subroutine
+
+  attributes(device) subroutine reconstruct_e(id,x,u,unit)
+    integer, value :: id,unit
+    real(kind=8), device :: x(*)
+    real(kind=8) :: u(54),v(54),d(48),tau(48)
+    integer :: t,bit,r,j,row,p
+    t=leaf_t(id); bit=imp_leaf_cell(id)
+    do r=1,54
+       row=54*(t-1)+r; v(r)=0d0
+       do p=rer(row),rer(row+1)-1
+          v(r)=v(r)+entry(x,rei(p),unit)
+       enddo
+    enddo
+    do r=1,54
+       u(r)=0d0
+       do j=1,54
+          u(r)=u(r)+re(r,j,bit)*v(j)
+       enddo
+    enddo
+    t=tr_id(id)
+    if (t==0) return
+    d=0d0
+    do r=1,48
+       if (be(r,t)>0) d(r)=entry(x,be(r,t),unit)-u(eb(r))
+    enddo
+    call edge_tau(t,d,tau)
+    do r=1,54
+       do j=1,48
+          u(r)=u(r)+le_table(r,j)*tau(j)
+       enddo
+    enddo
+  end subroutine
+
+  attributes(device) subroutine adjoint_f(id,u,y)
+    integer, value :: id
+    real(kind=8) :: u(36),q(36),v(36),nu(24),tmp
+    real(kind=8), device :: y(*)
+    integer :: t,bit,r,j,row,s,f,p
+    q=u; t=tr_id(id)
+    if (t>0) then
+       do r=1,24
+          nu(r)=0d0
+          do j=1,36
+             nu(r)=nu(r)+lf_table(j,r)*u(j)
+          enddo
+          f=fb(r); s=fa(f)+3*(fpos(fa(f),f)/2)
+          if (sf(s,t)==0.or.bf(r,t)==0) cycle
+          tmp=atomicadd(y(bf(r,t)),nu(r)); q(f)=q(f)-nu(r)
+       enddo
+    endif
+    t=leaf_t(id); bit=imp_leaf_cell(id)
+    do r=1,36
+       v(r)=0d0
+       do j=1,36
+          v(r)=v(r)+rf(j,r,bit)*q(j)
+       enddo
+       row=36*(t-1)+r
+       do p=rfr(row),rfr(row+1)-1
+          tmp=atomicadd(y(rfi(p)),v(r))
+       enddo
+    enddo
+  end subroutine
+
+  attributes(device) subroutine adjoint_e(id,u,y)
+    integer, value :: id
+    real(kind=8) :: u(54),q(54),v(54),d(48),tau(48),tmp
+    real(kind=8), device :: y(*)
+    integer :: t,bit,r,j,row,p
+    q=u; t=tr_id(id)
+    if (t>0) then
+       do r=1,48
+          tau(r)=0d0
+          do j=1,54
+             tau(r)=tau(r)+le_table(j,r)*u(j)
+          enddo
+       enddo
+       call edge_tau_t(t,tau,d)
+       do r=1,48
+          if (be(r,t)==0) cycle
+          tmp=atomicadd(y(be(r,t)),d(r)); q(eb(r))=q(eb(r))-d(r)
+       enddo
+    endif
+    t=leaf_t(id); bit=imp_leaf_cell(id)
+    do r=1,54
+       v(r)=0d0
+       do j=1,54
+          v(r)=v(r)+re(j,r,bit)*q(j)
+       enddo
+       row=54*(t-1)+r
+       do p=rer(row),rer(row+1)-1
+          tmp=atomicadd(y(rei(p)),v(r))
+       enddo
+    enddo
+  end subroutine
+
+  attributes(global) subroutine zero_kernel(n,y)
+    integer, value :: n
+    real(kind=8), device :: y(*)
+    integer :: i
+    i=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (i<=n) y(i)=0d0
+  end subroutine
+
+  attributes(global) subroutine native_gather_kernel(n,bold,b)
+    integer, value :: n
+    real(kind=dp), device :: bold(8,6,*)
+    real(kind=8), device :: b(*)
+    integer :: f,id,s
+    f=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (f>n) return
+    id=face_rec(6,f); s=face_rec(7,f)
+    b(f)=width(id)**2*real(bold(imp_leaf_cell(id),s,imp_leaf_oct(id)),8)
+  end subroutine
+
+  attributes(device) subroutine leaf_slots_d(id,b,bs)
+    integer, value :: id
+    real(kind=8), device :: b(*)
+    real(kind=8) :: bs(6)
+    integer :: s,j
+    bs=0d0
+    do s=1,6
+       do j=1,slot_n(s,id)
+          bs(s)=bs(s)+b(slots(j,s,id))
+       enddo
+       bs(s)=bs(s)/width(id)**2
+    enddo
+  end subroutine
+
+  attributes(global) subroutine native_scatter_kernel(n,b,bold)
+    integer, value :: n
+    real(kind=8), device :: b(*)
+    real(kind=dp), device :: bold(8,6,*)
+    integer :: id,s
+    real(kind=8) :: bs(6)
+    id=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (id>n) return
+    call leaf_slots_d(id,b,bs)
+    do s=1,6
+       bold(imp_leaf_cell(id),s,imp_leaf_oct(id))=real(bs(s),dp)
+    enddo
+  end subroutine
+
+  attributes(global) subroutine leaf_slots_kernel(n,b,bs)
+    integer, value :: n
+    real(kind=8), device :: b(*),bs(6,*)
+    real(kind=8) :: local(6)
+    integer :: id
+    id=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (id>n) return
+    call leaf_slots_d(id,b,local); bs(:,id)=local
+  end subroutine
+
+  attributes(global) subroutine leaf_bc_kernel(n,b,bc)
+    integer, value :: n
+    real(kind=8), device :: b(*),bc(3,*)
+    real(kind=8) :: local(6)
+    integer :: id,a
+    id=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (id>n) return
+    call leaf_slots_d(id,b,local)
+    do a=1,3
+       bc(a,id)=0.5d0*(local(a)+local(a+3))
+    enddo
+  end subroutine
+
+  subroutine imp_gather(bold,b)
+    real(kind=dp), device :: bold(8,6,*)
+    real(kind=8), device :: b(*)
+    if (imp_nface==0) return
+    call native_gather_kernel<<<(imp_nface+255)/256,256>>>(imp_nface,bold,b)
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine
+
+  subroutine imp_scatter(b,bold)
+    real(kind=8), device :: b(*)
+    real(kind=dp), device :: bold(8,6,*)
+    if (imp_nleaf==0) return
+    call native_scatter_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,b,bold)
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine
+
+  subroutine imp_leaf_slots(b,bs)
+    real(kind=8), device :: b(*),bs(6,*)
+    if (imp_nleaf==0) return
+    call leaf_slots_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,b,bs)
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine
+
+  subroutine imp_leaf_bc(b,bc)
+    real(kind=8), device :: b(*),bc(3,*)
+    if (imp_nleaf==0) return
+    call leaf_bc_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,b,bc)
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine
+
+  attributes(global) subroutine curl_kernel(n,rp,idx,sgn,x,y)
+    integer, value :: n
+    integer(kind=4), device :: rp(*),idx(*),sgn(*)
+    real(kind=8), device :: x(*),y(*)
+    integer :: i,j
+    real(kind=8) :: val
+    i=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (i>n) return
+    val=0d0
+    do j=rp(i),rp(i+1)-1
+       val=val+sgn(j)*x(idx(j))
+    enddo
+    y(i)=val
+  end subroutine
+
+  subroutine imp_curl(e,f)
+    real(kind=8), device :: e(*),f(*)
+    if (imp_nface==0) return
+    call curl_kernel<<<(imp_nface+255)/256,256>>>(imp_nface,cr,ci,cs,e,f)
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine
+
+  subroutine imp_curlt(f,e)
+    real(kind=8), device :: f(*),e(*)
+    if (imp_nedge==0) return
+    call curl_kernel<<<(imp_nedge+255)/256,256>>>(imp_nedge,ctr,cti,cts,f,e)
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine
+
+  attributes(device) subroutine mass_f_d(id,u,v)
+    integer, value :: id
+    real(kind=8) :: u(36),v(36),scale
+    integer :: i,j
+    scale=2d0/width(id)
+    do i=1,36
+       v(i)=0d0
+       do j=1,36
+          v(i)=v(i)+mfref(i,j)*u(j)*scale
+       enddo
+    enddo
+  end subroutine
+
+  attributes(device) subroutine mass_e_d(id,u,v)
+    integer, value :: id
+    real(kind=8) :: u(54),v(54),scale
+    integer :: i,j
+    scale=width(id)/2d0
+    do i=1,54
+       v(i)=0d0
+       do j=1,54
+          v(i)=v(i)+meref(i,j)*u(j)*scale
+       enddo
+    enddo
+  end subroutine
+
+  ! Five-point mobility; basis coefficients carry the physical h scalings.
+  attributes(device) subroutine mobility_d(id,u,v,quad)
+    integer, value :: id
+    logical, value :: quad
+    real(kind=8) :: u(54),v(54),bb(3),ee(3),te(3),ef(54)
+    real(kind=8) :: h,weight,val,b2,bdote
+    integer :: i,j,k,q(3),r,d,a
+    if (.not.quad) then
+       call mass_e_d(id,u,v); v=imp_eta(1,id)*v; return
+    endif
+    h=width(id)/2d0; v=0d0
+    do i=1,5
+       do j=1,5
+          do k=1,5
+             q=(/i,j,k/); bb=0d0; ee=0d0
+             do r=1,36
+                a=fa(r); val=1d0/(h*h)
+                do d=1,3
+                   if (d==a) then
+                      val=val*bn(fpos(d,r)+1,q(d))
+                   else
+                      val=val*ba(fpos(d,r)+1,q(d))
+                   endif
+                enddo
+                bb(a)=bb(a)+val*cache_w(r,id)
+             enddo
+             do r=1,54
+                a=ea(r); val=1d0/h
+                do d=1,3
+                   if (d==a) then
+                      val=val*ba(epos(d,r)+1,q(d))
+                   else
+                      val=val*bn(epos(d,r)+1,q(d))
+                   endif
+                enddo
+                ef(r)=val; ee(a)=ee(a)+val*u(r)
+             enddo
+             b2=0d0; bdote=0d0
+             do a=1,3
+                b2=b2+bb(a)*bb(a); bdote=bdote+bb(a)*ee(a)
+             enddo
+             te=imp_eta(1,id)*ee+imp_eta(2,id)*(b2*ee-bb*bdote)
+             weight=h**3*gw(i)*gw(j)*gw(k)
+             do r=1,54
+                v(r)=v(r)+weight*ef(r)*te(ea(r))
+             enddo
+          enddo
+       enddo
+    enddo
+  end subroutine
+
+  attributes(global) subroutine mass_f_kernel(n,x,y)
+    integer, value :: n
+    real(kind=8), device :: x(*),y(*)
+    real(kind=8) :: u(36),v(36)
+    integer :: id
+    id=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (id>n) return
+    call reconstruct_f(id,x,u); call mass_f_d(id,u,v); call adjoint_f(id,v,y)
+  end subroutine
+
+  attributes(global) subroutine mass_e_kernel(n,x,y,mobility,quad)
+    integer, value :: n
+    logical, value :: mobility,quad
+    real(kind=8), device :: x(*),y(*)
+    real(kind=8) :: u(54),v(54)
+    integer :: id
+    id=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (id>n) return
+    call reconstruct_e(id,x,u,0)
+    if (mobility) then
+       call mobility_d(id,u,v,quad)
+    else
+       call mass_e_d(id,u,v)
+    endif
+    call adjoint_e(id,v,y)
+  end subroutine
+
+  subroutine imp_mf(x,y)
+    real(kind=8), device :: x(*),y(*)
+    if (imp_nface==0) return
+    call zero_kernel<<<(imp_nface+255)/256,256>>>(imp_nface,y)
+    call mass_f_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y)
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine
+
+  subroutine imp_me(x,y)
+    real(kind=8), device :: x(*),y(*)
+    if (imp_nedge==0) return
+    call zero_kernel<<<(imp_nedge+255)/256,256>>>(imp_nedge,y)
+    call mass_e_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y,.false.,.false.)
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine
+
+  subroutine imp_k(x,y)
+    real(kind=8), device :: x(*),y(*)
+    if (imp_nedge==0) return
+    call zero_kernel<<<(imp_nedge+255)/256,256>>>(imp_nedge,y)
+    call mass_e_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y,.true.,imp_quad)
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine
+
+  attributes(global) subroutine cache_w_kernel(n,w)
+    integer, value :: n
+    real(kind=8), device :: w(*)
+    real(kind=8) :: u(36)
+    integer :: id
+    id=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (id>n) return
+    call reconstruct_f(id,w,u); cache_w(:,id)=u
+  end subroutine
+
+  subroutine imp_set_w(w)
+    real(kind=8), device :: w(*)
+    if (imp_nleaf==0) return
+    call cache_w_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,w)
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine
+
+  ! Compute exact diagonal entries from unique columns in each leaf's support.
+  attributes(global) subroutine diagonal_kernel(n,d)
+    integer, value :: n
+    real(kind=8), device :: d(*)
+    integer :: id,t,row,r,p,j,m,e,ids(264)
+    logical :: found
+    real(kind=8) :: u(54),v(54),val,tmp
+    id=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (id>n) return
+    t=leaf_t(id); m=0
+    do r=1,54
+       row=54*(t-1)+r
+       do p=rer(row),rer(row+1)-1
+          e=rei(p); found=.false.
+          do j=1,m
+             if (ids(j)==e) found=.true.
+          enddo
+          if (found) cycle
+          m=m+1; ids(m)=e
+       enddo
+    enddo
+    t=tr_id(id)
+    if (t>0) then
+       do r=1,48
+          e=be(r,t); if (e==0) cycle
+          found=.false.
+          do j=1,m
+             if (ids(j)==e) found=.true.
+          enddo
+          if (found) cycle
+          m=m+1; ids(m)=e
+       enddo
+    endif
+    do j=1,m
+       e=ids(j)
+       call reconstruct_e(id,d,u,e); call mass_e_d(id,u,v)
+       val=0d0
+       do r=1,54
+          val=val+u(r)*v(r)
+       enddo
+       tmp=atomicadd(d(e),val)
+    enddo
+  end subroutine
+
+  subroutine imp_me_diag(d)
+    real(kind=8), device :: d(*)
+    if (imp_nedge==0) return
+    call zero_kernel<<<(imp_nedge+255)/256,256>>>(imp_nedge,d)
+    call diagonal_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,d)
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine
+
+  attributes(global) subroutine form_f_kernel(n,x,y,out)
+    integer, value :: n
+    real(kind=8), device :: x(*),y(*),out(*)
+    real(kind=8) :: u(36),v(36),mv(36)
+    integer :: id,r
+    id=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (id>n) return
+    call reconstruct_f(id,x,u); call reconstruct_f(id,y,v); call mass_f_d(id,v,mv)
+    out(id)=0d0
+    do r=1,36
+       out(id)=out(id)+u(r)*mv(r)
+    enddo
+  end subroutine
+
+  attributes(global) subroutine form_k_kernel(n,x,y,out,quad)
+    integer, value :: n
+    logical, value :: quad
+    real(kind=8), device :: x(*),y(*),out(*)
+    real(kind=8) :: u(54),v(54),mv(54)
+    integer :: id,r
+    id=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (id>n) return
+    call reconstruct_e(id,x,u,0); call reconstruct_e(id,y,v,0); call mobility_d(id,v,mv,quad)
+    out(id)=0d0
+    do r=1,54
+       out(id)=out(id)+u(r)*mv(r)
+    enddo
+  end subroutine
+
+  subroutine imp_leaf_mf_form(x,y,out)
+    real(kind=8), device :: x(*),y(*),out(*)
+    if (imp_nleaf==0) return
+    call form_f_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y,out)
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine
+
+  subroutine imp_leaf_k_form(x,y,out)
+    real(kind=8), device :: x(*),y(*),out(*)
+    if (imp_nleaf==0) return
+    call form_k_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y,out,imp_quad)
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine
+
+  attributes(global) subroutine owner_sum_kernel(n,v,out)
+    integer, value :: n
+    real(kind=8), device :: v(*),out(*)
+    real(kind=8) :: val
+    integer :: id,e
+    id=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (id>n) return
+    val=0d0
+    do e=ep(id),ep(id+1)-1
+       val=val+v(e)
+    enddo
+    out(id)=val
+  end subroutine
+
+  subroutine imp_edge_owner_sum(v,out)
+    real(kind=8), device :: v(*),out(*)
+    if (imp_nleaf==0) return
+    call owner_sum_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,v,out)
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine
+
+  attributes(device) real(kind=8) function random_value(i,seed)
+    integer, value :: i,seed
+    integer(kind=8) :: h
+    h=ieor(int(i,8),ishft(int(seed,8),32))
+    h=ieor(h,ishft(h,13)); h=ieor(h,ishft(h,-7)); h=ieor(h,ishft(h,17))
+    h=modulo(iand(h,2147483647_8)*1103515245_8+12345_8,2147483647_8)
+    random_value=real(h,8)/1073741824d0-1d0
+  end function
+
+  attributes(global) subroutine random_kernel(n,x,seed)
+    integer, value :: n,seed
+    real(kind=8), device :: x(*)
+    integer :: i
+    i=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (i<=n) x(i)=random_value(i,seed)
+  end subroutine
+
+  attributes(global) subroutine check_eta_kernel(n)
+    integer, value :: n
+    integer :: id
+    id=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (id>n) return
+    imp_eta(1,id)=0.37d0+0.1d0*abs(random_value(id,31))
+    imp_eta(2,id)=0.2d0+0.1d0*abs(random_value(id,73))
+  end subroutine
+
+  attributes(device) real(kind=8) function nodal_d(i,s)
+    integer, value :: i
+    real(kind=8), value :: s
+    nodal_d=0d0
+    select case(i)
+    case(0)
+       nodal_d=s*(s-1d0)/2d0
+    case(1)
+       nodal_d=1d0-s*s
+    case(2)
+       nodal_d=s*(s+1d0)/2d0
+    end select
+  end function
+
+  attributes(device) real(kind=8) function integral_d(i,lo,hi)
+    integer, value :: i
+    real(kind=8), value :: lo,hi
+    integral_d=((hi-lo)+(2*i-1)*(hi*hi-lo*lo))/2d0
+  end function
+
+  ! Integrate a leaf polynomial onto an actual physical boundary entity.
+  attributes(device) real(kind=8) function physical_integral(id,entity,face,u)
+    integer, value :: id,entity
+    logical, value :: face
+    real(kind=8) :: u(*)
+    integer :: l,lev,a,p(3),q(3),d,r,n,axis,pos(3),delta(3),span
+    real(kind=8) :: lo(3),hi(3),val
+    l=imp_leaf_lev(id); p=leaf_pos(:,id)
+    if (face) then
+       lev=face_rec(1,entity); a=face_rec(2,entity); q=face_rec(3:5,entity); n=36
+    else
+       lev=edge_rec(1,entity); a=edge_rec(2,entity); q=edge_rec(3:5,entity); n=54
+    endif
+    span=2**(lev-l)
+    delta=modulo(q-span*p,2*(bhi(:,lev)-blo(:,lev)))
+    lo=2d0*real(delta,8)/real(span,8)-1d0; hi=lo+2d0/real(span,8)
+    physical_integral=0d0
+    do r=1,n
+       if (face) then
+          axis=fa(r); pos=fpos(:,r)
+       else
+          axis=ea(r); pos=epos(:,r)
+       endif
+       if (axis/=a) cycle
+       val=1d0
+       do d=1,3
+          if ((d==a).eqv.face) then
+             val=val*nodal_d(pos(d),lo(d))
+          else
+             val=val*integral_d(pos(d),lo(d),hi(d))
+          endif
+       enddo
+       physical_integral=physical_integral+val*u(r)
+    enddo
+  end function
+
+  attributes(global) subroutine identity_kernel(n,e,f,ce,bnative,bold)
+    integer, value :: n
+    real(kind=8), device :: e(*),f(*),ce(*),bnative(*)
+    real(kind=dp), device :: bold(8,6,*)
+    real(kind=8) :: uf(36),ue(54),uc(36),val,ref,div,scale,bs(6)
+    integer :: id,s,j,k,face,edge,r
+    id=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (id>n) return
+    check_l(:,id)=0d0
+    div=0d0; scale=0d0
+    do s=1,6
+       val=0d0
+       do j=1,slot_n(s,id)
+          val=val+ce(slots(j,s,id)); scale=max(scale,abs(ce(slots(j,s,id))))
+       enddo
+       if (s<=3) then
+          div=div-val
+       else
+          div=div+val
+       endif
+    enddo
+    check_l(1,id)=abs(div); check_l(2,id)=scale
+    call reconstruct_f(id,f,uf); call reconstruct_e(id,e,ue,0); call reconstruct_f(id,ce,uc)
+    do r=1,36
+       val=0d0
+       do j=1,54
+          val=val+cref(r,j)*ue(j)
+       enddo
+       check_l(7,id)=max(check_l(7,id),abs(val-uc(r)))
+       check_l(8,id)=max(check_l(8,id),abs(val),abs(uc(r)))
+    enddo
+    do s=1,6
+       do j=1,slot_n(s,id)
+          face=slots(j,s,id); val=physical_integral(id,face,.true.,uf); ref=f(face)
+          check_l(3,id)=max(check_l(3,id),abs(val-ref))
+          check_l(4,id)=max(check_l(4,id),abs(val),abs(ref))
+          do k=cr(face),cr(face+1)-1
+             edge=ci(k); val=physical_integral(id,edge,.false.,ue); ref=e(edge)
+             check_l(5,id)=max(check_l(5,id),abs(val-ref))
+             check_l(6,id)=max(check_l(6,id),abs(val),abs(ref))
+          enddo
+       enddo
+    enddo
+    call leaf_slots_d(id,bnative,bs)
+    do s=1,6
+       val=real(bold(imp_leaf_cell(id),s,imp_leaf_oct(id)),8)
+       check_l(9,id)=max(check_l(9,id),abs(val-bs(s)))
+       check_l(10,id)=max(check_l(10,id),abs(val),abs(bs(s)))
+    enddo
+  end subroutine
+
+  ! Compensated dot products for checks only; actions stay on the device.
+  real(kind=8) function dot_host(x,y)
+    real(kind=8) :: x(:),y(:),s,c,v,t
+    integer :: i
+    s=0d0; c=0d0
+    do i=1,size(x)
+       v=x(i)*y(i)-c; t=s+v; c=(t-s)-v; s=t
+    enddo
+    dot_host=s
+  end function
+
+  real(kind=8) function symmetry_error(x,y,mx,my)
+    real(kind=8) :: x(:),y(:),mx(:),my(:),scale
+    scale=max(sum(abs(x*my)),sum(abs(mx*y)),tiny(1d0))
+    symmetry_error=abs(dot_host(x,my)-dot_host(mx,y))/scale
+  end function
+
+  ! Checks use temporary deterministic mobility and restore the caller's cache.
+  subroutine imp_check(bold,info)
+    real(kind=dp), device :: bold(8,6,*)
+    integer :: info,i
+    real(kind=8), allocatable :: fh(:,:),eh(:,:),lh(:,:)
+    real(kind=8) :: residual(10),positive,scale
+    logical :: old_quad
+    info=0
+    if (imp_nleaf==0) return
+    call grow_r2(check_f,imp_nface,4); call grow_r2(check_e,imp_nedge,4)
+    call grow_r2(check_l,10,imp_nleaf); call grow_r2(saved_eta,2,imp_nleaf); call grow_r2(saved_w,36,imp_nleaf)
+    allocate(fh(imp_nface,4),eh(imp_nedge,4),lh(10,imp_nleaf))
+    saved_eta(:,1:imp_nleaf)=imp_eta(:,1:imp_nleaf)
+    saved_w(:,1:imp_nleaf)=cache_w(:,1:imp_nleaf); old_quad=imp_quad
+    call random_kernel<<<(imp_nface+255)/256,256>>>(imp_nface,check_f(:,1),17)
+    call random_kernel<<<(imp_nface+255)/256,256>>>(imp_nface,check_f(:,2),43)
+    call random_kernel<<<(imp_nedge+255)/256,256>>>(imp_nedge,check_e(:,1),29)
+    call random_kernel<<<(imp_nedge+255)/256,256>>>(imp_nedge,check_e(:,2),61)
+    call imp_curl(check_e(:,1),check_f(:,3)); call imp_gather(bold,check_f(:,4))
+    call identity_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,check_e(:,1),check_f(:,1), &
+         check_f(:,3),check_f(:,4),bold)
+    call GPU_Error_Check(__FILE__, __LINE__)
+    lh=check_l(:,1:imp_nleaf)
+    do i=1,5
+       residual(i)=maxval(lh(2*i-1,:))/max(maxval(lh(2*i,:)),tiny(1d0))
+    enddo
+    fh=check_f(1:imp_nface,1:4); eh=check_e(1:imp_nedge,1:4)
+    call imp_curlt(check_f(:,1),check_e(:,4)); eh(:,4)=check_e(1:imp_nedge,4)
+    scale=max(sum(abs(fh(:,3)*fh(:,1))),sum(abs(eh(:,1)*eh(:,4))),tiny(1d0))
+    residual(6)=abs(dot_host(fh(:,3),fh(:,1))-dot_host(eh(:,1),eh(:,4)))/scale
+    call imp_mf(check_f(:,1),check_f(:,3)); call imp_mf(check_f(:,2),check_f(:,4))
+    fh(:,3:4)=check_f(1:imp_nface,3:4)
+    residual(7)=symmetry_error(fh(:,1),fh(:,2),fh(:,3),fh(:,4))
+    positive=dot_host(fh(:,1),fh(:,3))
+    call imp_me(check_e(:,1),check_e(:,3)); call imp_me(check_e(:,2),check_e(:,4))
+    eh(:,3:4)=check_e(1:imp_nedge,3:4)
+    residual(8)=symmetry_error(eh(:,1),eh(:,2),eh(:,3),eh(:,4))
+    call check_eta_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf)
+    call imp_set_w(check_f(:,1))
+    imp_quad=.false.
+    call imp_k(check_e(:,1),check_e(:,3)); call imp_k(check_e(:,2),check_e(:,4))
+    eh(:,3:4)=check_e(1:imp_nedge,3:4)
+    residual(9)=symmetry_error(eh(:,1),eh(:,2),eh(:,3),eh(:,4))
+    imp_quad=.true.
+    call imp_k(check_e(:,1),check_e(:,3)); call imp_k(check_e(:,2),check_e(:,4))
+    eh(:,3:4)=check_e(1:imp_nedge,3:4)
+    residual(10)=symmetry_error(eh(:,1),eh(:,2),eh(:,3),eh(:,4))
+    imp_eta(:,1:imp_nleaf)=saved_eta(:,1:imp_nleaf)
+    cache_w(:,1:imp_nleaf)=saved_w(:,1:imp_nleaf); imp_quad=old_quad
+    call GPU_Error_Check(__FILE__, __LINE__)
+    write(*,'(A,5ES12.4)') 'implicit DC, RF LF, RE LE, curl, native: ',residual(1:5)
+    write(*,'(A,5ES12.4)') 'implicit C adjoint, MF, ME, K Ohmic, K AD symmetry: ',residual(6:10)
+    write(*,'(A,ES20.12)') 'implicit x.MF.x: ',positive
+    if (any(residual>1d-10).or..not.(positive>0d0)) info=1
+    ! NaNs must fail rather than disappear in a comparison with the tolerance.
+    if (any(.not.(residual<=1d-10))) info=1
+    deallocate(fh,eh,lh)
+  end subroutine
+
+  subroutine imp_free()
+    if (allocated(imp_leaf_oct)) deallocate(imp_leaf_oct)
+    if (allocated(imp_leaf_cell)) deallocate(imp_leaf_cell)
+    if (allocated(imp_leaf_lev)) deallocate(imp_leaf_lev)
+    if (allocated(imp_eta)) deallocate(imp_eta)
+    if (allocated(nx_d)) deallocate(nx_d)
+    if (allocated(off_d)) deallocate(off_d)
+    if (allocated(blo)) deallocate(blo)
+    if (allocated(bhi)) deallocate(bhi)
+    if (allocated(counts)) deallocate(counts)
+    if (allocated(prefix)) deallocate(prefix)
+    if (allocated(oct_counts)) deallocate(oct_counts)
+    if (allocated(oct_prefix)) deallocate(oct_prefix)
+    if (allocated(leaf_id)) deallocate(leaf_id)
+    if (allocated(oct_id)) deallocate(oct_id)
+    if (allocated(contributing)) deallocate(contributing)
+    if (allocated(leaf_t)) deallocate(leaf_t)
+    if (allocated(leaf_pos)) deallocate(leaf_pos)
+    if (allocated(fc)) deallocate(fc)
+    if (allocated(ec)) deallocate(ec)
+    if (allocated(fp)) deallocate(fp)
+    if (allocated(ep)) deallocate(ep)
+    if (allocated(fid)) deallocate(fid)
+    if (allocated(eid)) deallocate(eid)
+    if (allocated(face_rec)) deallocate(face_rec)
+    if (allocated(edge_rec)) deallocate(edge_rec)
+    if (allocated(cr)) deallocate(cr)
+    if (allocated(ci)) deallocate(ci)
+    if (allocated(cs)) deallocate(cs)
+    if (allocated(ctr)) deallocate(ctr)
+    if (allocated(cti)) deallocate(cti)
+    if (allocated(cts)) deallocate(cts)
+    if (allocated(work)) deallocate(work)
+    if (allocated(rfr)) deallocate(rfr)
+    if (allocated(rfi)) deallocate(rfi)
+    if (allocated(rer)) deallocate(rer)
+    if (allocated(rei)) deallocate(rei)
+    if (allocated(slots)) deallocate(slots)
+    if (allocated(slot_n)) deallocate(slot_n)
+    if (allocated(tr_id)) deallocate(tr_id)
+    if (allocated(tr_leaf)) deallocate(tr_leaf)
+    if (allocated(sf)) deallocate(sf)
+    if (allocated(se)) deallocate(se)
+    if (allocated(bf)) deallocate(bf)
+    if (allocated(be)) deallocate(be)
+    if (allocated(width)) deallocate(width)
+    if (allocated(cache_w)) deallocate(cache_w)
+    if (allocated(check_f)) deallocate(check_f)
+    if (allocated(check_e)) deallocate(check_e)
+    if (allocated(check_l)) deallocate(check_l)
+    if (allocated(saved_eta)) deallocate(saved_eta)
+    if (allocated(saved_w)) deallocate(saved_w)
+    imp_nleaf=0; imp_nface=0; imp_nedge=0; imp_ntr=0; nt=0; imp_quad=.false.
+  end subroutine
+end module implicit_ops
