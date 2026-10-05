@@ -174,7 +174,22 @@ Extending this formula unchanged through a large refined region changes
 the native fine operator: `H P_face=P_face H_coarse`, so a prolonged fine
 `(+,+,-,-)` mode damps at `1/h^2` instead of native `2/h^2`. Adjusting only
 the positive detail masses cannot change that identity. The construction
-therefore remains an isolated prototype under the native-interior contract.
+therefore remains incompatible with the native-interior contract.
+
+A later host test extends the unchanged tensor transfers and metric formula
+to two face-adjacent refined parents, without a fit. Exact topology/transfer
+identities pass; current and quadratic diffusion errors are 4.44e-15 and
+9.77e-15 across the complete affected halo after enlarging boundary padding.
+The special edge metric also has an explicit inverse: with `R P=I` and
+`D=I-P R`, the inverse of `R^T M_coarse R+D^T N D` is
+`P M_coarse^-1 P^T+N^-1-N^-1 R^T(R N^-1 R^T)^-1 R N^-1`.
+Here the coarse and baseline edge masses are diagonal, and restriction rows
+use disjoint copied edges or segment pairs, making the inner Schur matrix
+diagonal. Fixed tensor support gives a bounded factored application under
+the two-level geometry/halo assumptions. The saved isolated and adjacent
+matrix inverse identities close below 4.45e-16. This does not establish
+multilevel/boundary assembly, AD, heating, solution convergence or measured
+cost; the native fine operator still changes, so this fallback is not adopted.
 
 A genuine scalar one-dimensional coarse/fine transition exposes a separate
 symmetry obstruction. Integrated interval fields use native face mass
