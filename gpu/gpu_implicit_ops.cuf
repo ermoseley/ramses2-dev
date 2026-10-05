@@ -1555,7 +1555,7 @@ contains
        if (axis/=a) cycle
        val=1d0
        do d=1,3
-          if ((d==a).eqv.face) then
+          if ((d==a.and.face).or.(d/=a.and..not.face)) then
              val=val*nodal_d(pos(d),lo(d))
           else
              val=val*integral_d(pos(d),lo(d),hi(d))
@@ -1671,9 +1671,18 @@ contains
     allocate(a1(imp_nface+1)); a1=cr(1:imp_nface+1); write(u) a1; n=a1(imp_nface+1)-1; deallocate(a1)
     allocate(a1(n)); a1=ci(1:n); write(u) a1; a1=cs(1:n); write(u) a1; deallocate(a1)
     write(u) he,hf,hue,huf
+    hf=0d0; call imp_mf(f,check_f(:,3)); hf=check_f(1:imp_nface,3); write(u) hf
+    call imp_me(e,check_e(:,3)); he=check_e(1:imp_nedge,3); write(u) he
+    call check_eta_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf)
+    call imp_set_w(f); imp_quad=.false.
+    call imp_k(e,check_e(:,3)); he=check_e(1:imp_nedge,3); write(u) he
+    imp_quad=.true.
+    call imp_k(e,check_e(:,3)); he=check_e(1:imp_nedge,3); write(u) he
+    deallocate(hue); allocate(hue(2,imp_nleaf)); hue=imp_eta(:,1:imp_nleaf); write(u) hue
     close(u)
     write(*,*) 'implicit topology dumped to ',trim(path)
     deallocate(ue,uf,he,hf,hue,huf)
+    imp_quad=.false.
   end subroutine
 
   ! Checks use temporary deterministic mobility and restore the caller's cache.
@@ -1714,6 +1723,7 @@ contains
     call random_kernel<<<(imp_nedge+255)/256,256>>>(imp_nedge,check_e(:,2),61)
     call imp_curl(check_e(:,1),check_f(:,3)); call imp_gather(bold,check_f(:,4))
     call imp_dump(check_e(:,1),check_f(:,1))
+    call imp_curl(check_e(:,1),check_f(:,3))
     call identity_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,check_e(:,1),check_f(:,1), &
          check_f(:,3),check_f(:,4),bold)
     call GPU_Error_Check(__FILE__, __LINE__)
