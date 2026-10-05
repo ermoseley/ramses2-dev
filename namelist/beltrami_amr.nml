@@ -1,0 +1,58 @@
+This is the RAMSES parameter file for the decay of a Beltrami field by Ohmic and ambipolar diffusion
+with one level of refinement. The denser slab 0.25<x<0.75 is only used to fix the refinement around
+x=0.25 and x=0.75. The transverse field decays exactly as exp(-(etamag+eta_ad*A_ave**2)*(2*pi)**2*t).
+Compile the code with:
+make COMPILER=NVHPC NDIM=3 HYDRO=1 MHD=1 INIT=BELTRAMI
+
+&RUN_PARAMS
+hydro=.true.
+ncontrol=1
+/
+
+&AMR_PARAMS
+levelmin=5
+levelmax=6
+ngridmax=100000
+nexpand=1
+boxlen=1.0
+/
+
+&INIT_PARAMS
+nregion=2
+region_type(1)='square'
+region_type(2)='square'
+x_center=0.5,0.5
+y_center=0.5,0.5
+z_center=0.5,0.5
+length_x=10.0,0.5
+length_y=10.0,10.0
+length_z=10.0,10.0
+exp_region=10.0,10.0
+d_region=1.0,2.0
+p_region=1.0,1.0
+A_ave=1.0
+/
+
+&OUTPUT_PARAMS
+delta_tout=0.1
+tend=0.5
+/
+
+&HYDRO_PARAMS
+gamma=1.6666667
+courant_factor=0.8
+smallc=1.0
+slope_type=2
+riemann='llf'
+riemann2d='llf'
+induction=.true.
+etamag=0.05
+eta_ad=0.05
+nimhd_solver='sts'
+/
+
+&REFINE_PARAMS
+err_grad_d=0.1
+interpol_var=0
+interpol_type=2
+/
