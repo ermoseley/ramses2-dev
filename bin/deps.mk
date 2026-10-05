@@ -180,6 +180,7 @@ flag_utils.o: gpu_runner.o gpu_utils.o
 force_fine.o: gpu_runner.o
 godunov_fine.o: gpu_runner.o
 gpu_clump.o: amr_parameters.o constants.o gpu_part.o gpu_runner.o gpu_utils.o hydro_parameters.o oct_commons.o ramses_commons.o
+gpu_composite_incidence.o: amr_parameters.o
 gpu_cooling.o: amr_parameters.o cooling_module.o hydro_parameters.o oct_commons.o
 gpu_feedback.o: amr_parameters.o gpu_utils.o hydro_parameters.o oct_commons.o
 gpu_flag.o: amr_parameters.o gpu_utils.o hydro_parameters.o oct_commons.o
