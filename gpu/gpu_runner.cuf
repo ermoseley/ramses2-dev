@@ -692,7 +692,7 @@ contains
   !>
   !> @detail
   !> The finer levels add their non-ideal EMF on these edges once per coarse step, with
-  !> ghost cells frozen over it, which is only stable within the explicit time step.
+  !> ghost cells frozen over it, which is only stable within half the explicit time step.
   !>
   !> @param[in] sim : The simulation object
   !> @param[in] ilevel : The refinement level
@@ -706,7 +706,7 @@ contains
 #ifdef MHD
     if (sim%r%nimhd_solver == 'unsplit' .or. sim%r%nimhd_composite .or. ilevel >= sim%r%nlevelmax) return
     if (sim%m%noct(ilevel) <= 0) return
-    dt = min(dt, nimhd_dt_parab(sim, ilevel, .true.))
+    dt = min(dt, 0.5d0*nimhd_dt_parab(sim, ilevel, .true.))
 #endif
   end subroutine gpu_nimhd_dt
 
