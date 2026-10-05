@@ -150,9 +150,20 @@ abort the run.
 `M_E^-1` is applied by Jacobi-preconditioned CG with a monitored true residual.
 Topology and exact mass diagonals are cached until refinement, grid allocation
 or host-to-device grid upload, or a change in `lmin`, `lf` or `ngridmax`.
-`nimhd_check` runs only on rebuild. The face diagonal uses the same per-leaf
-unit-column assembly as the edge diagonal. CSR offsets use CUB scans; the
-transpose fill remains serial and deterministic.
+Regular octs have eight non-transition leaf children and singleton CSR rows
+for all 36 faces and 54 edges. Their summed child masses are exactly
+`MF_ref/w` and `w ME_ref`, with `w` the child width (parent half-width);
+host restriction checks give maximum absolute errors of `4.44e-16` for both
+at `w=1`. Dense physical-id lists and three 1D tensor contractions replace
+the eight leaf actions. Ohmic `K` uses this path only when the oct's eight
+coefficients are exactly equal, rechecked on each application; otherwise its
+children use the original leaf kernel. Quadrature `K` and leaf forms stay
+per leaf. Regular diagonals use scaled reference diagonals, including cross
+entries when periodicity identifies local rows; generic leaves retain the
+unit-column assembly. `nimhd_check` runs only on rebuild and compares both
+random-vector mass actions and uniform/nonuniform Ohmic actions against the
+private all-leaf path (maximum relative infinity-norm error, limit `1e-12`).
+CSR offsets use CUB scans; the transpose fill remains serial and deterministic.
 
 ## 7. Time step (Pade(0,2), common mobility)
 

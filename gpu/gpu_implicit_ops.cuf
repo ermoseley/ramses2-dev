@@ -17,6 +17,12 @@ module implicit_ops
 
   integer(kind=4) :: imp_nleaf=0, imp_nface=0, imp_nedge=0, imp_ntr=0, nt=0
   logical :: imp_quad=.false., imp_valid=.false., tables_ready=.false.
+  logical :: all_leaf_path=.false. ! Private reference path, used only by imp_check.
+  integer(kind=4) :: nreg=0, ngeneric=0
+  integer(kind=4), device, allocatable :: reg_map(:), reg_oct(:), generic_leaf(:)
+  integer(kind=4), device, allocatable :: reg_f(:,:), reg_e(:,:), reg_uniform(:), reg_alias(:)
+  real(kind=8), device, allocatable :: reg_eta(:)
+  real(kind=8), device :: mass0(0:2,0:2), mass1(0:1,0:1)
   integer(kind=8) :: imp_me_calls=0, imp_k_calls=0
   integer(kind=4), device :: ng_d, lf_d
   real(kind=8), device :: box_d
@@ -202,6 +208,7 @@ contains
     enddo
     fa=af; fpos=pf; ea=ae; epos=pe; fb=bfi; eb=bei
     cref=cc; gref=gg; mfref=fm; meref=em; rf=fr; re=er
+    mass0=m0; mass1=m1
     gn=nodes; gw=weights; bn=nn; ba=aa
     gn3=(/-sqrt(3d0/5d0),0d0,sqrt(3d0/5d0)/); gw3=(/5d0/9d0,8d0/9d0,5d0/9d0/)
     lf_table=lift_f; le_table=lift_e
@@ -632,6 +639,72 @@ contains
     enddo
   end subroutine
 
+  ! Singleton skeleton rows alone are insufficient: every child must be an
+  ! uncorrected leaf. reg_map is first a predicate, then a regular-list index.
+  attributes(global) subroutine regular_count_kernel(n)
+    integer, value :: n
+    integer :: t,g,c,id,r,row
+    t=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (t>n) return
+    reg_map(t)=0; work(t)=0; g=contributing(t)
+    do c=1,8
+       id=leaf_id(c,g)
+       if (id==0) return
+       if (tr_id(id)/=0) return
+    enddo
+    do r=1,36
+       row=36*(t-1)+r
+       if (rfr(row+1)-rfr(row)/=1) return
+    enddo
+    do r=1,54
+       row=54*(t-1)+r
+       if (rer(row+1)-rer(row)/=1) return
+    enddo
+    reg_map(t)=1; work(t)=1
+  end subroutine
+
+  attributes(global) subroutine regular_fill_kernel(n)
+    integer, value :: n
+    integer :: t,k,r,j,row
+    t=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (t>n) return
+    if (reg_map(t)==0) return
+    k=oct_prefix(t); reg_map(t)=k; reg_oct(k)=t; reg_alias(k)=0
+    do r=1,36
+       row=36*(t-1)+r; reg_f(r,k)=rfi(rfr(row))
+    enddo
+    do r=1,54
+       row=54*(t-1)+r; reg_e(r,k)=rei(rer(row))
+    enddo
+    ! A one-oct periodic direction can identify distinct local skeleton rows.
+    ! Actions already sum these correctly; diagonals also need cross entries.
+    do r=1,36
+       do j=1,r-1
+          if (reg_f(r,k)==reg_f(j,k)) reg_alias(k)=1
+       enddo
+    enddo
+    do r=1,54
+       do j=1,r-1
+          if (reg_e(r,k)==reg_e(j,k)) reg_alias(k)=1
+       enddo
+    enddo
+  end subroutine
+
+  attributes(global) subroutine generic_leaf_kernel(n,fill)
+    integer, value :: n
+    logical, value :: fill
+    integer :: id
+    id=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (id>n) return
+    if (.not.fill) work(id)=0
+    if (reg_map(leaf_t(id))/=0) return
+    if (fill) then
+       generic_leaf(prefix(id))=id
+    else
+       work(id)=1
+    endif
+  end subroutine
+
   ! Build all physical topology on the device. head/noct are host level arrays.
   subroutine imp_build(grid,hash_key,hash_val,hash_size,ckey_max,key_off, &
        box_ckey_min,box_ckey_max,head,noct,ngridmax,lmin,lf,boxlen,info)
@@ -641,7 +714,7 @@ contains
     integer(kind=4) :: hash_size,head(:),noct(:),ngridmax,lmin,lf,info
     real(kind=8) :: boxlen
     integer :: l,h(4),errors(2),nfz,nez,ncz
-    imp_valid=.false.
+    imp_valid=.false.; nreg=0; ngeneric=0
     call init_tables()
     ng_d=ngridmax; lf_d=lf; box_d=boxlen
     if (allocated(nx_d)) then
@@ -884,6 +957,27 @@ contains
     endif
     if (.not.allocated(be)) allocate(be(48,max(1,imp_ntr)))
     call transition_kernel<<<(imp_nleaf+255)/256,256>>>(grid,hash_key,hash_val,hash_size,imp_nleaf)
+    call GPU_Error_Check(__FILE__, __LINE__)
+    if (allocated(reg_map)) deallocate(reg_map)
+    allocate(reg_map(max(1,nt)))
+    call regular_count_kernel<<<(nt+255)/256,256>>>(nt)
+    call imp_scan(nt,work,oct_prefix,totals,4)
+    h=totals; nreg=h(4)
+    if (allocated(reg_oct)) deallocate(reg_oct)
+    if (allocated(reg_f)) deallocate(reg_f)
+    if (allocated(reg_e)) deallocate(reg_e)
+    if (allocated(reg_uniform)) deallocate(reg_uniform)
+    if (allocated(reg_alias)) deallocate(reg_alias)
+    if (allocated(reg_eta)) deallocate(reg_eta)
+    allocate(reg_oct(max(1,nreg)),reg_f(36,max(1,nreg)),reg_e(54,max(1,nreg)))
+    allocate(reg_uniform(max(1,nreg)),reg_alias(max(1,nreg)),reg_eta(max(1,nreg)))
+    call regular_fill_kernel<<<(nt+255)/256,256>>>(nt)
+    call generic_leaf_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,.false.)
+    call imp_scan(imp_nleaf,work,prefix,totals,1)
+    h=totals; ngeneric=h(1)
+    if (allocated(generic_leaf)) deallocate(generic_leaf)
+    allocate(generic_leaf(max(1,ngeneric)))
+    call generic_leaf_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,.true.)
     call GPU_Error_Check(__FILE__, __LINE__)
     errors=bad
     if (errors(2)>0) then
@@ -1325,24 +1419,161 @@ contains
     enddo
   end subroutine
 
-  attributes(global) subroutine mass_f_kernel(n,x,y)
+  ! i,j,k are the contract's local indices, not Cartesian array strides:
+  ! faces: i along a, j along cyclic b, k along cyclic c (3 x 2 x 2).
+  attributes(global) subroutine regular_f_kernel(n,x,y)
     integer, value :: n
+    real(kind=8), device :: x(*),y(*)
+    real(kind=8) :: u(0:2,0:1,0:1),v(0:2,0:1,0:1),z(0:2,0:1,0:1),val,scale,tmp
+    integer :: t,g,a,i,j,k,q,r
+    t=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (t>n) return
+    g=contributing(reg_oct(t)); scale=1d0/width(leaf_id(1,g))
+    do a=0,2
+       do i=0,2
+          do j=0,1
+             do k=0,1
+                r=12*a+4*i+2*j+k+1; u(i,j,k)=x(reg_f(r,t))
+             enddo
+          enddo
+       enddo
+       do i=0,2
+          do j=0,1
+             do k=0,1
+                val=0d0
+                do q=0,2
+                   val=val+mass0(i,q)*u(q,j,k)
+                enddo
+                v(i,j,k)=val
+             enddo
+          enddo
+       enddo
+       do i=0,2
+          do j=0,1
+             do k=0,1
+                val=0d0
+                do q=0,1
+                   val=val+mass1(j,q)*v(i,q,k)
+                enddo
+                z(i,j,k)=val
+             enddo
+          enddo
+       enddo
+       do i=0,2
+          do j=0,1
+             do k=0,1
+                val=0d0
+                do q=0,1
+                   val=val+mass1(k,q)*z(i,j,q)
+                enddo
+                r=12*a+4*i+2*j+k+1
+                tmp=atomicadd(y(reg_f(r,t)),scale*val)
+             enddo
+          enddo
+       enddo
+    enddo
+  end subroutine
+
+  ! Recheck coefficients on every Ohmic application; eta can change after build.
+  attributes(global) subroutine regular_eta_kernel(n)
+    integer, value :: n
+    integer :: t,g,c,id
+    t=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (t>n) return
+    g=contributing(reg_oct(t)); reg_eta(t)=imp_eta(1,leaf_id(1,g)); reg_uniform(t)=1
+    do c=2,8
+       id=leaf_id(c,g)
+       if (imp_eta(1,id)/=reg_eta(t)) reg_uniform(t)=0
+    enddo
+  end subroutine
+
+  ! Edges: i along a, j,k along the other axes in increasing order (2 x 3 x 3).
+  attributes(global) subroutine regular_e_kernel(n,x,y,mobility)
+    integer, value :: n
+    logical, value :: mobility
+    real(kind=8), device :: x(*),y(*)
+    real(kind=8) :: u(0:1,0:2,0:2),v(0:1,0:2,0:2),z(0:1,0:2,0:2),val,scale,tmp
+    integer :: t,g,a,i,j,k,q,r
+    t=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (t>n) return
+    g=contributing(reg_oct(t)); scale=width(leaf_id(1,g))
+    if (mobility) then
+       if (reg_uniform(t)==0) return
+       scale=scale*reg_eta(t)
+    endif
+    do a=0,2
+       do i=0,1
+          do j=0,2
+             do k=0,2
+                r=18*a+9*i+3*j+k+1; u(i,j,k)=x(reg_e(r,t))
+             enddo
+          enddo
+       enddo
+       do i=0,1
+          do j=0,2
+             do k=0,2
+                val=0d0
+                do q=0,1
+                   val=val+mass1(i,q)*u(q,j,k)
+                enddo
+                v(i,j,k)=val
+             enddo
+          enddo
+       enddo
+       do i=0,1
+          do j=0,2
+             do k=0,2
+                val=0d0
+                do q=0,2
+                   val=val+mass0(j,q)*v(i,q,k)
+                enddo
+                z(i,j,k)=val
+             enddo
+          enddo
+       enddo
+       do i=0,1
+          do j=0,2
+             do k=0,2
+                val=0d0
+                do q=0,2
+                   val=val+mass0(k,q)*z(i,j,q)
+                enddo
+                r=18*a+9*i+3*j+k+1
+                tmp=atomicadd(y(reg_e(r,t)),scale*val)
+             enddo
+          enddo
+       enddo
+    enddo
+  end subroutine
+
+  attributes(global) subroutine mass_f_kernel(n,x,y,generic)
+    integer, value :: n
+    logical, value :: generic
     real(kind=8), device :: x(*),y(*)
     real(kind=8) :: u(36),v(36)
     integer :: id
     id=(blockIdx%x-1)*blockDim%x+threadIdx%x
     if (id>n) return
+    if (generic) id=generic_leaf(id)
     call reconstruct_f(id,x,u,0); call mass_f_d(id,u,v); call adjoint_f(id,v,y)
   end subroutine
 
-  attributes(global) subroutine mass_e_kernel(n,x,y,mobility,quad)
-    integer, value :: n
+  attributes(global) subroutine mass_e_kernel(n,x,y,mobility,quad,mode)
+    integer, value :: n,mode ! 0: all leaves, 1: generic list, 2: nonuniform regular octs.
     logical, value :: mobility,quad
     real(kind=8), device :: x(*),y(*)
     real(kind=8) :: u(54),v(54)
-    integer :: id
+    integer :: id,t,c,g
     id=(blockIdx%x-1)*blockDim%x+threadIdx%x
     if (id>n) return
+    select case(mode)
+    case(1)
+       id=generic_leaf(id)
+    case(2)
+       t=(id-1)/8+1; c=mod(id-1,8)+1
+       if (reg_uniform(t)/=0) return
+       g=contributing(reg_oct(t)); id=leaf_id(c,g)
+    end select
     call reconstruct_e(id,x,u,0)
     if (mobility) then
        call mobility_d(id,u,v,quad)
@@ -1356,7 +1587,12 @@ contains
     real(kind=8), device :: x(*),y(*)
     if (imp_nface==0) return
     call zero_kernel<<<(imp_nface+255)/256,256>>>(imp_nface,y)
-    call mass_f_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y)
+    if (all_leaf_path) then
+       call mass_f_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y,.false.)
+    else
+       if (nreg>0) call regular_f_kernel<<<(nreg+127)/128,128>>>(nreg,x,y)
+       if (ngeneric>0) call mass_f_kernel<<<(ngeneric+255)/256,256>>>(ngeneric,x,y,.true.)
+    endif
     call GPU_Error_Check(__FILE__, __LINE__)
   end subroutine
 
@@ -1365,7 +1601,12 @@ contains
     if (imp_nedge==0) return
     imp_me_calls=imp_me_calls+1
     call zero_kernel<<<(imp_nedge+255)/256,256>>>(imp_nedge,y)
-    call mass_e_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y,.false.,.false.)
+    if (all_leaf_path) then
+       call mass_e_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y,.false.,.false.,0)
+    else
+       if (nreg>0) call regular_e_kernel<<<(nreg+127)/128,128>>>(nreg,x,y,.false.)
+       if (ngeneric>0) call mass_e_kernel<<<(ngeneric+255)/256,256>>>(ngeneric,x,y,.false.,.false.,1)
+    endif
     call GPU_Error_Check(__FILE__, __LINE__)
   end subroutine
 
@@ -1374,7 +1615,16 @@ contains
     if (imp_nedge==0) return
     imp_k_calls=imp_k_calls+1
     call zero_kernel<<<(imp_nedge+255)/256,256>>>(imp_nedge,y)
-    call mass_e_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y,.true.,imp_quad)
+    if (imp_quad.or.all_leaf_path) then
+       call mass_e_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y,.true.,imp_quad,0)
+    else
+       if (nreg>0) then
+          call regular_eta_kernel<<<(nreg+255)/256,256>>>(nreg)
+          call regular_e_kernel<<<(nreg+127)/128,128>>>(nreg,x,y,.true.)
+       endif
+       if (ngeneric>0) call mass_e_kernel<<<(ngeneric+255)/256,256>>>(ngeneric,x,y,.true.,.false.,1)
+       if (nreg>0) call mass_e_kernel<<<(8*nreg+255)/256,256>>>(8*nreg,x,y,.true.,.false.,2)
+    endif
     call GPU_Error_Check(__FILE__, __LINE__)
   end subroutine
 
@@ -1395,6 +1645,40 @@ contains
     call GPU_Error_Check(__FILE__, __LINE__)
   end subroutine
 
+  attributes(global) subroutine regular_diagonal_kernel(n,d,face)
+    integer, value :: n
+    logical, value :: face
+    real(kind=8), device :: d(*)
+    real(kind=8) :: scale,val,tmp
+    integer :: t,g,r,j,id,m
+    t=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (t>n) return
+    g=contributing(reg_oct(t)); scale=width(leaf_id(1,g)); m=54
+    if (face) then
+       scale=1d0/scale; m=36
+    endif
+    do r=1,m
+       if (face) then
+          id=reg_f(r,t); val=mfref(r,r)
+          if (reg_alias(t)/=0) then
+             do j=1,m
+                if (j==r) cycle
+                if (reg_f(j,t)==id) val=val+mfref(r,j)
+             enddo
+          endif
+       else
+          id=reg_e(r,t); val=meref(r,r)
+          if (reg_alias(t)/=0) then
+             do j=1,m
+                if (j==r) cycle
+                if (reg_e(j,t)==id) val=val+meref(r,j)
+             enddo
+          endif
+       endif
+       tmp=atomicadd(d(id),scale*val)
+    enddo
+  end subroutine
+
   ! Compute exact diagonal entries from unique columns in each leaf's support.
   attributes(global) subroutine diagonal_kernel(n,d)
     integer, value :: n
@@ -1404,6 +1688,7 @@ contains
     real(kind=8) :: u(54),v(54),val,tmp
     id=(blockIdx%x-1)*blockDim%x+threadIdx%x
     if (id>n) return
+    id=generic_leaf(id)
     t=leaf_t(id); m=0
     do r=1,54
        row=54*(t-1)+r
@@ -1443,7 +1728,8 @@ contains
     real(kind=8), device :: d(*)
     if (imp_nedge==0) return
     call zero_kernel<<<(imp_nedge+255)/256,256>>>(imp_nedge,d)
-    call diagonal_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,d)
+    if (nreg>0) call regular_diagonal_kernel<<<(nreg+255)/256,256>>>(nreg,d,.false.)
+    if (ngeneric>0) call diagonal_kernel<<<(ngeneric+255)/256,256>>>(ngeneric,d)
     call GPU_Error_Check(__FILE__, __LINE__)
   end subroutine
 
@@ -1455,6 +1741,7 @@ contains
     real(kind=8) :: u(36),v(36),val,tmp
     id=(blockIdx%x-1)*blockDim%x+threadIdx%x
     if (id>n) return
+    id=generic_leaf(id)
     t=leaf_t(id); m=0
     do r=1,36
        row=36*(t-1)+r
@@ -1494,7 +1781,8 @@ contains
     real(kind=8), device :: d(*)
     if (imp_nface==0) return
     call zero_kernel<<<(imp_nface+255)/256,256>>>(imp_nface,d)
-    call diagonal_f_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,d)
+    if (nreg>0) call regular_diagonal_kernel<<<(nreg+255)/256,256>>>(nreg,d,.true.)
+    if (ngeneric>0) call diagonal_f_kernel<<<(ngeneric+255)/256,256>>>(ngeneric,d)
     call GPU_Error_Check(__FILE__, __LINE__)
   end subroutine
 
@@ -1599,13 +1887,16 @@ contains
     if (i<=n) x(i)=random_value(i,seed)
   end subroutine
 
-  attributes(global) subroutine check_eta_kernel(n)
+  attributes(global) subroutine check_eta_kernel(n,uniform)
     integer, value :: n
-    integer :: id
+    logical, value :: uniform
+    integer :: id,key
     id=(blockIdx%x-1)*blockDim%x+threadIdx%x
     if (id>n) return
-    imp_eta(1,id)=0.37d0+0.1d0*abs(random_value(id,31))
-    imp_eta(2,id)=0.2d0+0.1d0*abs(random_value(id,73))
+    key=id
+    if (uniform) key=leaf_t(id)
+    imp_eta(1,id)=0.37d0+0.1d0*abs(random_value(key,31))
+    imp_eta(2,id)=0.2d0+0.1d0*abs(random_value(key,73))
   end subroutine
 
   attributes(device) real(kind=8) function nodal_d(i,s)
@@ -1744,6 +2035,14 @@ contains
     symmetry_error=abs(dot_host(x,my)-dot_host(mx,y))/scale
   end function
 
+  real(kind=8) function max_relative_error(x,y)
+    real(kind=8) :: x(:),y(:)
+    max_relative_error=huge(1d0)
+    if (any(.not.(abs(x)<=huge(1d0)))) return
+    if (any(.not.(abs(y)<=huge(1d0)))) return
+    max_relative_error=maxval(abs(x-y))/max(maxval(abs(y)),tiny(1d0))
+  end function
+
   attributes(global) subroutine dump_kernel(n,e,f,ue,uf)
     integer, value :: n
     real(kind=8), device :: e(*),f(*),ue(54,*),uf(36,*)
@@ -1784,7 +2083,7 @@ contains
     write(u) he,hf,hue,huf
     hf=0d0; call imp_mf(f,check_f(:,3)); hf=check_f(1:imp_nface,3); write(u) hf
     call imp_me(e,check_e(:,3)); he=check_e(1:imp_nedge,3); write(u) he
-    call check_eta_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf)
+    call check_eta_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,.false.)
     call imp_set_w(f); imp_quad=.false.
     call imp_k(e,check_e(:,3)); he=check_e(1:imp_nedge,3); write(u) he
     imp_quad=.true.
@@ -1800,8 +2099,8 @@ contains
   subroutine imp_check(bold,info)
     real(kind=dp), device :: bold(8,6,*)
     integer :: info,i
-    real(kind=8), allocatable :: fh(:,:),eh(:,:),lh(:,:)
-    real(kind=8) :: residual(10),positive,scale
+    real(kind=8), allocatable :: fh(:,:),eh(:,:),lh(:,:),ref_f(:),ref_e(:)
+    real(kind=8) :: residual(10),fast_error(3),positive,scale
     logical :: old_quad
     info=0
     if (imp_nleaf==0) return
@@ -1826,6 +2125,8 @@ contains
     endif
     if (.not.allocated(saved_w)) allocate(saved_w(36,max(1,imp_nleaf)))
     allocate(fh(imp_nface,4),eh(imp_nedge,4),lh(10,imp_nleaf))
+    allocate(ref_f(imp_nface),ref_e(imp_nedge))
+    fast_error=0d0; all_leaf_path=.false.
     saved_eta(:,1:imp_nleaf)=imp_eta(:,1:imp_nleaf)
     saved_w(:,1:imp_nleaf)=cache_w(:,1:imp_nleaf); old_quad=imp_quad
     call random_kernel<<<(imp_nface+255)/256,256>>>(imp_nface,check_f(:,1),17)
@@ -1855,15 +2156,45 @@ contains
     fh(:,3:4)=check_f(1:imp_nface,3:4)
     residual(7)=symmetry_error(fh(:,1),fh(:,2),fh(:,3),fh(:,4))
     positive=dot_host(fh(:,1),fh(:,3))
+    all_leaf_path=.true.
+    do i=1,2
+       call imp_mf(check_f(:,i),check_f(:,4)); ref_f=check_f(:,4)
+       fast_error(1)=max(fast_error(1),max_relative_error(fh(:,i+2),ref_f))
+    enddo
+    all_leaf_path=.false.
     call imp_me(check_e(:,1),check_e(:,3)); call imp_me(check_e(:,2),check_e(:,4))
     eh(:,3:4)=check_e(1:imp_nedge,3:4)
     residual(8)=symmetry_error(eh(:,1),eh(:,2),eh(:,3),eh(:,4))
-    call check_eta_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf)
+    all_leaf_path=.true.
+    do i=1,2
+       call imp_me(check_e(:,i),check_e(:,4)); ref_e=check_e(:,4)
+       fast_error(2)=max(fast_error(2),max_relative_error(eh(:,i+2),ref_e))
+    enddo
+    all_leaf_path=.false.
+    call check_eta_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,.false.)
     call imp_set_w(check_f(:,1))
     imp_quad=.false.
     call imp_k(check_e(:,1),check_e(:,3)); call imp_k(check_e(:,2),check_e(:,4))
     eh(:,3:4)=check_e(1:imp_nedge,3:4)
     residual(9)=symmetry_error(eh(:,1),eh(:,2),eh(:,3),eh(:,4))
+    all_leaf_path=.true.
+    do i=1,2
+       call imp_k(check_e(:,i),check_e(:,4)); ref_e=check_e(:,4)
+       fast_error(3)=max(fast_error(3),max_relative_error(eh(:,i+2),ref_e))
+    enddo
+    all_leaf_path=.false.
+    ! Also exercise the regular Ohmic action: the preceding per-leaf random
+    ! coefficients deliberately force nonuniform regular octs into the fallback.
+    call check_eta_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,.true.)
+    call imp_k(check_e(:,1),check_e(:,3)); call imp_k(check_e(:,2),check_e(:,4))
+    eh(:,3:4)=check_e(1:imp_nedge,3:4)
+    all_leaf_path=.true.
+    do i=1,2
+       call imp_k(check_e(:,i),check_e(:,4)); ref_e=check_e(:,4)
+       fast_error(3)=max(fast_error(3),max_relative_error(eh(:,i+2),ref_e))
+    enddo
+    all_leaf_path=.false.
+    call check_eta_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,.false.)
     imp_quad=.true.
     call imp_k(check_e(:,1),check_e(:,3)); call imp_k(check_e(:,2),check_e(:,4))
     eh(:,3:4)=check_e(1:imp_nedge,3:4)
@@ -1873,11 +2204,14 @@ contains
     call GPU_Error_Check(__FILE__, __LINE__)
     write(*,'(A,5ES12.4)') 'implicit DC, RF LF, RE LE, curl, native: ',residual(1:5)
     write(*,'(A,5ES12.4)') 'implicit C adjoint, MF, ME, K Ohmic, K AD symmetry: ',residual(6:10)
+    write(*,'(A,3ES12.4)') 'implicit fast/all-leaf MF, ME, K Ohmic max relative: ',fast_error
+    write(*,'(A,2I12)') 'implicit regular octs, generic leaves: ',nreg,ngeneric
     write(*,'(A,ES20.12)') 'implicit x.MF.x: ',positive
     if (any(residual>1d-10).or..not.(positive>0d0)) info=1
     ! NaNs must fail rather than disappear in a comparison with the tolerance.
     if (any(.not.(residual<=1d-10))) info=1
-    deallocate(fh,eh,lh)
+    if (any(.not.(fast_error<=1d-12))) info=1
+    deallocate(fh,eh,lh,ref_f,ref_e)
   end subroutine
 
   subroutine imp_free()
@@ -1934,6 +2268,15 @@ contains
     if (allocated(check_ue)) deallocate(check_ue,check_uf,check_uc)
     if (allocated(saved_eta)) deallocate(saved_eta)
     if (allocated(saved_w)) deallocate(saved_w)
+    if (allocated(reg_map)) deallocate(reg_map)
+    if (allocated(reg_oct)) deallocate(reg_oct)
+    if (allocated(reg_f)) deallocate(reg_f)
+    if (allocated(reg_e)) deallocate(reg_e)
+    if (allocated(generic_leaf)) deallocate(generic_leaf)
+    if (allocated(reg_uniform)) deallocate(reg_uniform)
+    if (allocated(reg_alias)) deallocate(reg_alias)
+    if (allocated(reg_eta)) deallocate(reg_eta)
+    nreg=0; ngeneric=0; all_leaf_path=.false.
     imp_nleaf=0; imp_nface=0; imp_nedge=0; imp_ntr=0; nt=0; imp_quad=.false.
   end subroutine
 end module implicit_ops
