@@ -280,14 +280,15 @@ contains
     integer(kind=8), device :: hk(*)
     integer(kind=4), device :: hv(*)
     integer, value :: hs,l
-    integer :: p(3),id,q(3),d,g,c
+    integer :: p(3),id,q(3),k(3),d,g,c
     logical :: refined
     id=0; refined=.false.
     if (l<1.or.l>lf_d) return
     do d=1,3
        q(d)=2*blo(d,l)+modulo(p(d)-2*blo(d,l),2*(bhi(d,l)-blo(d,l)))
     enddo
-    g=lookup(grid,hk,hv,hs,l,(q-modulo(q,2))/2)
+    k=(q-modulo(q,2))/2
+    g=lookup(grid,hk,hv,hs,l,k)
     if (g==0) return
     refined=lookup(grid,hk,hv,hs,l+1,q)>0
     if (refined) return
@@ -1365,8 +1366,8 @@ contains
     integer(kind=8) :: h
     h=ieor(int(i,8),ishft(int(seed,8),32))
     h=ieor(h,ishft(h,13)); h=ieor(h,ishft(h,-7)); h=ieor(h,ishft(h,17))
-    h=modulo(iand(h,2147483647_8)*1103515245_8+12345_8,2147483647_8)
-    random_value=real(h,8)/1073741824d0-1d0
+    h=iand(h*6364136223846793005_8+1442695040888963407_8,9223372036854775807_8)
+    random_value=real(ishft(h,-32),8)/1073741824d0-1d0
   end function
 
   attributes(global) subroutine random_kernel(n,x,seed)

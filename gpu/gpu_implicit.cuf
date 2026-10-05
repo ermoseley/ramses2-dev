@@ -294,14 +294,14 @@ contains
     n=imp_nface
     allocate(zr(n),zi(n),rr(n),ri(n),pr(n),pi(n),my(n),mrr(n),mri(n),mpr(n),mpi(n), &
          & qr(n),qi(n),mqr(n),mqi(n))
-    zr=0.5d0*y; zi=zr
+    call combine(zr,0.5d0,y,0d0,y); zi=zr
     call imp_mf(y,my)
     call imp_mf(zr,mpr); call imp_mf(zi,mpi)
     call shifted(zr,zi,mpr,mpi,qr,qi,mqr,mqi,dt,action_ok)
     ok=.false.; restarts=0
     if(.not.action_ok) goto 200
-    call combine(rr,1d0,y,-1d0,qr); ri=-qi
-    call combine(mrr,1d0,my,-1d0,mqr); mri=-mqi
+    call combine(rr,1d0,y,-1d0,qr); call combine(ri,-1d0,qi,0d0,qi)
+    call combine(mrr,1d0,my,-1d0,mqr); call combine(mri,-1d0,mqi,0d0,mqi)
     pr=rr; pi=ri; mpr=mrr; mpi=mri
     rho=bilinear(rr,ri,mrr,mri)
     do it=0,maxiter
@@ -312,7 +312,7 @@ contains
           call imp_mf(zr,mpr); call imp_mf(zi,mpi)
           call shifted(zr,zi,mpr,mpi,qr,qi,mqr,mqi,dt,action_ok)
           if(.not.action_ok) exit
-          call combine(rr,1d0,y,-1d0,qr); ri=-qi
+          call combine(rr,1d0,y,-1d0,qr); call combine(ri,-1d0,qi,0d0,qi)
           call imp_mf(rr,mrr); call imp_mf(ri,mri)
           norm2=dot(rr,mrr)+dot(ri,mri)
           if(.not.finite(norm2).or.norm2<0d0) exit
@@ -343,7 +343,7 @@ contains
        rho=rhonew
     enddo
 200 if(ok) then
-       u=2d0*zr; x=2d0*zi
+       call combine(u,2d0,zr,0d0,zr); call combine(x,2d0,zi,0d0,zi)
        call combine(w,1d0,zr,1d0,zi)
     endif
     deallocate(zr,zi,rr,ri,pr,pi,my,mrr,mri,mpr,mpi,qr,qi,mqr,mqi)
