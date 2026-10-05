@@ -40,56 +40,6 @@ module implicit_ops
   real(kind=8), device, allocatable :: saved_eta(:,:), saved_w(:,:)
 contains
 
-  ! Grow-only storage; topology is rebuilt after any growth.
-  subroutine grow_i1(a,n)
-    integer(kind=4), device, allocatable :: a(:)
-    integer :: n
-    if (allocated(a)) then
-       if (size(a)>=max(1,n)) return
-       deallocate(a)
-    endif
-    allocate(a(max(1,n)))
-  end subroutine
-
-  subroutine grow_i2(a,m,n)
-    integer(kind=4), device, allocatable :: a(:,:)
-    integer :: m,n
-    if (allocated(a)) then
-       if (size(a,1)==m.and.size(a,2)>=max(1,n)) return
-       deallocate(a)
-    endif
-    allocate(a(m,max(1,n)))
-  end subroutine
-
-  subroutine grow_i3(a,m,k,n)
-    integer(kind=4), device, allocatable :: a(:,:,:)
-    integer :: m,k,n
-    if (allocated(a)) then
-       if (size(a,1)==m.and.size(a,2)==k.and.size(a,3)>=max(1,n)) return
-       deallocate(a)
-    endif
-    allocate(a(m,k,max(1,n)))
-  end subroutine
-
-  subroutine grow_r1(a,n)
-    real(kind=8), device, allocatable :: a(:)
-    integer :: n
-    if (allocated(a)) then
-       if (size(a)>=max(1,n)) return
-       deallocate(a)
-    endif
-    allocate(a(max(1,n)))
-  end subroutine
-
-  subroutine grow_r2(a,m,n)
-    real(kind=8), device, allocatable :: a(:,:)
-    integer :: m,n
-    if (allocated(a)) then
-       if (size(a,1)>=m.and.size(a,2)>=max(1,n)) return
-       deallocate(a)
-    endif
-    allocate(a(m,max(1,n)))
-  end subroutine
 
   real(kind=8) function nodal(i,s)
     integer :: i
@@ -668,16 +618,48 @@ contains
     integer :: l,h(4),errors(2),nfz,nez,ncz
     call init_tables()
     ng_d=ngridmax; lf_d=lf; box_d=boxlen
-    call grow_i1(nx_d,lf); call grow_i2(blo,3,lf); call grow_i2(bhi,3,lf)
+    if (allocated(nx_d)) then
+       if (size(nx_d)<max(1,lf)) deallocate(nx_d)
+    endif
+    if (.not.allocated(nx_d)) allocate(nx_d(max(1,lf)))
+    if (allocated(blo)) then
+       if (size(blo,1)/=3.or.size(blo,2)<max(1,lf)) deallocate(blo)
+    endif
+    if (.not.allocated(blo)) allocate(blo(3,max(1,lf)))
+    if (allocated(bhi)) then
+       if (size(bhi,1)/=3.or.size(bhi,2)<max(1,lf)) deallocate(bhi)
+    endif
+    if (.not.allocated(bhi)) allocate(bhi(3,max(1,lf)))
     if (allocated(off_d)) then
        if (size(off_d)<lf) deallocate(off_d)
     endif
     if (.not.allocated(off_d)) allocate(off_d(lf))
     nx_d(1:lf)=ckey_max(1:lf); off_d(1:lf)=key_off(1:lf)
     blo(:,1:lf)=box_ckey_min(:,1:lf); bhi(:,1:lf)=box_ckey_max(:,1:lf)
-    call grow_i1(counts,max(ngridmax,imp_nleaf)); call grow_i1(prefix,max(ngridmax,imp_nleaf)+1)
-    call grow_i1(oct_counts,ngridmax); call grow_i1(oct_prefix,ngridmax+1)
-    call grow_i2(leaf_id,8,ngridmax); call grow_i1(oct_id,ngridmax)
+    if (allocated(counts)) then
+       if (size(counts)<max(1,max(ngridmax,imp_nleaf))) deallocate(counts)
+    endif
+    if (.not.allocated(counts)) allocate(counts(max(1,max(ngridmax,imp_nleaf))))
+    if (allocated(prefix)) then
+       if (size(prefix)<max(1,max(ngridmax,imp_nleaf)+1)) deallocate(prefix)
+    endif
+    if (.not.allocated(prefix)) allocate(prefix(max(1,max(ngridmax,imp_nleaf)+1)))
+    if (allocated(oct_counts)) then
+       if (size(oct_counts)<max(1,ngridmax)) deallocate(oct_counts)
+    endif
+    if (.not.allocated(oct_counts)) allocate(oct_counts(max(1,ngridmax)))
+    if (allocated(oct_prefix)) then
+       if (size(oct_prefix)<max(1,ngridmax+1)) deallocate(oct_prefix)
+    endif
+    if (.not.allocated(oct_prefix)) allocate(oct_prefix(max(1,ngridmax+1)))
+    if (allocated(leaf_id)) then
+       if (size(leaf_id,1)/=8.or.size(leaf_id,2)<max(1,ngridmax)) deallocate(leaf_id)
+    endif
+    if (.not.allocated(leaf_id)) allocate(leaf_id(8,max(1,ngridmax)))
+    if (allocated(oct_id)) then
+       if (size(oct_id)<max(1,ngridmax)) deallocate(oct_id)
+    endif
+    if (.not.allocated(oct_id)) allocate(oct_id(max(1,ngridmax)))
     counts=0; oct_counts=0; leaf_id=0; oct_id=0; bad=0; totals=0
     do l=lmin,lf
        if (noct(l)<=0) cycle
@@ -692,49 +674,189 @@ contains
        write(*,'(A,I0)') 'implicit P violation: missing refined neighbours = ',errors(1)
        info=1; return
     endif
-    call grow_i1(imp_leaf_oct,imp_nleaf); call grow_i1(imp_leaf_cell,imp_nleaf)
-    call grow_i1(imp_leaf_lev,imp_nleaf); call grow_i1(leaf_t,imp_nleaf); call grow_i1(contributing,nt)
-    call grow_i2(leaf_pos,3,imp_nleaf)
-    call grow_r1(width,imp_nleaf); call grow_r2(imp_eta,2,imp_nleaf); call grow_r2(cache_w,36,imp_nleaf)
+    if (allocated(imp_leaf_oct)) then
+       if (size(imp_leaf_oct)<max(1,imp_nleaf)) deallocate(imp_leaf_oct)
+    endif
+    if (.not.allocated(imp_leaf_oct)) allocate(imp_leaf_oct(max(1,imp_nleaf)))
+    if (allocated(imp_leaf_cell)) then
+       if (size(imp_leaf_cell)<max(1,imp_nleaf)) deallocate(imp_leaf_cell)
+    endif
+    if (.not.allocated(imp_leaf_cell)) allocate(imp_leaf_cell(max(1,imp_nleaf)))
+    if (allocated(imp_leaf_lev)) then
+       if (size(imp_leaf_lev)<max(1,imp_nleaf)) deallocate(imp_leaf_lev)
+    endif
+    if (.not.allocated(imp_leaf_lev)) allocate(imp_leaf_lev(max(1,imp_nleaf)))
+    if (allocated(leaf_t)) then
+       if (size(leaf_t)<max(1,imp_nleaf)) deallocate(leaf_t)
+    endif
+    if (.not.allocated(leaf_t)) allocate(leaf_t(max(1,imp_nleaf)))
+    if (allocated(contributing)) then
+       if (size(contributing)<max(1,nt)) deallocate(contributing)
+    endif
+    if (.not.allocated(contributing)) allocate(contributing(max(1,nt)))
+    if (allocated(leaf_pos)) then
+       if (size(leaf_pos,1)/=3.or.size(leaf_pos,2)<max(1,imp_nleaf)) deallocate(leaf_pos)
+    endif
+    if (.not.allocated(leaf_pos)) allocate(leaf_pos(3,max(1,imp_nleaf)))
+    if (allocated(width)) then
+       if (size(width)<max(1,imp_nleaf)) deallocate(width)
+    endif
+    if (.not.allocated(width)) allocate(width(max(1,imp_nleaf)))
+    if (allocated(imp_eta)) then
+       if (size(imp_eta,1)/=2.or.size(imp_eta,2)<max(1,imp_nleaf)) deallocate(imp_eta)
+    endif
+    if (.not.allocated(imp_eta)) allocate(imp_eta(2,max(1,imp_nleaf)))
+    if (allocated(cache_w)) then
+       if (size(cache_w,1)/=36.or.size(cache_w,2)<max(1,imp_nleaf)) deallocate(cache_w)
+    endif
+    if (.not.allocated(cache_w)) allocate(cache_w(36,max(1,imp_nleaf)))
     imp_eta=0d0; cache_w=0d0
     if (imp_nleaf==0) return
     call enumerate_fill_kernel<<<(ngridmax+255)/256,256>>>(grid,hash_key,hash_val,hash_size,ngridmax)
-    call grow_i1(fc,imp_nleaf); call grow_i1(ec,imp_nleaf)
-    call grow_i1(fp,imp_nleaf+1); call grow_i1(ep,imp_nleaf+1)
-    call grow_i2(fid,6,imp_nleaf); call grow_i2(eid,12,imp_nleaf); fid=0; eid=0
+    if (allocated(fc)) then
+       if (size(fc)<max(1,imp_nleaf)) deallocate(fc)
+    endif
+    if (.not.allocated(fc)) allocate(fc(max(1,imp_nleaf)))
+    if (allocated(ec)) then
+       if (size(ec)<max(1,imp_nleaf)) deallocate(ec)
+    endif
+    if (.not.allocated(ec)) allocate(ec(max(1,imp_nleaf)))
+    if (allocated(fp)) then
+       if (size(fp)<max(1,imp_nleaf+1)) deallocate(fp)
+    endif
+    if (.not.allocated(fp)) allocate(fp(max(1,imp_nleaf+1)))
+    if (allocated(ep)) then
+       if (size(ep)<max(1,imp_nleaf+1)) deallocate(ep)
+    endif
+    if (.not.allocated(ep)) allocate(ep(max(1,imp_nleaf+1)))
+    if (allocated(fid)) then
+       if (size(fid,1)/=6.or.size(fid,2)<max(1,imp_nleaf)) deallocate(fid)
+    endif
+    if (.not.allocated(fid)) allocate(fid(6,max(1,imp_nleaf)))
+    if (allocated(eid)) then
+       if (size(eid,1)/=12.or.size(eid,2)<max(1,imp_nleaf)) deallocate(eid)
+    endif
+    if (.not.allocated(eid)) allocate(eid(12,max(1,imp_nleaf)))
+    fid=0
+    eid=0
     call ownership_kernel<<<(imp_nleaf+255)/256,256>>>(grid,hash_key,hash_val,hash_size,imp_nleaf,.false.)
     call scan_kernel<<<1,1>>>(imp_nleaf,fc,fp,totals,2)
     call scan_kernel<<<1,1>>>(imp_nleaf,ec,ep,totals,3)
     call GPU_Error_Check(__FILE__, __LINE__)
     h=totals; imp_nface=h(2); imp_nedge=h(3)
-    call grow_i2(face_rec,7,imp_nface); call grow_i2(edge_rec,6,imp_nedge)
+    if (allocated(face_rec)) then
+       if (size(face_rec,1)/=7.or.size(face_rec,2)<max(1,imp_nface)) deallocate(face_rec)
+    endif
+    if (.not.allocated(face_rec)) allocate(face_rec(7,max(1,imp_nface)))
+    if (allocated(edge_rec)) then
+       if (size(edge_rec,1)/=6.or.size(edge_rec,2)<max(1,imp_nedge)) deallocate(edge_rec)
+    endif
+    if (.not.allocated(edge_rec)) allocate(edge_rec(6,max(1,imp_nedge)))
     call ownership_kernel<<<(imp_nleaf+255)/256,256>>>(grid,hash_key,hash_val,hash_size,imp_nleaf,.true.)
-    call grow_i1(work,max(54*nt,imp_nface,imp_nedge))
-    call grow_i1(rfr,36*nt+1); call grow_i1(rer,54*nt+1)
+    if (allocated(work)) then
+       if (size(work)<max(1,max(54*nt,imp_nface,imp_nedge))) deallocate(work)
+    endif
+    if (.not.allocated(work)) allocate(work(max(1,max(54*nt,imp_nface,imp_nedge))))
+    if (allocated(rfr)) then
+       if (size(rfr)<max(1,36*nt+1)) deallocate(rfr)
+    endif
+    if (.not.allocated(rfr)) allocate(rfr(max(1,36*nt+1)))
+    if (allocated(rer)) then
+       if (size(rer)<max(1,54*nt+1)) deallocate(rer)
+    endif
+    if (.not.allocated(rer)) allocate(rer(max(1,54*nt+1)))
     call skeleton_kernel<<<(36*nt+255)/256,256>>>(grid,hash_key,hash_val,hash_size,36*nt,.true.,.false.)
     call scan_kernel<<<1,1>>>(36*nt,work,rfr,totals,1)
-    h=totals; nfz=h(1); call grow_i1(rfi,nfz)
+    h=totals
+    nfz=h(1)
+    if (allocated(rfi)) then
+       if (size(rfi)<max(1,nfz)) deallocate(rfi)
+    endif
+    if (.not.allocated(rfi)) allocate(rfi(max(1,nfz)))
     call skeleton_kernel<<<(36*nt+255)/256,256>>>(grid,hash_key,hash_val,hash_size,36*nt,.true.,.true.)
     call skeleton_kernel<<<(54*nt+255)/256,256>>>(grid,hash_key,hash_val,hash_size,54*nt,.false.,.false.)
     call scan_kernel<<<1,1>>>(54*nt,work,rer,totals,1)
-    h=totals; nez=h(1); call grow_i1(rei,nez)
+    h=totals
+    nez=h(1)
+    if (allocated(rei)) then
+       if (size(rei)<max(1,nez)) deallocate(rei)
+    endif
+    if (.not.allocated(rei)) allocate(rei(max(1,nez)))
     call skeleton_kernel<<<(54*nt+255)/256,256>>>(grid,hash_key,hash_val,hash_size,54*nt,.false.,.true.)
-    call grow_i1(cr,imp_nface+1); call grow_i1(ctr,imp_nedge+1)
+    if (allocated(cr)) then
+       if (size(cr)<max(1,imp_nface+1)) deallocate(cr)
+    endif
+    if (.not.allocated(cr)) allocate(cr(max(1,imp_nface+1)))
+    if (allocated(ctr)) then
+       if (size(ctr)<max(1,imp_nedge+1)) deallocate(ctr)
+    endif
+    if (.not.allocated(ctr)) allocate(ctr(max(1,imp_nedge+1)))
     call incidence_kernel<<<(imp_nface+255)/256,256>>>(grid,hash_key,hash_val,hash_size,imp_nface,.false.)
     call scan_kernel<<<1,1>>>(imp_nface,work,cr,totals,1)
     h=totals; ncz=h(1)
-    call grow_i1(ci,ncz); call grow_i1(cs,ncz); call grow_i1(cti,ncz); call grow_i1(cts,ncz)
+    if (allocated(ci)) then
+       if (size(ci)<max(1,ncz)) deallocate(ci)
+    endif
+    if (.not.allocated(ci)) allocate(ci(max(1,ncz)))
+    if (allocated(cs)) then
+       if (size(cs)<max(1,ncz)) deallocate(cs)
+    endif
+    if (.not.allocated(cs)) allocate(cs(max(1,ncz)))
+    if (allocated(cti)) then
+       if (size(cti)<max(1,ncz)) deallocate(cti)
+    endif
+    if (.not.allocated(cti)) allocate(cti(max(1,ncz)))
+    if (allocated(cts)) then
+       if (size(cts)<max(1,ncz)) deallocate(cts)
+    endif
+    if (.not.allocated(cts)) allocate(cts(max(1,ncz)))
     work=0
     call incidence_kernel<<<(imp_nface+255)/256,256>>>(grid,hash_key,hash_val,hash_size,imp_nface,.true.)
     call scan_kernel<<<1,1>>>(imp_nedge,work,ctr,totals,1)
     work=0; call transpose_fill_kernel<<<1,1>>>(imp_nface)
-    call grow_i3(slots,4,6,imp_nleaf); call grow_i2(slot_n,6,imp_nleaf); call grow_i1(tr_id,imp_nleaf)
-    call grow_i1(counts,max(ngridmax,imp_nleaf)); call grow_i1(prefix,max(ngridmax,imp_nleaf)+1)
+    if (allocated(slots)) then
+       if (size(slots,1)/=4.or.size(slots,2)/=6.or.size(slots,3)<max(1,imp_nleaf)) deallocate(slots)
+    endif
+    if (.not.allocated(slots)) allocate(slots(4,6,max(1,imp_nleaf)))
+    if (allocated(slot_n)) then
+       if (size(slot_n,1)/=6.or.size(slot_n,2)<max(1,imp_nleaf)) deallocate(slot_n)
+    endif
+    if (.not.allocated(slot_n)) allocate(slot_n(6,max(1,imp_nleaf)))
+    if (allocated(tr_id)) then
+       if (size(tr_id)<max(1,imp_nleaf)) deallocate(tr_id)
+    endif
+    if (.not.allocated(tr_id)) allocate(tr_id(max(1,imp_nleaf)))
+    if (allocated(counts)) then
+       if (size(counts)<max(1,max(ngridmax,imp_nleaf))) deallocate(counts)
+    endif
+    if (.not.allocated(counts)) allocate(counts(max(1,max(ngridmax,imp_nleaf))))
+    if (allocated(prefix)) then
+       if (size(prefix)<max(1,max(ngridmax,imp_nleaf)+1)) deallocate(prefix)
+    endif
+    if (.not.allocated(prefix)) allocate(prefix(max(1,max(ngridmax,imp_nleaf)+1)))
     call leaf_topology_kernel<<<(imp_nleaf+255)/256,256>>>(grid,hash_key,hash_val,hash_size,imp_nleaf)
     call scan_kernel<<<1,1>>>(imp_nleaf,counts,prefix,totals,1)
     h=totals; imp_ntr=h(1)
-    call grow_i1(tr_leaf,imp_ntr); call grow_i2(sf,6,imp_ntr); call grow_i2(se,12,imp_ntr)
-    call grow_i2(bf,24,imp_ntr); call grow_i2(be,48,imp_ntr)
+    if (allocated(tr_leaf)) then
+       if (size(tr_leaf)<max(1,imp_ntr)) deallocate(tr_leaf)
+    endif
+    if (.not.allocated(tr_leaf)) allocate(tr_leaf(max(1,imp_ntr)))
+    if (allocated(sf)) then
+       if (size(sf,1)/=6.or.size(sf,2)<max(1,imp_ntr)) deallocate(sf)
+    endif
+    if (.not.allocated(sf)) allocate(sf(6,max(1,imp_ntr)))
+    if (allocated(se)) then
+       if (size(se,1)/=12.or.size(se,2)<max(1,imp_ntr)) deallocate(se)
+    endif
+    if (.not.allocated(se)) allocate(se(12,max(1,imp_ntr)))
+    if (allocated(bf)) then
+       if (size(bf,1)/=24.or.size(bf,2)<max(1,imp_ntr)) deallocate(bf)
+    endif
+    if (.not.allocated(bf)) allocate(bf(24,max(1,imp_ntr)))
+    if (allocated(be)) then
+       if (size(be,1)/=48.or.size(be,2)<max(1,imp_ntr)) deallocate(be)
+    endif
+    if (.not.allocated(be)) allocate(be(48,max(1,imp_ntr)))
     call transition_kernel<<<(imp_nleaf+255)/256,256>>>(grid,hash_key,hash_val,hash_size,imp_nleaf)
     call GPU_Error_Check(__FILE__, __LINE__)
     errors=bad
@@ -1520,8 +1642,26 @@ contains
     logical :: old_quad
     info=0
     if (imp_nleaf==0) return
-    call grow_r2(check_f,imp_nface,4); call grow_r2(check_e,imp_nedge,4)
-    call grow_r2(check_l,10,imp_nleaf); call grow_r2(saved_eta,2,imp_nleaf); call grow_r2(saved_w,36,imp_nleaf)
+    if (allocated(check_f)) then
+       if (size(check_f,1)/=imp_nface.or.size(check_f,2)<max(1,4)) deallocate(check_f)
+    endif
+    if (.not.allocated(check_f)) allocate(check_f(imp_nface,max(1,4)))
+    if (allocated(check_e)) then
+       if (size(check_e,1)/=imp_nedge.or.size(check_e,2)<max(1,4)) deallocate(check_e)
+    endif
+    if (.not.allocated(check_e)) allocate(check_e(imp_nedge,max(1,4)))
+    if (allocated(check_l)) then
+       if (size(check_l,1)/=10.or.size(check_l,2)<max(1,imp_nleaf)) deallocate(check_l)
+    endif
+    if (.not.allocated(check_l)) allocate(check_l(10,max(1,imp_nleaf)))
+    if (allocated(saved_eta)) then
+       if (size(saved_eta,1)/=2.or.size(saved_eta,2)<max(1,imp_nleaf)) deallocate(saved_eta)
+    endif
+    if (.not.allocated(saved_eta)) allocate(saved_eta(2,max(1,imp_nleaf)))
+    if (allocated(saved_w)) then
+       if (size(saved_w,1)/=36.or.size(saved_w,2)<max(1,imp_nleaf)) deallocate(saved_w)
+    endif
+    if (.not.allocated(saved_w)) allocate(saved_w(36,max(1,imp_nleaf)))
     allocate(fh(imp_nface,4),eh(imp_nedge,4),lh(10,imp_nleaf))
     saved_eta(:,1:imp_nleaf)=imp_eta(:,1:imp_nleaf)
     saved_w(:,1:imp_nleaf)=cache_w(:,1:imp_nleaf); old_quad=imp_quad
