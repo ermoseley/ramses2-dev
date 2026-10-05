@@ -735,7 +735,7 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
         PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_utils.cuf.o;${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${EXEC}.dir/hydro/nimhd_coeff.f90.o")
 
     set_source_files_properties(gpu/gpu_implicit_ops.cuf
-        PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_refine.cuf.o;${_gpu_obj_dir}/gpu_implicit_tables.f90.o")
+        PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_refine.cuf.o;${_gpu_obj_dir}/gpu_implicit_tables.f90.o;${cub_f_scan}")
     set_source_files_properties(gpu/gpu_implicit.cuf
         PROPERTIES OBJECT_DEPENDS "${_gpu_obj_dir}/gpu_implicit_ops.cuf.o;${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${EXEC}.dir/hydro/nimhd_coeff.f90.o")
 

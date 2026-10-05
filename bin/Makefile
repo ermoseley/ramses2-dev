@@ -362,7 +362,7 @@ cub_module_radix_sort_f.o: cub_module_radix_sort.cuf cub_module_radix_sort_c.o
 
 # Implicit GPU module dependencies (also needed with parallel make).
 ifeq ($(COMPILER),NVHPC)
-gpu_implicit_ops.o: gpu_refine.o gpu_implicit_tables.o
+gpu_implicit_ops.o: gpu_refine.o gpu_implicit_tables.o cub_inclusive_scan_f.o
 gpu_implicit.o: gpu_implicit_ops.o nimhd_coeff.o
 gpu_runner.o: gpu_implicit.o
 endif

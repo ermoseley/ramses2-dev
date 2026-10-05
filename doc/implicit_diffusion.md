@@ -147,8 +147,12 @@ abort the run.
 
     J = M_E^-1 C^T M_F b,   E = M_E^-1 K J,   H b = C E.
 
-`M_E^-1` is applied by Jacobi-preconditioned CG to a relative residual `1e-13`
-(true residual monitored).
+`M_E^-1` is applied by Jacobi-preconditioned CG with a monitored true residual.
+Topology and exact mass diagonals are cached until refinement, grid allocation
+or host-to-device grid upload, or a change in `lmin`, `lf` or `ngridmax`.
+`nimhd_check` runs only on rebuild. The face diagonal uses the same per-leaf
+unit-column assembly as the edge diagonal. CSR offsets use CUB scans; the
+transpose fill remains serial and deterministic.
 
 ## 7. Time step (Pade(0,2), common mobility)
 
@@ -163,12 +167,35 @@ with COCG in the `M_F` bilinear form (unconjugated), to
 coefficients) Picard iterates the mobility: `K_k = K(W_k)`, solve, set
 `W_{k+1}`, until `||W_{k+1}-W_k||_MF <= nimhd_rtol ||Y||_MF`.
 
+For spatially uniform pure Ohmic coefficients, the solve instead uses the
+complex symmetric edge system, with no nested mass inverse:
+
+    (sigma M_E + dt eta G) J = C^T M_F Y,   G = C^T M_F C
+    Z = (Y - dt eta C J)/sigma
+
+COCG uses the unconjugated Euclidean bilinear form, a complex Jacobi
+preconditioner `sigma diag(M_E) + dt eta g`, with
+`g_e = sum_f C_fe^2 diag(M_F)_f`, and an edge residual 2-norm tolerance
+`nimhd_rtol ||C^T M_F Y||_2`, confirmed by a true-residual recheck. This `g`
+is the prescribed diagonal approximation; the action uses the full `M_F`.
+The same `U,X,W` conversion and Picard coefficient comparison apply; unchanged
+Ohmic coefficients require no second solve.
+
+In the general face COCG, iteration `k` uses inner relative tolerance
+`max(1e-14, min(1e-4, 0.1 nimhd_rtol ||Y||_MF / max(||r_k||_MF,tiny)))`.
+True-residual rechecks and commit use the strict tolerance
+`max(1e-14, 1e-3 nimhd_rtol)`, retaining the existing restart logic.
+
 Commit: `J_s = M_E^-1 C^T M_F s`, `E_s = M_E^-1 K(W) J_s` for `s=U,X`;
 
     B_U = Y - a C (E_U - E_X),   X_acc = Y - a C (E_U + E_X).
 
 `X_acc` is the accepted field (exact CT). The endpoint mismatch
 `||X_acc - X||_MF/||Y||_MF` must be below `100*nimhd_rtol`.
+The uniform-Ohmic fast path retains these independent inner-CG stage solves
+and endpoint check. The summary reports synchronized wall times for build,
+check, coefficients/`set_w`, COCG and commit/energy, plus `M_E`/`K` application
+counts for the entire call (including checks and rejected attempts).
 
 ## 8. Energy
 
@@ -226,7 +253,7 @@ Files, in build order after `gpu_hydro.o gpu_refine.o`:
    Public state (host scalars): `imp_nleaf, imp_nface, imp_nedge, imp_ntr`;
    device arrays `imp_leaf_oct(:), imp_leaf_cell(:), imp_leaf_lev(:)`,
    `imp_eta(2,:)` (eta_o, eta_a per leaf, filled by the solver),
-   host logical `imp_quad` (use the 5-point mobility).
+   host logical `imp_quad` (use the 5-point mobility), `imp_valid` (cached topology).
 
        subroutine imp_build(grid, hash_key, hash_val, hash_size, ckey_max, key_off,
                             box_ckey_min, box_ckey_max, head, noct, ngridmax,
@@ -238,6 +265,7 @@ Files, in build order after `gpu_hydro.o gpu_refine.o`:
        subroutine imp_mf(x, y)                   ! y = M_F x
        subroutine imp_me(x, y)                   ! y = M_E x
        subroutine imp_me_diag(d)                 ! diagonal of M_E (positive)
+       subroutine imp_mf_diag(d)                 ! exact diagonal of M_F
        subroutine imp_curl(e, f)                 ! f = C e
        subroutine imp_curlt(f, e)                ! e = C^T f
        subroutine imp_set_w(w)                   ! cache the leaf field of W for K

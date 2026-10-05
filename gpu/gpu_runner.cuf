@@ -1577,6 +1577,7 @@ contains
     use cub_inclusive_scan_mod
     use cub_module, only: radix_sort
     use iso_fortran_env
+    use implicit_ops, only: imp_valid
     implicit none
     type(ramses_t), intent(inout) :: sim
     integer, intent(in) :: ilevel
@@ -1600,6 +1601,7 @@ contains
 
     character(len=64) :: descr
 
+    imp_valid=.false.
     interpol_var  = sim%r%interpol_var
     interpol_type = sim%r%interpol_type
     smallr_d      = sim%r%smallr

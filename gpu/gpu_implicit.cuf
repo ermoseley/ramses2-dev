@@ -12,11 +12,39 @@ module implicit_solver
   integer, parameter :: nimhd_maxsplit=2
   integer :: maxiter, inner_max, inner_calls, cocg_iters, picard_iters
   integer(kind=8) :: inner_total
+  integer :: cached_lmin=-1, cached_lf=-1, cached_ngridmax=-1
   real(kind=8) :: rtol, tol_in, eta_uniform
+  real(kind=8) :: time_coeff, time_solve, time_commit
   logical :: uniform_ohmic, first_call=.true.
   real(kind=8), device, allocatable :: diag(:), cg_r(:), cg_z(:), cg_p(:), cg_ap(:), cg_true(:)
   real(kind=8), device, allocatable :: eq(:), ej(:), ee(:), ek(:)
+  real(kind=8), device, allocatable :: diag_f(:), diag_g(:)
+  real(kind=8), device, allocatable :: y0(:), y(:), candidate(:), de0(:), de(:), detotal(:), base_b(:,:)
 contains
+  ! Phase endpoints include all preceding GPU work.
+  real(kind=8) function wall_time()
+    integer :: info
+    integer(kind=8) :: tick,rate
+    info=cudaDeviceSynchronize()
+    if(info/=0) error stop 'implicit: CUDA execution failed at timing boundary'
+    call system_clock(tick,rate)
+    wall_time=real(tick,8)/real(rate,8)
+  end function wall_time
+
+  ! Direct module allocations are required by NVHPC device descriptors.
+  subroutine setup_workspace()
+    if(allocated(diag)) then
+       if(size(diag)==imp_nedge.and.size(y0)==imp_nface.and.size(de0)==imp_nleaf) return
+       deallocate(diag,cg_r,cg_z,cg_p,cg_ap,cg_true,eq,ej,ee,ek,diag_f,diag_g)
+       deallocate(y0,y,candidate,de0,de,detotal,base_b)
+    endif
+    allocate(diag(imp_nedge),cg_r(imp_nedge),cg_z(imp_nedge),cg_p(imp_nedge), &
+         & cg_ap(imp_nedge),cg_true(imp_nedge),eq(imp_nedge),ej(imp_nedge),ee(imp_nedge),ek(imp_nedge), &
+         & diag_f(imp_nface),diag_g(imp_nedge))
+    allocate(y0(imp_nface),y(imp_nface),candidate(imp_nface),de0(imp_nleaf),de(imp_nleaf), &
+         & detotal(imp_nleaf),base_b(3,imp_nleaf))
+  end subroutine setup_workspace
+
   logical function finite(x)
     real(kind=8), intent(in) :: x
     finite=(x==x.and.abs(x)<=huge(x))
@@ -127,8 +155,9 @@ contains
     real(kind=dp), device, intent(in) :: uold(twotondim,nvar,*)
     real(kind=8), intent(in) :: boxlen,gamma,smallr,etamag,eta_ad
     real(kind=8), device, allocatable :: bc(:,:)
-    real(kind=8) :: omin,omax,amin,amax
+    real(kind=8) :: omin,omax,amin,amax,t0
     integer :: i,bad
+    t0=wall_time()
     allocate(bc(3,imp_nleaf))
     call imp_leaf_bc(w,bc)
     call coefficient_kernel<<<(imp_nleaf+255)/256,256>>>(uold,bc,de,boxlen,gamma,smallr,etamag,eta_ad,imp_nleaf)
@@ -150,6 +179,7 @@ contains
     eta_uniform=omin
     call imp_set_w(w)
     deallocate(bc)
+    time_coeff=time_coeff+wall_time()-t0
   end subroutine coefficients
 
   ! Zero guess, Jacobi CG. Recompute residual at convergence and at exhaustion.
@@ -291,6 +321,7 @@ contains
     complex(kind=8) :: rho,rhonew,den,alpha,beta
     integer :: n,it,restarts
     logical :: action_ok
+    tol_in=max(1d-14,1d-3*rtol)
     n=imp_nface
     allocate(zr(n),zi(n),rr(n),ri(n),pr(n),pi(n),my(n),mrr(n),mri(n),mpr(n),mpi(n), &
          & qr(n),qi(n),mqr(n),mqi(n))
@@ -309,6 +340,7 @@ contains
        if(.not.finite(norm2).or.norm2<0d0) exit
        if(sqrt(norm2)<=rtol*ynorm) then
           ! Recompute M_F Z and the true residual; no recurrence is trusted here.
+          tol_in=max(1d-14,1d-3*rtol)
           call imp_mf(zr,mpr); call imp_mf(zi,mpi)
           call shifted(zr,zi,mpr,mpi,qr,qi,mqr,mqi,dt,action_ok)
           if(.not.action_ok) exit
@@ -326,6 +358,7 @@ contains
           rho=bilinear(rr,ri,mrr,mri)
        endif
        if(it==maxiter) exit
+       tol_in=max(1d-14,min(1d-4,0.1d0*rtol*ynorm/max(sqrt(norm2),tiny(1d0))))
        call shifted(pr,pi,mpr,mpi,qr,qi,mqr,mqi,dt,action_ok)
        if(.not.action_ok) exit
        den=bilinear(pr,pi,mqr,mqi)
@@ -342,12 +375,123 @@ contains
        call complex_direction(mpr,mpi,mrr,mri,beta)
        rho=rhonew
     enddo
-200 if(ok) then
+200 tol_in=max(1d-14,1d-3*rtol)
+    if(ok) then
        call combine(u,2d0,zr,0d0,zr); call combine(x,2d0,zi,0d0,zi)
        call combine(w,1d0,zr,1d0,zi)
     endif
     deallocate(zr,zi,rr,ri,pr,pi,my,mrr,mri,mpr,mpi,qr,qi,mqr,mqi)
   end subroutine cocg
+
+  ! Exact uniform-Ohmic edge action: (sigma M_E + dt*eta C^T M_F C) z.
+  subroutine edge_shifted(zr,zi,qr,qi,f,mf,dt)
+    real(kind=8), device, intent(in) :: zr(:),zi(:)
+    real(kind=8), device, intent(out) :: qr(:),qi(:),f(:),mf(:)
+    real(kind=8), intent(in) :: dt
+    call imp_me(zr,ee); call imp_me(zi,eq)
+    call imp_curl(zr,f); call imp_mf(f,mf); call imp_curlt(mf,ej)
+    call combine(qr,1d0,ee,1d0,eq); call axpy(qr,dt*eta_uniform,ej)
+    call imp_curl(zi,f); call imp_mf(f,mf); call imp_curlt(mf,ej)
+    call combine(qi,1d0,eq,-1d0,ee); call axpy(qi,dt*eta_uniform,ej)
+  end subroutine edge_shifted
+
+  subroutine edge_jacobi(rr,ri,tr,ti,dt)
+    real(kind=8), device, intent(in) :: rr(:),ri(:)
+    real(kind=8), device, intent(out) :: tr(:),ti(:)
+    real(kind=8), intent(in) :: dt
+    real(kind=8) :: a,b,den,deta
+    integer :: i
+    deta=dt*eta_uniform
+    !$cuf kernel do <<<*,*>>>
+    do i=1,imp_nedge
+       a=diag(i)+deta*diag_g(i); b=diag(i); den=a*a+b*b
+       tr(i)=(a*rr(i)-b*ri(i))/den
+       ti(i)=(a*ri(i)+b*rr(i))/den
+    enddo
+  end subroutine edge_jacobi
+
+  ! The edge tolerance is tightened until the magnetic residual
+  ! Y-sigma Z-dt H Z = -(dt*eta/sigma) C M_E^-1 r_e meets rtol in the M_F norm.
+  subroutine cocg_ohmic(y,dt,ynorm,u,x,w,ok)
+    real(kind=8), device, intent(in) :: y(:)
+    real(kind=8), device, intent(out) :: u(:),x(:),w(:)
+    real(kind=8), intent(in) :: dt,ynorm
+    logical, intent(out) :: ok
+    real(kind=8), device, allocatable :: zr(:),zi(:),rr(:),ri(:),pr(:),pi(:),rhs(:)
+    real(kind=8), device, allocatable :: tr(:),ti(:),qr(:),qi(:),f(:),mf(:)
+    real(kind=8) :: qnorm,norm2,target,mnorm
+    logical :: inner_ok
+    complex(kind=8) :: rho,rhonew,den,alpha,beta
+    integer :: n,it,restarts
+    tol_in=max(1d-14,1d-3*rtol)
+    n=imp_nedge
+    allocate(zr(n),zi(n),rr(n),ri(n),pr(n),pi(n),rhs(n),tr(n),ti(n),qr(n),qi(n), &
+         & f(imp_nface),mf(imp_nface))
+    call imp_mf(y,mf); call imp_curlt(mf,rhs)
+    qnorm=sqrt(dot(rhs,rhs)); ok=.false.; restarts=0
+    if(.not.finite(qnorm)) goto 250
+    zr=0d0; zi=0d0; rr=rhs; ri=0d0
+    if(qnorm==0d0) then
+       ok=.true.
+       goto 250
+    endif
+    call edge_jacobi(rr,ri,tr,ti,dt)
+    pr=tr; pi=ti; rho=bilinear(rr,ri,tr,ti)
+    target=rtol*qnorm
+    do it=0,maxiter
+       norm2=dot(rr,rr)+dot(ri,ri)
+       if(.not.finite(norm2).or.norm2<0d0) exit
+       if(sqrt(norm2)<=target) then
+          call edge_shifted(zr,zi,qr,qi,f,mf,dt)
+          call combine(rr,1d0,rhs,-1d0,qr); call combine(ri,-1d0,qi,0d0,qi)
+          norm2=dot(rr,rr)+dot(ri,ri)
+          if(.not.finite(norm2).or.norm2<0d0) exit
+          if(sqrt(norm2)<=target) then
+             ! Magnetic residual, with s = M_E^-1 r_e and s/sigma = ((sr-si)+i(sr+si))/2
+             call inner_cg(rr,tr,inner_ok)
+             if(inner_ok) call inner_cg(ri,ti,inner_ok)
+             if(.not.inner_ok) exit
+             call combine(qr,0.5d0*dt*eta_uniform,tr,-0.5d0*dt*eta_uniform,ti)
+             call imp_curl(qr,f); call imp_mf(f,mf); mnorm=dot(f,mf)
+             call combine(qr,0.5d0*dt*eta_uniform,tr,0.5d0*dt*eta_uniform,ti)
+             call imp_curl(qr,f); call imp_mf(f,mf); mnorm=sqrt(max(0d0,mnorm+dot(f,mf)))
+             if(.not.finite(mnorm)) exit
+             if(mnorm<=rtol*ynorm) then
+                ok=.true.
+                exit
+             endif
+             target=target*max(1d-3,0.5d0*rtol*ynorm/mnorm)
+             if(target<1d-15*qnorm) exit
+          else
+             if(restarts==3) exit
+             restarts=restarts+1
+          endif
+          call edge_jacobi(rr,ri,tr,ti,dt)
+          pr=tr; pi=ti; rho=bilinear(rr,ri,tr,ti)
+       endif
+       if(it==maxiter) exit
+       call edge_shifted(pr,pi,qr,qi,f,mf,dt)
+       den=bilinear(pr,pi,qr,qi)
+       if(.not.finite(real(den,8)).or..not.finite(aimag(den)).or.abs(den)==0d0.or. &
+            & .not.finite(real(rho,8)).or..not.finite(aimag(rho)).or.abs(rho)==0d0) exit
+       alpha=rho/den
+       call complex_axpy(zr,zi,real(alpha,8),aimag(alpha),pr,pi)
+       call complex_axpy(rr,ri,-real(alpha,8),-aimag(alpha),qr,qi)
+       cocg_iters=cocg_iters+1
+       call edge_jacobi(rr,ri,tr,ti,dt)
+       rhonew=bilinear(rr,ri,tr,ti); beta=rhonew/rho
+       call complex_direction(pr,pi,tr,ti,beta)
+       rho=rhonew
+    enddo
+250 if(ok) then
+       ! Numerator A+iB = Y-dt*eta*C J; division by 1-i gives
+       ! U=A-B, X=A+B, W=A.
+       call imp_curl(zr,f); call combine(u,1d0,y,-dt*eta_uniform,f)
+       call imp_curl(zi,f); call combine(x,-dt*eta_uniform,f,0d0,f)
+       w=u; call combine(u,1d0,w,-1d0,x); call axpy(x,1d0,w)
+    endif
+    deallocate(zr,zi,rr,ri,pr,pi,rhs,tr,ti,qr,qi,f,mf)
+  end subroutine cocg_ohmic
 
   subroutine picard(y,dt,uold,de,boxlen,gamma,smallr,etamag,eta_ad,u,x,ynorm,ok)
     real(kind=8), device, intent(in) :: y(:),de(:)
@@ -357,7 +501,7 @@ contains
     real(kind=8), intent(out) :: ynorm
     logical, intent(out) :: ok
     real(kind=8), device, allocatable :: w(:),wn(:),delta(:),saved_eta(:,:)
-    real(kind=8) :: change,scale,saved_uniform_eta
+    real(kind=8) :: change,scale,saved_uniform_eta,t0
     integer :: it,i,j,bad
     logical :: was_quad,was_uniform
     allocate(w(imp_nface),wn(imp_nface),delta(imp_nface),saved_eta(2,imp_nleaf))
@@ -368,7 +512,13 @@ contains
        saved_eta=imp_eta(:,1:imp_nleaf); was_quad=imp_quad
        was_uniform=uniform_ohmic; saved_uniform_eta=eta_uniform
        picard_iters=picard_iters+1
-       call cocg(y,dt,ynorm,u,x,wn,ok)
+       t0=wall_time()
+       if(uniform_ohmic) then
+          call cocg_ohmic(y,dt,ynorm,u,x,wn,ok)
+       else
+          call cocg(y,dt,ynorm,u,x,wn,ok)
+       endif
+       time_solve=time_solve+wall_time()-t0
        if(.not.ok) exit
        ok=.false.
        call combine(delta,1d0,wn,-1d0,w)
@@ -391,7 +541,9 @@ contains
              ! Keep the exact coefficients and W used by this solve.
              imp_eta(:,1:imp_nleaf)=saved_eta; imp_quad=was_quad
              uniform_ohmic=was_uniform; eta_uniform=saved_uniform_eta
+             t0=wall_time()
              call imp_set_w(w)
+             time_coeff=time_coeff+wall_time()-t0
              ok=.true.
              exit
           endif
@@ -477,13 +629,15 @@ contains
     logical, intent(out) :: ok
     real(kind=8), device, allocatable :: u(:),x(:),bu(:),cu(:),cx(:),ju(:),jx(:),eu(:),ex(:)
     real(kind=8), device, allocatable :: du(:),dx(:),delta(:),bs(:,:),p(:),ratio(:),detotal(:)
-    real(kind=8) :: ynorm
+    real(kind=8) :: ynorm,t0
     integer :: i,bad
     allocate(u(imp_nface),x(imp_nface),bu(imp_nface),cu(imp_nface),cx(imp_nface), &
          & ju(imp_nedge),jx(imp_nedge),eu(imp_nedge),ex(imp_nedge),du(imp_nleaf),dx(imp_nleaf), &
          & delta(imp_nface),bs(6,imp_nleaf),p(imp_nleaf),ratio(imp_nleaf),detotal(imp_nleaf))
     endpoint=huge(1d0); esum=0d0; minratio=huge(1d0); de=0d0
     call picard(y,dt,uold,de0,boxlen,gamma,smallr,etamag,eta_ad,u,x,ynorm,ok)
+    t0=wall_time()
+    tol_in=max(1d-14,1d-3*rtol)
     if(.not.ok) goto 400
     call stage_fields(u,ju,eu,cu,ok)
     if(.not.ok) goto 400
@@ -524,7 +678,8 @@ contains
        minratio=min(minratio,ratio(i))
     enddo
     ok=(bad==0)
-400 deallocate(u,x,bu,cu,cx,ju,jx,eu,ex,du,dx,delta,bs,p,ratio,detotal)
+400 time_commit=time_commit+wall_time()-t0
+    deallocate(u,x,bu,cu,cx,ju,jx,eu,ex,du,dx,delta,bs,p,ratio,detotal)
   end subroutine attempt
 
   attributes(global) subroutine commit_energy(uold,de,boxlen,n)
@@ -551,36 +706,41 @@ contains
     integer, intent(in) :: hash_size,head(:),noct(:),ngridmax,lmin,lf,nimhd_maxiter,myid
     real(kind=8), intent(in) :: boxlen,dt,gamma,smallr,etamag,eta_ad,nimhd_rtol
     logical, intent(in) :: heat,nimhd_check,verbose
-    real(kind=8), device, allocatable :: y0(:),y(:),candidate(:),de0(:),de(:),detotal(:),base_b(:,:)
     real(kind=8) :: endpoint,esum,minratio,maxendpoint,total_esum,minpressure,elapsed,avg_inner
+    real(kind=8) :: tstart,t0,time_build,time_check
     integer :: info,split,sub,nsub,bad,i
-    integer(kind=8) :: tick0,tick1,rate
     logical :: ok,rejected
-    call system_clock(tick0,rate)
-    call imp_build(grid,hash_key,hash_val,hash_size,ckey_max,key_off,box_ckey_min,box_ckey_max, &
-         & head,noct,ngridmax,lmin,lf,boxlen,info)
-    if(info/=0) error stop 'implicit: topology build failed (condition P)'
-    if(nimhd_check) then
-       call imp_check(bold,info)
-       if(info/=0) error stop 'implicit: operator/native-copy checks failed'
-    endif
-    if(imp_nleaf==0) then
-       call imp_free()
-       return
-    endif
+    tstart=wall_time()
+    time_build=0d0; time_check=0d0; time_coeff=0d0; time_solve=0d0; time_commit=0d0
+    imp_me_calls=0; imp_k_calls=0
     rtol=nimhd_rtol; maxiter=nimhd_maxiter; tol_in=max(1d-14,1d-3*rtol)
     inner_max=0; inner_calls=0; inner_total=0; cocg_iters=0; picard_iters=0
-    allocate(diag(imp_nedge),cg_r(imp_nedge),cg_z(imp_nedge),cg_p(imp_nedge), &
-         & cg_ap(imp_nedge),cg_true(imp_nedge),eq(imp_nedge),ej(imp_nedge),ee(imp_nedge),ek(imp_nedge))
-    call imp_me_diag(diag)
-    bad=0
-    !$cuf kernel do <<<*,*>>> reduce(+:bad)
-    do i=1,imp_nedge
-       if(diag(i)<=0d0.or.diag(i)/=diag(i).or.abs(diag(i))>huge(1d0)) bad=bad+1
-    enddo
-    if(bad/=0) error stop 'implicit: non-positive or non-finite M_E diagonal'
-    allocate(y0(imp_nface),y(imp_nface),candidate(imp_nface),de0(imp_nleaf),de(imp_nleaf), &
-         & detotal(imp_nleaf),base_b(3,imp_nleaf))
+    if(.not.imp_valid.or.lmin/=cached_lmin.or.lf/=cached_lf.or.ngridmax/=cached_ngridmax) then
+       t0=wall_time()
+       call imp_build(grid,hash_key,hash_val,hash_size,ckey_max,key_off,box_ckey_min,box_ckey_max, &
+            & head,noct,ngridmax,lmin,lf,boxlen,info)
+       if(info/=0) error stop 'implicit: topology build failed (condition P)'
+       if(imp_nleaf>0) then
+          call setup_workspace()
+          call imp_me_diag(diag); call imp_mf_diag(diag_f); call imp_g_diag(diag_f,diag_g)
+          bad=0
+          !$cuf kernel do <<<*,*>>> reduce(+:bad)
+          do i=1,imp_nedge
+             if(diag(i)<=0d0.or.diag(i)/=diag(i).or.abs(diag(i))>huge(1d0).or. &
+                  & diag_g(i)<0d0.or.diag_g(i)/=diag_g(i).or.abs(diag_g(i))>huge(1d0)) bad=bad+1
+          enddo
+          if(bad/=0) error stop 'implicit: invalid M_E/G diagonal'
+       endif
+       time_build=wall_time()-t0
+       cached_lmin=lmin; cached_lf=lf; cached_ngridmax=ngridmax; imp_valid=.true.
+       if(nimhd_check) then
+          t0=wall_time()
+          call imp_check(bold,info)
+          if(info/=0) error stop 'implicit: operator/native-copy checks failed'
+          time_check=wall_time()-t0
+       endif
+    endif
+    if(imp_nleaf==0) return
     call imp_gather(bold,y0); call imp_leaf_bc(y0,base_b)
     rejected=.false.; ok=.false.
     ! Retry the whole interval at each depth. Neither native array is changed.
@@ -606,23 +766,24 @@ contains
     enddo
     info=cudaDeviceSynchronize()
     if(info/=0) error stop 'implicit: CUDA execution failed before commit'
+    t0=wall_time()
     if(ok) then
        call imp_scatter(y,bold)
        if(heat) call commit_energy<<<(imp_nleaf+255)/256,256>>>(uold,detotal,boxlen,imp_nleaf)
        info=cudaDeviceSynchronize()
        if(info/=0) error stop 'implicit: CUDA execution failed during commit'
     endif
-    call system_clock(tick1)
-    elapsed=real(tick1-tick0,8)/real(rate,8)
+    time_commit=time_commit+wall_time()-t0
+    elapsed=wall_time()-tstart
     avg_inner=real(inner_total,8)/real(max(1,inner_calls),8)
     if((verbose.or.first_call.or.rejected).and.myid==1) then
        write(*,*)'implicit: leaves/faces/edges/transition=',imp_nleaf,imp_nface,imp_nedge,imp_ntr, &
             & ' substeps=',nsub,' Picard/COCG=',picard_iters,cocg_iters,' CG max/avg=',inner_max,avg_inner, &
-            & ' endpoint=',maxendpoint,' energy sum=',total_esum,' min pressure ratio=',minpressure,' wall=',elapsed
+            & ' endpoint=',maxendpoint,' energy sum=',total_esum,' min pressure ratio=',minpressure,' wall=',elapsed, &
+            & ' build/check/coeff/solve/commit=',time_build,time_check,time_coeff,time_solve,time_commit, &
+            & ' ME/K applications=',imp_me_calls,imp_k_calls
     endif
     if(.not.ok) error stop 'implicit: exhausted nimhd_maxsplit=2; native state untouched'
     first_call=.false.
-    deallocate(y0,y,candidate,de0,de,detotal,base_b,diag,cg_r,cg_z,cg_p,cg_ap,cg_true,eq,ej,ee,ek)
-    call imp_free()
   end subroutine gpu_implicit_step
 end module implicit_solver

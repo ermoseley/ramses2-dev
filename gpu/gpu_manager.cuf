@@ -14,6 +14,7 @@ recursive subroutine r_set_grid_device(pst)
   use ramses_commons, only: pst_t
   use refine_device, only: insert_hash_kernel, update_nbor_array
   use mdl_parameters
+  use implicit_ops, only: imp_valid
   implicit none
   type(pst_t)::pst
 
@@ -27,6 +28,7 @@ recursive subroutine r_set_grid_device(pst)
   else
 
      ! Copy grid from host to device
+     imp_valid=.false.
      call nvtxStartRange("Copy entire mesh from host to device", color=5)!red
      grid = pst%s%m%grid
      ! flag1 is only allocated/used for adaptive mesh refinement
@@ -279,6 +281,7 @@ end subroutine gpu_update_turb
 !###########################################################
 subroutine gpu_allocate_amr(sim)
   use amr_parameters, ONLY: ndim, twotondim
+  use implicit_ops, only: imp_valid
 #ifdef HYDRO
   use hydro_parameters, ONLY: nvar
 #endif
@@ -292,6 +295,7 @@ subroutine gpu_allocate_amr(sim)
   integer :: ng, nh, istat
 #endif
 
+  imp_valid=.false.
   allocate(grid(1:sim%m%ngridmax+sim%m%ncachemax))
   if(sim%r%nlevelmax > sim%r%levelmin)then
      allocate(flag1(1:twotondim,1:sim%m%ngridmax+sim%m%ncachemax))
