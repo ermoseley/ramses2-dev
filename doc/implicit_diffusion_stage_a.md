@@ -1,10 +1,15 @@
 # Implicit non-ideal MHD: spatial prerequisite checkpoint
 
-Status on 2026-10-04: **no implicit solver is implemented or qualified**.
+Status on 2026-10-05: **no implicit solver is implemented or qualified**.
 This branch starts from the split non-ideal MHD framework at
 `6e6fc3ec0dab40628ecdc3e2ff43411def042b4d` (`gpu-non-ideal-sts`),
 the branch associated with the Claude conversation “RAMSES2 diffusion
 framework port.” Existing solver modes and their defaults are unchanged.
+
+That reference branch has since advanced to `8cb067f6`, adding synchronized
+all-level explicit/STS stages. This checkpoint has not incorporated that
+commit. Its scheduling is useful future infrastructure; limited coarse
+ghost interpolation does not establish the implicit operator's energy form.
 
 The reviewed October 4 implicit-diffusion plan requires a consistent,
 accretive composite spatial operator and a local energy partition before
@@ -90,11 +95,62 @@ face metric. This explains the zero magnetic polynomial-energy eigenvalue
 in the joint fit; it is not a least-squares convergence failure.
 
 This certificate assumes the 66-face block and unchanged native metric
-outside it. It does not rule out a larger reconstruction patch or another
-compatible discretization. Such a construction, its assembly for adjacent
-refined parents, and its energy partition remain unresolved. Stage A has
-not passed, so solver integration stops at the boundary specified by the
-plan.
+outside it. A wider construction resolves this particular obstruction.
+A 3-by-3-by-3 parent neighborhood contains 34 leaf cells, 138 faces and
+186 edges. Joint face/edge action moments admit positive patch shares
+after subtracting the unchanged native exterior contributions. Their
+minimum eigenvalues are 0.22153 and 0.56975. Constant-vector energy and
+heat normalize to the patch volume, 216. The completed operator reproduces
+quadratic magnetic-field currents and the full Ohmic diffusion action to
+about 1.7e-13. Its positive face and edge metrics retain the physical
+Ohmic nullspace. The earlier compact harmonic alias is absent on this
+wider support.
+
+Two adjacent refined parents also admit positive overlapping patch
+shares, with each native cell contribution split by its patch coverage.
+The two 41-cell patches have 165 faces and 220 edges each; their assembled
+operator moment error is 1.2e-12. This finite joint fit establishes
+feasibility for that geometry. It does not supply a bounded independent
+assembly rule for arbitrary refinement patterns, nor a local inverse of
+the assembled sparse edge metric. A production implementation cannot
+substitute the isolated dense inverse for that missing construction.
+
+Two independent patch-load assembly rules fail the adjacent-parent test
+before positivity: their harmonic bilinear loads are not symmetric. The
+joint fit's existence therefore does not justify either local rule.
+A subsequent Opus proposal uses shared commuting maps to virtual fine
+cells. However, an independent exact audit rejects its uncorrected splice
+to native exterior metrics. Replacing one width-H native cube by eight
+native half-cubes changes the magnetic energy of the curl-free affine
+fields `(x,-y,0)` and `(y,x,0)` by `-H^5/4` and `H^5/8`, respectively
+(before the physical factor 1/2). With unchanged exterior loads, exact
+zero current would require both changes to vanish. A commuting, SPD host
+example also has a constant-current error proportional to `1/H` and
+nonconvergent affine-current errors. Higher interpolation order does not
+repair that energy mismatch. A signed symmetric correction can cancel
+the energy defects while retaining SPD in that example, but the tested
+correction still fails full current consistency. This rejects that
+particular splice, not all bounded local interface metrics.
+
+Testing the actual six-face boundary correction with fixed affine-exact
+traces also cancels the complete affine energy Gram and retains SPD
+(minimum eigenvalue 0.80743). It nevertheless gives a constant-field
+adjoint-current residual of exactly `5/64` on a seam edge. This simple
+boundary form therefore does not supply the missing complete operator.
+
+A finite positive AD reconstruction has also been tested on the wider
+isolated patch. Its gather and full weighted transpose reproduce the
+tested axis and oblique quadratic-field actions to about 7.4e-14 and
+retain the resolved constant/affine parallel-current nulls. A smooth
+extended stationary field has second-order current and first-order
+interface-operator errors under homothetic refinement. This is local
+consistency evidence, not general AMR assembly, variable nonlinear
+coefficient qualification or fixed-domain PDE convergence.
+
+Stage A remains incomplete: general patch assembly, extended AD
+nullspace/variable-coefficient qualification, thermal admissibility, and
+fixed-domain spatial convergence still require qualification before
+solver integration.
 
 ## Thermal accounting
 
@@ -108,7 +164,49 @@ The compatible face energy differs from the magnetic energy subtracted by
 RAMSES when recovering primitive pressure. The change in that staggering
 difference can exceed positive Joule heat. Acceptance therefore still
 requires raw internal-energy checks and atomic bounded retries, as the
-plan specifies. An interface heat partition remains unqualified.
+plan specifies.
+
+The wider isolated patch admits a positive volume-weighted cell partition
+of its face and edge metric shares. Smooth harmonic and nonharmonic
+quadratic tests give at least first-order interface heat consistency and
+second-order Poynting-flux corrections under local homothetic refinement.
+Native exterior Yee flux loads are essential to the exact cell balance.
+An arbitrary divergence-free field, with a deliberately perturbed current,
+closes the ledger including signed constitutive residual work to 2.5e-14.
+That routing uses a fixed 124-cell patch-plus-native-halo support. These
+are local truncation and algebraic tests, not fixed-domain PDE convergence
+or pressure/recovery qualification.
+
+The two adjacent patches also pass a finite heat/flux test using separate
+bounded trees and a shared overlap anchor. Nonzero individual patch loads
+cancel at that anchor. A changing quadratic field gives first-order heat
+and second-order flux errors, while native exterior fluxes are unchanged.
+The random-field residual ledger closes to 2.31e-14. The measured flux
+error coefficient is large (39.23 at unit scale), so order alone does not
+establish a useful production accuracy envelope. General edge-local
+physical-reference/cycle consistency remains a separate gate; a growing
+patch-component tree is neither implemented nor required for conservation.
+
+The isolated volume-weighted partition fails a smooth low-beta raw-pressure
+test. With background Bz=1, a compact smooth CT perturbation of amplitude
+1e-3, pure Ohmic mobility and initial internal-energy density 1e-10,
+exact Padé endpoints at steps .01, .005 and .0025 have minima
+`-1.19277e-5`, `-5.99405e-6` and `-3.00455e-6`. The signed staggering
+change is linear in perturbation amplitude, while Joule heat is quadratic;
+stage and energy-ledger errors are around 1e-14. These are three advances
+from the same state, not a successful retry sequence. Repartitioning this
+same compatible metric cannot universally remove the leading defect
+under the unchanged primitive-energy convention, although finite-pressure
+acceptance envelopes remain possible.
+
+A separate signed conservative redistribution through a fixed 34-cell
+tree repairs this case's patch cells without changing CT, exterior fluxes
+or incoming internal-energy reservoirs. It is not accepted as a production
+change. Consecutive .0025 substeps reject the second substep because eight
+unchanged exterior cells become negative. Thus it does not complete the
+four-substep recovery of a .01 interval. Always applying that correction
+also changes the energy generator at first order in time. Positive metric
+heat and conservation alone do not qualify pressure recovery.
 
 ## Hardware evidence and remaining work
 
@@ -125,6 +223,26 @@ Remote evidence is under
 `/sdf/scratch/users/e/emoseley/ramses2-implicit-20261004`.
 The local scripts, logs and manifests are preserved outside the repository
 in `/Users/moseley/ramses-development/artifacts/2026-10-04-implicit-stage-a`.
+
+The wider positive Ohmic candidate subsequently passed a separate CUDA
+audit: CPU build `39870588` and one-H200 runtime `39870589`, with every
+step completing at exit zero. The GPU was an H200 NVL on `sdfhopper003`,
+UUID `GPU-6c476df3-8287-b58d-4d1e-c5a0fefae691`; the compiler and flags
+were again NVHPC 25.5, FP64, `-cuda -gpu=cc90,nofma -O0`.
+Across 33 cases, relative GPU/host current and operator errors were
+8.33e-17 and 9.71e-17; quadratic operator error was 1.62e-13,
+weighted energy/symmetry defects were 2.27e-13/1.14e-13, and divergence
+and weighted-gradient null errors were 3.68e-15/1.21e-14.
+This executes the actual face metric, transpose curl, fixed edge-block
+inverse and curl on device, with native diagonal exterior actions.
+It is an isolated operator audit, not an implicit solve or a performance
+measurement. Its source SHA256 is
+`720024c932dabbc1ed91d7094f3969d06fe8b628829109a0e779f128cce7c2a9`;
+binary SHA256 is
+`089d9a4767c8fbe198249872ed7ca57f46fad162d2c60b9b200d4bc7f49c3f28`.
+Remote evidence is in
+`/sdf/scratch/users/e/emoseley/ramses2-implicit-wide-20261004`,
+with local copies in the artifact directory's `wide-cuda` subdirectory.
 
 The next required result is a compact, geometry-local 3D interface
 construction that passes complete-operator consistency, positive energy,
