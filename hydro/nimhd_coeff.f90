@@ -7,8 +7,10 @@ contains
   ! Local resistivities of the split non-ideal MHD solver, given the
   ! conservative cell state uu and the cell-centred magnetic field bb.
   ! The Ohmic EMF is -eta_o*J and the ambipolar EMF is
-  ! eta_a*[(J.B)B-B^2*J]. Edit this routine to make the coefficients
-  ! depend on density, temperature, ionization or field strength.
+  ! eta_a*[(J.B)B-B^2*J]. By default they are the namelist values
+  ! etamag (or eta_ohm) and eta_ad. Edit this routine to make the
+  ! coefficients depend on density, temperature, ionization or field
+  ! strength.
   !-----------------------------------------------------------------
 #ifdef _CUDA
   attributes(host,device) &

@@ -335,7 +335,8 @@ subroutine gpu_allocate_amr(sim)
   if(sim%r%nimhd_solver/='unsplit')then
      ng=sim%m%ngridmax+sim%m%ncachemax
      allocate(b_roll2(1:twotondim,1:6,1:ng),b_my0(1:twotondim,1:6,1:ng),eta_nimhd(1:twotondim,1:2,1:ng),stat=istat)
-     if(istat==0.and.sim%r%nimhd_split=='strang')allocate(b_y0(1:twotondim,1:6,1:ng),stat=istat)
+     if(istat==0.and.sim%r%nimhd_split=='strang'.and..not.sim%r%nimhd_composite)allocate(b_y0(1:twotondim,1:6,1:ng),stat=istat)
+     if(istat==0.and.sim%r%nimhd_composite)allocate(b_cf(1:twotondim,1:6,1:ng),stat=istat)
      nh=1
      if(.not.(sim%r%isothermal.or.sim%r%induction))nh=ng
      if(istat==0)allocate(e_acc(1:twotondim,1:nh),stat=istat)
