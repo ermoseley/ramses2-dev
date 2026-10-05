@@ -1508,6 +1508,7 @@ subroutine m_read_params(pst)
   s%r%nimhd_alpha=nimhd_alpha
   s%r%nimhd_solver=nimhd_solver
   s%r%nimhd_split=nimhd_split
+  s%r%nimhd_composite=nimhd_solver/='unsplit'.and.nlevelmax>levelmin.and.all(nsubcycle(levelmin:nlevelmax-1)==1)
   s%r%gamma_rad=gamma_rad(1:nener+1)
   s%r%dual_energy=dual_energy
   s%r%T2_fix=T2_fix

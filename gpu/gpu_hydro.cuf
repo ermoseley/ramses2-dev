@@ -3922,9 +3922,10 @@ contains
   ! Stage update of face B: Y_j = mu*Y_{j-1} + nu*Y_{j-2} + (1-mu-nu)*Y_0 + mut*M(Y_{j-1}) + gt*M(Y_0),
   ! written relative to Y_0 so that a uniform field stays exact in single precision,
   ! and Y_1 = Y_0 + mut1*M(Y_0) on the first stage, which also stores M(Y_0) in bmy0.
-  ! With accumulate, the last stage also adds Y_s - Y_0 to bacc.
+  ! With accumulate, the last stage also adds Y_s - Y_0 to bacc. With cf, bacc holds the finer-level
+  ! EMF of this stage on the zeroed edges, which is added to M(Y_{j-1}).
   attributes(device) subroutine nimhd_update_b(yj, yjm1, yjm2, y0, bmy0, bacc, nbor, emfx, emfy, emfz, &
-       & head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, mu, nu, mut, gt, mut1)
+       & head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, cf, mu, nu, mut, gt, mut1)
     real(kind=dp), device :: yj(1:twotondim,1:6,*), yjm1(1:twotondim,1:6,*), yjm2(1:twotondim,1:6,*)
     real(kind=dp), device :: y0(1:twotondim,1:6,*), bmy0(1:twotondim,1:6,*), bacc(1:twotondim,1:6,*)
     integer(kind=4), device :: nbor(1:subgridsize,*)
@@ -3933,7 +3934,7 @@ contains
     type(subgrid_3x3x2edge_primitive), intent(in) :: emfz
     integer(kind=4), value :: head_idx
     integer, value :: block_idx, thread_idx
-    logical, value :: first, last, accumulate
+    logical, value :: first, last, accumulate, cf
     real(kind=dp), value :: dtdx, mu, nu, mut, gt, mut1
     integer :: work_size, i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
     integer :: work_idx, subgrid_idx, oct_idx, cell_idx, ind_nbor, n
@@ -3961,6 +3962,7 @@ contains
        dflux(3) = ( (emfx%edge_e(i,j,k)-emfx%edge_e(i,j+1,k)) - (emfy%edge_e(i,j,k)-emfy%edge_e(i+1,j,k)) ) * dtdx
        dflux(6) = ( (emfx%edge_e(i,j,k+1)-emfx%edge_e(i,j+1,k+1)) - (emfy%edge_e(i,j,k+1)-emfy%edge_e(i+1,j,k+1)) ) * dtdx
        do n = 1, 6
+          if (cf) dflux(n) = dflux(n) + bacc(cell_idx,n,oct_idx)
           if (first) then
              bmy0(cell_idx,n,oct_idx) = dflux(n)
              yj(cell_idx,n,oct_idx) = y0(cell_idx,n,oct_idx) + mut1*dflux(n)
@@ -4126,10 +4128,12 @@ contains
   ! and coarse_b are the full unew and bnew arrays; with accumulate, the last stage also adds
   ! the change of the level octs to them. As for the Godunov fluxes, the energy fluxes are
   ! built from the EMF before the edges of refined cells are zeroed, and only the fluxes
-  ! through faces of refined cells are then zeroed.
+  ! through faces of refined cells are then zeroed. With cf (all levels advanced together),
+  ! coarse_b receives the EMF of this stage for the coarser level with weight bweight=1,
+  ! and provides the one of the finer level, while the energy keeps the stage weight.
   attributes(global) subroutine nimhd_stage_kernel(grid, eta, yjm1, yjm2, y0, bmy0, yj, energy, eacc, eacc0, &
-       & coarse_u, coarse_b, heat, first, last, accumulate, father, nbor, head_idx, num_subgrids, ngridmax, &
-       & ilevel, levelmin, levelmax, dt, dx, mu, nu, mut, gt, mut1, weight)
+       & coarse_u, coarse_b, heat, first, last, accumulate, cf, father, nbor, head_idx, num_subgrids, ngridmax, &
+       & ilevel, levelmin, levelmax, dt, dx, mu, nu, mut, gt, mut1, weight, bweight)
     type(oct), device :: grid(*)
     integer, device :: father(*), nbor(1:subgridsize,*)
     real(kind=dp), device :: eta(1:twotondim,1:2,*)
@@ -4137,10 +4141,10 @@ contains
     real(kind=dp), device :: y0(1:twotondim,1:6,*), bmy0(1:twotondim,1:6,*), yj(1:twotondim,1:6,*)
     real(kind=dp), device :: energy(1:twotondim,1:nvar,*), eacc(1:twotondim,*), eacc0(1:twotondim,*)
     real(kind=dp), device :: coarse_u(1:twotondim,1:nvar,*), coarse_b(1:twotondim,1:6,*)
-    logical, intent(in), value :: heat, first, last, accumulate
+    logical, intent(in), value :: heat, first, last, accumulate, cf
     integer(kind=4), intent(in), value :: head_idx, num_subgrids
     integer, intent(in), value :: ngridmax, ilevel, levelmin, levelmax
-    real(kind=dp), intent(in), value :: dt, dx, mu, nu, mut, gt, mut1, weight
+    real(kind=dp), intent(in), value :: dt, dx, mu, nu, mut, gt, mut1, weight, bweight
 
     real(kind=dp), shared :: eta_o(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
     real(kind=dp), shared :: eta_a(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
@@ -4177,16 +4181,44 @@ contains
     endif
 
     call nimhd_update_b(yj, yjm1, yjm2, y0, bmy0, coarse_b, nbor, emfx, emfy, emfz, &
-         & head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, mu, nu, mut, gt, mut1)
+         & head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, cf, mu, nu, mut, gt, mut1)
 
     if (heat) call nimhd_update_e(energy, eacc, eacc0, coarse_u, nbor, fluxes_x, fluxes_y, fluxes_z, &
          & emfx, emfy, emfz, bf, head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, weight)
 
     if (ilevel > levelmin) then
+       if (heat .and. bweight /= weight) then
+          call syncthreads()
+          call nimhd_scale_fluxes(fluxes_x, fluxes_y, fluxes_z, weight/bweight, thread_idx)
+       endif
        call coarse_cell_update(grid, coarse_u, coarse_b, father, nbor, fluxes_x, fluxes_y, fluxes_z, &
-            & emfx, emfy, emfz, head_idx, block_idx, thread_idx, ngridmax, dtdx*weight)
+            & emfx, emfy, emfz, head_idx, block_idx, thread_idx, ngridmax, dtdx*bweight)
     endif
   end subroutine nimhd_stage_kernel
+
+  attributes(device) subroutine nimhd_scale_fluxes(fluxes_x, fluxes_y, fluxes_z, factor, thread_idx)
+    type(subgrid_3x2x2cell_primitive), intent(inout) :: fluxes_x
+    type(subgrid_2x3x2cell_primitive), intent(inout) :: fluxes_y
+    type(subgrid_2x2x3cell_primitive), intent(inout) :: fluxes_z
+    real(kind=dp), value :: factor
+    integer, value :: thread_idx
+    integer :: work_idx, interface_array_size, i, j, k
+
+    interface_array_size = (2*nsubgrid+1) * (2*nsubgrid)**2
+    do work_idx = thread_idx, interface_array_size*3 - 1, blockDim%x
+       if (work_idx < interface_array_size) then
+          call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid, i, j, k)
+          fluxes_x%pressure(i,j,k) = factor*fluxes_x%pressure(i,j,k)
+       else if (work_idx < 2*interface_array_size) then
+          call index_1Dto3D(work_idx - interface_array_size, 2*nsubgrid, 2*nsubgrid+1, i, j, k)
+          fluxes_y%pressure(i,j,k) = factor*fluxes_y%pressure(i,j,k)
+       else
+          call index_1Dto3D(work_idx - 2*interface_array_size, 2*nsubgrid, 2*nsubgrid, i, j, k)
+          fluxes_z%pressure(i,j,k) = factor*fluxes_z%pressure(i,j,k)
+       endif
+    end do
+    call syncthreads()
+  end subroutine nimhd_scale_fluxes
 
   ! Cell coefficients from nimhd_coeff, frozen over the step.
   attributes(global) subroutine nimhd_coeff_kernel(uold, bold, eta, head_idx, num_octs, &
@@ -4551,6 +4583,81 @@ contains
   ! =========================================================================~
 
   ! =========================================================================
+#ifdef MHD
+  ! Restrict face-B of fine oct oct_idx into its parent cell by averaging the child faces on
+  ! each parent face.
+  attributes(device) subroutine restrict_face_b(b, oct_idx, cell_idx, father_idx)
+    real(kind=dp), device :: b(1:twotondim,1:6,*)
+    integer, value :: oct_idx, cell_idx, father_idx
+    integer, dimension(1:6,1:4) :: hh
+    integer :: ind, idim
+
+    ! Child cells whose low/high face on each axis lies on the corresponding parent face
+    hh(1,1:4) = (/1,3,5,7/) ! low-x face children
+    hh(2,1:4) = (/2,4,6,8/) ! high-x face children
+    hh(3,1:4) = (/1,2,5,6/) ! low-y face children
+    hh(4,1:4) = (/3,4,7,8/) ! high-y face children
+    hh(5,1:4) = (/1,2,3,4/) ! low-z face children
+    hh(6,1:4) = (/5,6,7,8/) ! high-z face children
+
+    ! Reset parent face-B (this refined parent cell)
+    do idim = 1, 6
+       b(cell_idx, idim, father_idx) = 0_dp
+    end do
+
+    ! Area-average each parent face from the 4 child faces lying on it
+    do idim = 1, ndim
+       ! Low-side face (component idim)
+       do ind = 1, twotondim/2
+          b(cell_idx, idim, father_idx) = b(cell_idx, idim, father_idx) &
+               & + b(hh(2*idim-1,ind), idim, oct_idx) / dble(twotondim/2)
+       end do
+       ! High-side face (component idim+3)
+       do ind = 1, twotondim/2
+          b(cell_idx, idim+3, father_idx) = b(cell_idx, idim+3, father_idx) &
+               & + b(hh(2*idim,ind), idim+3, oct_idx) / dble(twotondim/2)
+       end do
+    end do
+  end subroutine restrict_face_b
+
+  ! Scratch arrays of the split non-ideal MHD solver when all levels are advanced together:
+  ! mode 1 resets the energy accumulator unew(:,5), mode 2 resets bcf, mode 3 adds unew(:,5)
+  ! to the total energy.
+  attributes(global) subroutine nimhd_scratch_kernel(uold, unew, bcf, head_idx, num_octs, mode)
+    real(kind=dp), device :: uold(1:twotondim,1:nvar,*), unew(1:twotondim,1:nvar,*)
+    real(kind=dp), device :: bcf(1:twotondim,1:6,*)
+    integer(kind=4), intent(in), value :: head_idx, num_octs, mode
+    integer :: tid, oct_idx, cell_idx
+
+    tid = threadIdx%x - 1 + (blockIdx%x - 1) * blockDim%x
+    oct_idx = tid / twotondim
+    if (oct_idx >= num_octs) return
+    oct_idx = head_idx + oct_idx
+    cell_idx = mod(tid, twotondim) + 1
+    if (mode == 1) unew(cell_idx,5,oct_idx) = 0.0_dp
+    if (mode == 2) bcf(cell_idx,1:6,oct_idx) = 0.0_dp
+    if (mode == 3) uold(cell_idx,5,oct_idx) = uold(cell_idx,5,oct_idx) + unew(cell_idx,5,oct_idx)
+  end subroutine nimhd_scratch_kernel
+
+  ! Restriction of face-B only, used between the stages of the split non-ideal MHD solver.
+  attributes(global) subroutine nimhd_restrict_b_kernel(grid, father, b, head_idx, num_octs)
+    type(oct), device :: grid(*)
+    integer(kind=4), device :: father(*)
+    real(kind=dp), device :: b(1:twotondim,1:6,*)
+    integer(kind=4), intent(in), value :: head_idx, num_octs
+    integer :: oct_idx, father_idx, i, j, k
+
+    oct_idx = threadIdx%x - 1 + (blockIdx%x - 1) * blockDim%x
+    if (oct_idx >= num_octs) return
+    oct_idx = head_idx + oct_idx
+    father_idx = father(oct_idx)
+    i = grid(oct_idx)%ckey(1) - 2 * grid(father_idx)%ckey(1)
+    j = grid(oct_idx)%ckey(2) - 2 * grid(father_idx)%ckey(2)
+    k = grid(oct_idx)%ckey(3) - 2 * grid(father_idx)%ckey(3)
+    call restrict_face_b(b, oct_idx, 1 + i + 2*j + 4*k, father_idx)
+  end subroutine nimhd_restrict_b_kernel
+#endif
+
   attributes(global) subroutine upload_kernel(grid, father, uold, bold, head_idx, num_octs, &
        & internal_energy, gamma, smallr, smallc2)
     type(oct), device :: grid(*)
@@ -4566,9 +4673,6 @@ contains
     integer :: ind, father_idx, i, j, k, ivar, idim
     real(kind=dp) :: eint_sum, ekin, erad, emag
     real(kind=dp) :: density, smalle
-#ifdef MHD
-    integer, dimension(1:6,1:4) :: hh
-#endif
     real(kind=dp), parameter :: inv_twotondim = 1.0_dp / real(twotondim, kind=dp)
 
     ! Thread and block id
@@ -4598,32 +4702,7 @@ contains
 
     ! Restrict face-B by averaging child faces on each parent face.
 #ifdef MHD
-    ! Child cells whose low/high face on each axis lies on the corresponding parent face
-    hh(1,1:4) = (/1,3,5,7/) ! low-x face children
-    hh(2,1:4) = (/2,4,6,8/) ! high-x face children
-    hh(3,1:4) = (/1,2,5,6/) ! low-y face children
-    hh(4,1:4) = (/3,4,7,8/) ! high-y face children
-    hh(5,1:4) = (/1,2,3,4/) ! low-z face children
-    hh(6,1:4) = (/5,6,7,8/) ! high-z face children
-
-    ! Reset parent face-B (this refined parent cell)
-    do idim = 1, 6
-       bold(cell_idx, idim, father_idx) = 0_dp
-    end do
-
-    ! Area-average each parent face from the 4 child faces lying on it
-    do idim = 1, ndim
-       ! Low-side face (component idim)
-       do ind = 1, twotondim/2
-          bold(cell_idx, idim, father_idx) = bold(cell_idx, idim, father_idx) &
-               & + bold(hh(2*idim-1,ind), idim, oct_idx) / dble(twotondim/2)
-       end do
-       ! High-side face (component idim+3)
-       do ind = 1, twotondim/2
-          bold(cell_idx, idim+3, father_idx) = bold(cell_idx, idim+3, father_idx) &
-               & + bold(hh(2*idim,ind), idim+3, oct_idx) / dble(twotondim/2)
-       end do
-    end do
+    call restrict_face_b(bold, oct_idx, cell_idx, father_idx)
 #endif
 
     ! Non-conservative upload

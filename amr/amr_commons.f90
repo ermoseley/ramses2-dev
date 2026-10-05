@@ -172,6 +172,7 @@ module amr_commons
      real(kind=8)::nimhd_alpha=0.5d0
      character(LEN=10)::nimhd_solver='unsplit'
      character(LEN=10)::nimhd_split='strang'
+     logical::nimhd_composite=.false.
      real(kind=8),dimension(1:nener+1)::gamma_rad=1.33333333334d0
      logical ::induction=.false.
      logical ::entropy=.false.
