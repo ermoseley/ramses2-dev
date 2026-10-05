@@ -1,0 +1,73 @@
+module gpu_composite_incidence
+  use amr_parameters, only: dp
+  use cudafor
+  implicit none
+  private
+  public :: composite_integrated_curl, composite_adjoint_curl
+
+  ! Caller owns distinct unique-face/unique-edge row IDs and valid int32 CSR.
+  ! CSR is 1-based: rowptr(1)=1, rowptr(nrow+1)=nnz+1; rows may be empty.
+  ! C(f,e)=sign is +1/-1 for the edge orientation along/against the oriented
+  ! face boundary (right-hand rule about its normal). Edge inputs are voltages
+  ! integrated along those oriented segments; no lengths/areas belong here.
+  ! Caller assembles CT separately with CT(e,f)=C(f,e), SAME sign, no minus.
+  ! Both actions sum in the supplied CSR entry order and overwrite each row.
+  ! Inputs/outputs must not alias; all rows are owned, with no duplicate output.
+  ! Launchers are asynchronous on the default stream; caller checks completion.
+  ! Positive nrow <= huge(0)-127 keeps padded int32 thread indices in range.
+contains
+  subroutine composite_integrated_curl(nface, rowptr, edge_idx, signs, voltage, curl)
+    integer, intent(in) :: nface
+    integer(kind=4), device, intent(in) :: rowptr(*), edge_idx(*), signs(*)
+    real(kind=dp), device, intent(in) :: voltage(*)
+    real(kind=dp), device, intent(inout) :: curl(*)
+
+    if (nface <= 0) return
+    call integrated_curl_kernel<<<1+(nface-1)/128,128>>>(nface, rowptr, edge_idx, signs, voltage, curl)
+  end subroutine composite_integrated_curl
+
+  attributes(global) subroutine integrated_curl_kernel(nface, rowptr, edge_idx, signs, voltage, curl)
+    integer, value, intent(in) :: nface
+    integer(kind=4), device, intent(in) :: rowptr(*), edge_idx(*), signs(*)
+    real(kind=dp), device, intent(in) :: voltage(*)
+    real(kind=dp), device, intent(out) :: curl(*)
+    integer :: face, p
+    real(kind=dp) :: total
+
+    face = (blockIdx%x-1)*blockDim%x + threadIdx%x
+    if (face > nface) return
+    total = 0.0_dp
+    do p = rowptr(face), rowptr(face+1)-1
+       total = total + real(signs(p),kind=dp)*voltage(edge_idx(p))
+    end do
+    curl(face) = total
+  end subroutine integrated_curl_kernel
+
+  subroutine composite_adjoint_curl(nedge, rowptr, face_idx, signs, weighted_flux, numerator)
+    integer, intent(in) :: nedge
+    integer(kind=4), device, intent(in) :: rowptr(*), face_idx(*), signs(*)
+    ! weighted_flux is the caller's already assembled MF*Phi action, not Phi.
+    real(kind=dp), device, intent(in) :: weighted_flux(*)
+    real(kind=dp), device, intent(inout) :: numerator(*)
+
+    if (nedge <= 0) return
+    call adjoint_curl_kernel<<<1+(nedge-1)/128,128>>>(nedge, rowptr, face_idx, signs, weighted_flux, numerator)
+  end subroutine composite_adjoint_curl
+
+  attributes(global) subroutine adjoint_curl_kernel(nedge, rowptr, face_idx, signs, weighted_flux, numerator)
+    integer, value, intent(in) :: nedge
+    integer(kind=4), device, intent(in) :: rowptr(*), face_idx(*), signs(*)
+    real(kind=dp), device, intent(in) :: weighted_flux(*)
+    real(kind=dp), device, intent(out) :: numerator(*)
+    integer :: edge, p
+    real(kind=dp) :: total
+
+    edge = (blockIdx%x-1)*blockDim%x + threadIdx%x
+    if (edge > nedge) return
+    total = 0.0_dp
+    do p = rowptr(edge), rowptr(edge+1)-1
+       total = total + real(signs(p),kind=dp)*weighted_flux(face_idx(p))
+    end do
+    numerator(edge) = total
+  end subroutine adjoint_curl_kernel
+end module gpu_composite_incidence

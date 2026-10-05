@@ -526,6 +526,7 @@ if(CMAKE_Fortran_COMPILER_ID STREQUAL "NVHPC")
 
         gpu/gpu_refine.cuf
         gpu/gpu_flag.cuf
+        gpu/gpu_composite_incidence.cuf
         gpu/gpu_runner.cuf
         gpu/gpu_clump.cuf
         gpu/gpu_part.cuf

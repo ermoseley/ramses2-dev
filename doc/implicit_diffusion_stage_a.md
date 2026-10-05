@@ -19,6 +19,28 @@ be met, stop at the operator design; do not accept an inconsistent diagonal
 substitute.” The following experiments test that prerequisite; they do not
 validate an implicit RAMSES executable.
 
+## Implemented incidence actions
+
+`gpu/gpu_composite_incidence.cuf` supplies the integrated face curl and
+edge adjoint-curl numerator. Each output has one owner and gathers a signed
+CSR row without atomics. The caller supplies exact transpose connectivity
+and already mass-weighted face fluxes; these actions select no metric or
+mobility and perform no inverse or timestep. They are included in the
+NVHPC Make/CMake builds and remain unused by production dispatch.
+
+The module compiled with the actual `amr_parameters` in FP32 and FP64 on
+S3DF (NVFORTRAN 25.5, job 39911884) and Marlowe (NVFORTRAN 24.7/CUDA 12.5,
+job 514663). After the H200 run remained queued, it was cancelled and
+Marlowe job 514664 passed all fourteen checks on one H100 in `preempt`.
+Both builds used `cc90,nofma,O0`; production optimization remains untested.
+The periodic, refined-cube and adjacent-refinement tests include exact
+curl/transpose nulls, empty rows and zero-work calls. Returned vectors
+match host accumulation in the same precision and CSR order bitwise;
+divergence and adjoint pairing errors are consistent with roundoff.
+The disposable driver, fixtures and receipts remain outside the repository.
+These are incidence tests, not a complete operator, solver or performance
+qualification.
+
 ## Uniform operator
 
 The actual frozen `cmpnimhd_mhd` stencil fails accretivity for a nonuniform,
@@ -224,6 +246,16 @@ nullspace/variable-coefficient qualification, thermal admissibility, and
 fixed-domain spatial convergence still require qualification before
 solver integration.
 
+The native-minus-coarse/detail restoration tested after the amendment also
+fails in 3D. Its per-parent constant-current numerator has an exact defect
+of -1 on an off-skeleton edge. A translation-invariant face-metric moment
+then rules out repairing independently current-exact parent increments with
+translated symmetric cap differences of any finite width: two divergence-free
+affine fields with the same curl have exact moments 2 and 1, whereas those
+conditions require equality. This excludes that restoration architecture,
+not all native-bulk physical-interface rules. Direct assignment of shared
+boundary loads on the physical mesh remains unresolved.
+
 ## Thermal accounting
 
 For the revised uniform stencil, a fixed local redistribution of edge work
@@ -237,6 +269,16 @@ RAMSES when recovering primitive pressure. The change in that staggering
 difference can exceed positive Joule heat. Acceptance therefore still
 requires raw internal-energy checks and atomic bounded retries, as the
 plan specifies.
+
+One fixed isolated Ohmic field has a derived finite-pressure acceptance
+envelope. For the full interval 0.01, uniform incoming internal-energy
+densities above 1.1928942774e-5 pass every prefix of the single, half and
+quarter schedules. A value below 1.1927773915e-5 fails all three and restores
+the original B/E exactly, charging seven endpoint solves and fourteen stage
+evaluations. Smaller substeps slightly worsen this field's cumulative bound;
+they provide no rejected-step recovery. The same-operator Heun reference
+has the same limitation. This is host algebra on the earlier isolated
+metric, not qualification of a general spatial rule or production STS.
 
 The wider isolated patch admits a positive volume-weighted cell partition
 of its face and edge metric shares. Smooth harmonic and nonharmonic
