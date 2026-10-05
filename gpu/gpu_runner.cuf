@@ -781,11 +781,10 @@ contains
     type(ramses_t), intent(inout) :: sim
     integer, intent(in) :: ilevel, ipass
 #ifdef MHD
-    real(kind=8), parameter :: alpha = 0.5d0
     integer, parameter :: smax = 100000
     integer(kind=4) :: head_oct, num_octs, head_sg, num_sg, head_cache, num_cache
     integer :: threads_per_block, info, s, j
-    real(kind=8) :: dt_parab, tau, sreal, w1, mut1
+    real(kind=8) :: dt_parab, tau, sreal, w1, mut1, alpha
     real(kind=8), allocatable, dimension(:) :: bcoef, mu, nu, mut, gt, q, lambda
     real(dp) :: dt, dx
     logical :: sts, heat, pre
@@ -801,6 +800,7 @@ contains
     pre = (ipass == 1)
     dx = sim%r%boxlen/2**ilevel
     sts = (sim%r%nimhd_solver == 'sts')
+    alpha = sim%r%nimhd_alpha
     heat = .not.(sim%r%isothermal .or. sim%r%induction)
     head_sg = (head_oct - 1) / nsubgridtondim + 1
     num_sg = num_octs / nsubgridtondim

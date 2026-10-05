@@ -318,6 +318,7 @@ subroutine m_read_params(pst)
   real(kind=8)::etamag=0.0d0
   real(kind=8)::eta_ad=0.0d0
   real(kind=8)::nimhd_courant=0.8d0
+  real(kind=8)::nimhd_alpha=0.5d0
   character(LEN=10)::nimhd_solver='unsplit'
   character(LEN=10)::nimhd_split='strang'
   real(kind=8)::smallc=1.d-10
@@ -657,7 +658,7 @@ subroutine m_read_params(pst)
        & ,d_region,u_region,v_region,w_region,p_region
   ! Hydro solver parameters
   namelist/hydro_params/gamma,courant_factor,smallr,smallc &
-       & ,slope_type,slope_mag_type,difmag,etamag,eta_ad,nimhd_solver,nimhd_split,nimhd_courant,gamma_rad &
+       & ,slope_type,slope_mag_type,difmag,etamag,eta_ad,nimhd_solver,nimhd_split,nimhd_courant,nimhd_alpha,gamma_rad &
        & ,dual_energy,T2_fix,induction,entropy,sgs_turb,equilibrium_sgs,riemann,riemann2d,constant_gravity &
        & ,niter_riemann,scheme,switch_llf_dmin,switch_llf_pmin,smagorinsky_lilly_constant
   ! Grid refinement parameters
@@ -1324,6 +1325,10 @@ subroutine m_read_params(pst)
      write(*,*)'Error: nimhd_courant must be positive'
      nml_ok=.false.
   endif
+  if(nimhd_solver=='sts'.and.nimhd_alpha<0.5d0)then
+     write(*,*)'Error: nimhd_alpha must be at least 0.5'
+     nml_ok=.false.
+  endif
 #if !defined(_CUDA) || !defined(MHD) || NDIM!=3
   if(nimhd_solver/='unsplit')then
      write(*,*)'Error: nimhd_solver=explicit or sts is only supported by the 3D CUDA MHD solver'
@@ -1490,6 +1495,7 @@ subroutine m_read_params(pst)
   s%r%etamag=etamag
   s%r%eta_ad=eta_ad
   s%r%nimhd_courant=nimhd_courant
+  s%r%nimhd_alpha=nimhd_alpha
   s%r%nimhd_solver=nimhd_solver
   s%r%nimhd_split=nimhd_split
   s%r%gamma_rad=gamma_rad(1:nener+1)
