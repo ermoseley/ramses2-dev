@@ -167,7 +167,7 @@ module amr_commons
      integer ::slope_mag_type=1
      real(kind=8)::difmag=0.0d0
      real(kind=8)::etamag=0.0d0
-     real(kind=8)::eta_a=0.0d0
+     real(kind=8)::eta_ad=0.0d0
      real(kind=8)::nimhd_courant=0.8d0
      real(kind=8)::nimhd_alpha=0.5d0
      character(LEN=10)::nimhd_solver='unsplit'

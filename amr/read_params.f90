@@ -316,8 +316,8 @@ subroutine m_read_params(pst)
   real(kind=8)::courant_factor=0.5d0
   real(kind=8)::difmag=0.0d0
   real(kind=8)::etamag=0.0d0
-  real(kind=8)::eta_o=0.0d0
-  real(kind=8)::eta_a=0.0d0
+  real(kind=8)::eta_ohm=0.0d0
+  real(kind=8)::eta_ad=0.0d0
   real(kind=8)::nimhd_courant=0.8d0
   real(kind=8)::nimhd_alpha=0.5d0
   character(LEN=10)::nimhd_solver='unsplit'
@@ -659,7 +659,7 @@ subroutine m_read_params(pst)
        & ,d_region,u_region,v_region,w_region,p_region
   ! Hydro solver parameters
   namelist/hydro_params/gamma,courant_factor,smallr,smallc &
-       & ,slope_type,slope_mag_type,difmag,etamag,eta_o,eta_a,nimhd_solver,nimhd_split,nimhd_courant,nimhd_alpha,gamma_rad &
+       & ,slope_type,slope_mag_type,difmag,etamag,eta_ohm,eta_ad,nimhd_solver,nimhd_split,nimhd_courant,nimhd_alpha,gamma_rad &
        & ,dual_energy,T2_fix,induction,entropy,sgs_turb,equilibrium_sgs,riemann,riemann2d,constant_gravity &
        & ,niter_riemann,scheme,switch_llf_dmin,switch_llf_pmin,smagorinsky_lilly_constant
   ! Grid refinement parameters
@@ -1309,13 +1309,13 @@ subroutine m_read_params(pst)
      endif
   endif
 
-  ! eta_o is a synonym of etamag
-  if(eta_o/=0.0d0)then
-     if(etamag/=0.0d0.and.etamag/=eta_o)then
-        write(*,*)'Error: eta_o and etamag are synonyms but differ'
+  ! eta_ohm is a synonym of etamag
+  if(eta_ohm/=0.0d0)then
+     if(etamag/=0.0d0.and.etamag/=eta_ohm)then
+        write(*,*)'Error: eta_ohm and etamag are synonyms but differ'
         nml_ok=.false.
      endif
-     etamag=eta_o
+     etamag=eta_ohm
   endif
 
   ! Check that the split non-ideal MHD solver is consistent and available
@@ -1327,8 +1327,8 @@ subroutine m_read_params(pst)
      write(*,*)'Error: nimhd_split must be strang or godunov'
      nml_ok=.false.
   endif
-  if(eta_a>0.0d0.and.nimhd_solver=='unsplit')then
-     write(*,*)'Error: eta_a>0 needs nimhd_solver=explicit or sts'
+  if(eta_ad>0.0d0.and.nimhd_solver=='unsplit')then
+     write(*,*)'Error: eta_ad>0 needs nimhd_solver=explicit or sts'
      nml_ok=.false.
   endif
   if(nimhd_solver/='unsplit'.and.nimhd_courant<=0.0d0)then
@@ -1503,7 +1503,7 @@ subroutine m_read_params(pst)
   endif
   s%r%difmag=difmag
   s%r%etamag=etamag
-  s%r%eta_a=eta_a
+  s%r%eta_ad=eta_ad
   s%r%nimhd_courant=nimhd_courant
   s%r%nimhd_alpha=nimhd_alpha
   s%r%nimhd_solver=nimhd_solver
