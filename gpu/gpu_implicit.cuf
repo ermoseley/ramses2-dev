@@ -310,10 +310,13 @@ contains
     mqi(i)=mzi(i)-mzr(i)+dt*mqi(i)
   end subroutine shift_kernel
 
-  subroutine cocg(y,dt,ynorm,u,x,w,ok)
+  ! With guess, U and X of the previous Picard iterate give the initial Z=(U+iX)/2.
+  subroutine cocg(y,dt,ynorm,u,x,w,guess,ok)
     real(kind=8), device, intent(in) :: y(:)
-    real(kind=8), device, intent(out) :: u(:),x(:),w(:)
+    real(kind=8), device, intent(inout) :: u(:),x(:)
+    real(kind=8), device, intent(out) :: w(:)
     real(kind=8), intent(in) :: dt,ynorm
+    logical, intent(in) :: guess
     logical, intent(out) :: ok
     real(kind=8), device, allocatable :: zr(:),zi(:),rr(:),ri(:),pr(:),pi(:),my(:)
     real(kind=8), device, allocatable :: mrr(:),mri(:),mpr(:),mpi(:),qr(:),qi(:),mqr(:),mqi(:)
@@ -325,7 +328,11 @@ contains
     n=imp_nface
     allocate(zr(n),zi(n),rr(n),ri(n),pr(n),pi(n),my(n),mrr(n),mri(n),mpr(n),mpi(n), &
          & qr(n),qi(n),mqr(n),mqi(n))
-    call combine(zr,0.5d0,y,0d0,y); zi=zr
+    if(guess) then
+       call combine(zr,0.5d0,u,0d0,u); call combine(zi,0.5d0,x,0d0,x)
+    else
+       call combine(zr,0.5d0,y,0d0,y); zi=zr
+    endif
     call imp_mf(y,my)
     call imp_mf(zr,mpr); call imp_mf(zi,mpi)
     call shifted(zr,zi,mpr,mpi,qr,qi,mqr,mqi,dt,action_ok)
@@ -516,7 +523,7 @@ contains
        if(uniform_ohmic) then
           call cocg_ohmic(y,dt,ynorm,u,x,wn,ok)
        else
-          call cocg(y,dt,ynorm,u,x,wn,ok)
+          call cocg(y,dt,ynorm,u,x,wn,it>1,ok)
        endif
        time_solve=time_solve+wall_time()-t0
        if(.not.ok) exit
