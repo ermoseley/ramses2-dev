@@ -12,6 +12,7 @@ module implicit_solver
   integer, parameter :: nimhd_maxsplit=2
   integer :: maxiter, inner_max, inner_calls, cocg_iters, picard_iters
   integer(kind=8) :: inner_total
+  integer :: pre_nonpositive
   integer :: cached_lmin=-1, cached_lf=-1, cached_ngridmax=-1
   real(kind=8) :: rtol, tol_in, eta_uniform
   real(kind=8) :: time_coeff, time_solve, time_commit
@@ -621,8 +622,8 @@ contains
     mag=0.125d0*((bs(1,c)+bs(4,c))**2+(bs(2,c)+bs(5,c))**2+(bs(3,c)+bs(6,c))**2)
     internal=real(uold(ic,5,io),8)+de(c)/w**3-kin-mag
     p(c)=(gamma-1d0)*internal
-    p0=(gamma-1d0)*(real(uold(ic,5,io),8)-kin-0.5d0*sum(base_b(:,c)**2))
-    ratio(c)=p(c)/max(abs(p0),tiny(1d0))
+    ! ratio holds the raw pressure of the interval's initial state
+    ratio(c)=(gamma-1d0)*(real(uold(ic,5,io),8)-kin-0.5d0*sum(base_b(:,c)**2))
   end subroutine pressure_kernel
 
   subroutine attempt(y,dt,uold,de0,base_b,boxlen,gamma,smallr,etamag,eta_ad,heat,xacc,de, &
@@ -637,7 +638,7 @@ contains
     real(kind=8), device, allocatable :: u(:),x(:),bu(:),cu(:),cx(:),ju(:),jx(:),eu(:),ex(:)
     real(kind=8), device, allocatable :: du(:),dx(:),delta(:),bs(:,:),p(:),ratio(:),detotal(:)
     real(kind=8) :: ynorm,t0
-    integer :: i,bad
+    integer :: i,bad,npre
     allocate(u(imp_nface),x(imp_nface),bu(imp_nface),cu(imp_nface),cx(imp_nface), &
          & ju(imp_nedge),jx(imp_nedge),eu(imp_nedge),ex(imp_nedge),du(imp_nleaf),dx(imp_nleaf), &
          & delta(imp_nface),bs(6,imp_nleaf),p(imp_nleaf),ratio(imp_nleaf),detotal(imp_nleaf))
@@ -677,13 +678,22 @@ contains
     call combine(detotal,1d0,de0,1d0,de)
     call imp_leaf_slots(xacc,bs)
     call pressure_kernel<<<(imp_nleaf+255)/256,256>>>(uold,bs,detotal,boxlen,gamma,p,ratio,base_b,imp_nleaf)
-    bad=0; minratio=huge(1d0)
-    !$cuf kernel do <<<*,*>>> reduce(+:bad) reduce(min:minratio)
+    ! Diffusion must not make a positive raw pressure non-positive, nor lower one that
+    ! the incoming state already has non-positive (reported as npre).
+    bad=0; npre=0; minratio=huge(1d0)
+    !$cuf kernel do <<<*,*>>> reduce(+:bad,npre) reduce(min:minratio)
     do i=1,imp_nleaf
-       if(p(i)<=0d0.or.p(i)/=p(i).or.abs(p(i))>huge(1d0).or. &
-            & ratio(i)/=ratio(i).or.abs(ratio(i))>huge(1d0)) bad=bad+1
-       minratio=min(minratio,ratio(i))
+       if(p(i)/=p(i).or.abs(p(i))>huge(1d0).or.ratio(i)/=ratio(i).or.abs(ratio(i))>huge(1d0)) then
+          bad=bad+1
+       else if(ratio(i)>0d0) then
+          if(p(i)<=0d0) bad=bad+1
+          minratio=min(minratio,p(i)/ratio(i))
+       else
+          npre=npre+1
+          if(p(i)<ratio(i)) bad=bad+1
+       endif
     enddo
+    pre_nonpositive=max(pre_nonpositive,npre)
     ok=(bad==0)
 400 time_commit=time_commit+wall_time()-t0
     deallocate(u,x,bu,cu,cx,ju,jx,eu,ex,du,dx,delta,bs,p,ratio,detotal)
@@ -721,7 +731,7 @@ contains
     time_build=0d0; time_check=0d0; time_coeff=0d0; time_solve=0d0; time_commit=0d0
     imp_me_calls=0; imp_k_calls=0
     rtol=nimhd_rtol; maxiter=nimhd_maxiter; tol_in=max(1d-14,1d-3*rtol)
-    inner_max=0; inner_calls=0; inner_total=0; cocg_iters=0; picard_iters=0
+    inner_max=0; inner_calls=0; inner_total=0; cocg_iters=0; picard_iters=0; pre_nonpositive=0
     if(.not.imp_valid.or.lmin/=cached_lmin.or.lf/=cached_lf.or.ngridmax/=cached_ngridmax) then
        t0=wall_time()
        call imp_build(grid,hash_key,hash_val,hash_size,ckey_max,key_off,box_ckey_min,box_ckey_max, &
@@ -786,7 +796,7 @@ contains
     if((verbose.or.first_call.or.rejected).and.myid==1) then
        write(*,*)'implicit: leaves/faces/edges/transition=',imp_nleaf,imp_nface,imp_nedge,imp_ntr, &
             & ' substeps=',nsub,' Picard/COCG=',picard_iters,cocg_iters,' CG max/avg=',inner_max,avg_inner, &
-            & ' endpoint=',maxendpoint,' energy sum=',total_esum,' min pressure ratio=',minpressure,' wall=',elapsed, &
+            & ' endpoint=',maxendpoint,' energy sum=',total_esum,' min pressure ratio=',minpressure,' prior p<=0 leaves=',pre_nonpositive,' wall=',elapsed, &
             & ' build/check/coeff/solve/commit=',time_build,time_check,time_coeff,time_solve,time_commit, &
             & ' ME/K applications=',imp_me_calls,imp_k_calls
     endif
