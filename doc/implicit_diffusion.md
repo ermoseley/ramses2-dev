@@ -327,3 +327,127 @@ Files, in build order after `gpu_hydro.o gpu_refine.o`:
    inner CG, Picard, commit, energy, acceptance and bisection, and the driver
    `gpu_implicit_step(...)` called from `gpu_nimhd_composite` when
    `nimhd_solver=='implicit'`.
+
+## 13. Status and validation (2026-10-06)
+
+The opt-in GPU implicit solver is implemented and functioning in the scope of
+section 1. Device topology/ownership, native transfers, oct histopolation and
+transition lifts feed full-transpose mass/mobility actions. Regular octs use
+the tensor mass fast path. Complex-shift Pade(0,2) COCG uses nested Jacobi-CG
+mass solves, an exact uniform-Ohmic edge formulation, and warm-started Picard.
+Compatible energy accounting, conservative restriction, cached topology,
+bounded bisection and Strang heating-CFL settle with rollback are implemented.
+It is **not cost-competitive with STS at the tested stiffness**.
+
+Numerical evidence comes from [RESULTS.md](/Users/moseley/ramses-development/artifacts/2026-10-05-implicit-implementation/RESULTS.md) and its
+[Python reference](/Users/moseley/ramses-development/artifacts/2026-10-05-implicit-implementation/pyref/REPORT.md), [inner preconditioner](/Users/moseley/ramses-development/artifacts/2026-10-05-implicit-implementation/precond/REPORT.md)
+and [outer preconditioner](/Users/moseley/ramses-development/artifacts/2026-10-05-implicit-implementation/outer-precond/REPORT.md) reports.
+GPU results use Stellar A100-PCIE-40GB, NVHPC 25.5, `NPRE=8`,
+`INIT=BELTRAMI`, `CUDA_ARCH=sm_80`, built in the job; validated commit is
+`58be9b23` (p7) unless noted. These are recorded campaign results.
+
+### Verification layers
+
+| Layer | Evidence | Scope |
+| --- | --- | --- |
+| In-situ `nimhd_check` | `DC=0`; face/edge reduction errors <=8.4e-15; curl commutation 4.7e-16; native copies 1.4e-17; adjoint/mass/Ohmic/AD symmetry <=5e-19; regular-oct/all-leaf agreement <=5e-16 | p7 uniform 64^3 (262144 leaves) and L5-6 cube (78856 leaves, 3256 transition) |
+| GPU dump vs independent Python | Bijective topology, identical `C`, leaf maps <=9e-16; mass and Ohmic/AD mobility actions <=1.1e-15 relative | L3-4 meshes, including 32 transition leaves |
+| Python composite accuracy | Identities on uniform/cube/slab/three-level/random P meshes; weighted PSD with AD jumps 1:1e4 and zeros; fixed-domain Helmholtz B and J=E L2 order about 2.0 globally and on transition leaves, heat about 2.2–2.9; fixed-mesh temporal order about 2.0 | Host reference; frozen/short-step AD checks do not establish nonlinear AD PDE convergence |
+
+The handoff's first-order pointwise bulk defect remains a property of the
+oct reconstruction. Measured second-order L2 solution convergence does not
+remove that defect or restore the original native-bulk contract. Odd-cell
+origin shifts are not covariant because reconstruction is oct-anchored.
+
+### GPU physics
+
+Relative analytic Beltrami decay-rate errors; the kit gate is 2–3%.
+An em dash means no comparison is reported in the ledger.
+
+| Case | Implicit | STS, same binary family |
+| --- | ---: | ---: |
+| Uniform Ohmic L6 | 4.8e-6 | 8.0e-4 |
+| Uniform AD L6 | 4.8e-6 | — |
+| AMR slab Ohmic L5-6 | 1.5e-4 | 2.1e-3 |
+| Refined cube Ohmic | 2.0e-3 | 6.6e-4 |
+| Refined cube AD | 2.0e-3 | 3.4e-3 |
+| Refined cube Ohmic+AD | 2.0e-3 | — |
+| Three-level nest L5-7 Ohmic (354768 leaves, 19472 transition) | 1.5e-3 | 4.7e-4 |
+| Three-level nest AD | 1.5e-3 | 2.6e-3 |
+| Stiff cube Ohmic, dt/dt_parab about 130 | 8.4e-4 | 2.8e-3 |
+| Stiff cube AD, about 130 | 8.4e-4 | — |
+| Stiff cube Ohmic, about 1300 | 6.3e-2 (FAIL 3%) | 5.8e-2 (FAIL) |
+
+At s1000, Gamma*dt=0.66 and the Pade per-step response error is about 3%:
+stability does not supply temporal accuracy. The guide field has zero
+deviation; uniform Ohmic Godunov-split rate error is 2.5e-4. Fixed-mesh
+refinement against a small-step reference of the same operator gives orders
+1.94, 2.64, 3.67 for Ohmic AMR cube and 1.83, 1.95, 2.65 for AD uniform L5;
+later ratios approach the reference error and are not higher-order claims.
+
+### Energy, coefficients and robustness
+
+Full-MHD per-step total-energy errors satisfy `abs(econs)<=2e-15` across
+the reported uniform/AMR/cube, Ohmic/AD, Godunov, variable and zero cases.
+Force-free Ohmic cell heating relative to the ideal run passes on the uniform
+mesh at 1.3%. AMR slab/cube heating fails for both STS and implicit, with max
+relative deviations 2.46/10.1 and the same minimum pressure. Qualification at
+AMR density jumps is limited by base ideal-MHD behaviour with `nsubcycle=1`;
+the cube ideal induction run has NaN magnetic energy.
+
+Variable AD `eta=eta_ad*rho^-1.5` (contrast 1000) has monotone magnetic energy
+and 1.7% agreement with STS; zero AD mobility in a slab gives monotone energy,
+1.7–1.9% agreement and energy error 1.1e-16. STS uses a different stencil.
+Full-MHD vareta brings 8192 L6 leaves into diffusion with non-positive raw
+pressure; these are reported, not rejected. Output minimum pressure is
+-93.5, as with STS (-93.54) and in the ideal run without diffusion (-93.51):
+the hydro step at the density-100 slab, not the diffusion, produces it. A
+single-precision build (`NPRE=4`; the solver itself works in FP64) gives the
+same decay rates (uniform 2.7e-4, cube 2.0e-3), an exactly uniform guide field
+and energy conservation to 6.9e-8. The current policy rejects a step
+that makes an initially positive raw pressure non-positive; it does not
+guarantee positivity for an already inadmissible incoming state.
+
+True-residual, Picard and endpoint checks govern acceptance. Rejection and
+bisection through two levels were exercised by full-MHD vareta before the
+pressure-policy change. Heating-CFL settle restores the snapshot and retries
+the Strang first half when needed; it never triggered in the reported tests.
+P is checked at every build, but no tested GPU mesh violated P, including the
+`nexpand=0` nest. Detection on a violating GPU mesh remains **pending**;
+the Python reference rejects violations.
+
+### Cost and memory
+
+Synchronized A100 seconds per coarse step, including both Strang halves;
+the STS comparison uses the same mesh/binary family, with a different stencil.
+
+| Case / allocation | Implicit s/step | STS s/step | Topology+workspace MiB |
+| --- | ---: | ---: | ---: |
+| Cube Ohmic, dt/dt_parab about 13 | 0.44 | 0.007 | — |
+| Cube AD | 4.3 | 0.007 | — |
+| Stiff cube Ohmic, about 1300 | 6.9 (p1) | 0.059 | — |
+| Stiff cube AD, about 130 | 21 | — | — |
+| Three-level nest AD, 355k leaves | 18.4 | — | 746 |
+| Cube allocation, 79k leaves | — | — | 166 |
+
+Cube AD per-call build/solve/commit is 0.03/3.2/0.19 s, with cached topology
+rebuilt after regrid; 4336 M_E and 84 K applications, 34 COCG iterations over
+three Picard solves, and average inner CG 25. Generic-leaf mass, quadrature
+mobility and regular-oct launches cost 0.31 ms, 16 ms and 24 us respectively.
+Memory receipts exclude later check storage and transient solve vectors.
+Jacobi-COCG iterations grow as `sqrt(stiffness)*log`: 4 (uniform), 75
+(about 13), 236 (about 130), 742 (about 1300). The host outer study recommends
+Hiptmair-Xu lumped nodal auxiliary-space preconditioning with one symmetric
+SA V-cycle; cube16 BFS iterations are 41/35/36/34 at stiffness
+10/100/1000/10000 versus Jacobi 50/123/329/667, at 2.78 M_E-equivalents per
+application at stiffness 10000. Inner FSAI-8 reduces host AMR mass-solve work
+from 58.2 to 29.5 M_E-equivalents. Neither option is implemented on GPU.
+AD preconditioning remains unresolved: the exact isotropic surrogate still
+needs 100 oblique / 1033 jump-zero iterations at stiffness 10000.
+Matched-accuracy STS cost and full-solver S3DF/Marlowe receipts are **pending**.
+
+NVHPC device pitfalls encountered included module-array descriptors that
+required direct allocation, `.not.`/`.eqv.` on device logicals, and incorrect
+large fused kernels/sum-factorised quadrature. Integer device flags and
+verified kernel forms replaced the failing forms; p7 restores dense mobility
+quadrature while retaining the verified regular-oct tensor mass path.

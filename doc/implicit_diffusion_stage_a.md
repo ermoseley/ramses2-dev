@@ -1,10 +1,11 @@
 # Implicit non-ideal MHD: spatial prerequisite checkpoint
 
-Status on 2026-10-05: **no implicit solver is implemented or qualified**.
-This branch starts from the split non-ideal MHD framework at
-`6e6fc3ec0dab40628ecdc3e2ff43411def042b4d` (`gpu-non-ideal-sts`),
-the branch associated with the Claude conversation “RAMSES2 diffusion
-framework port.” Existing solver modes and their defaults are unchanged.
+Status on 2026-10-06: the GPU implicit solver now exists as
+`nimhd_solver='implicit'`. See [implicit_diffusion.md](implicit_diffusion.md)
+for the design contract and [section 13](implicit_diffusion.md#13-status-and-validation-2026-10-06)
+for validation status and remaining limitations.
+
+## Historical stage-A notes
 
 The reference branch tested synchronized all-level explicit/STS stages at
 `8cb067f6`, then reverted that coupling at `b540fe69`. The last inspected
