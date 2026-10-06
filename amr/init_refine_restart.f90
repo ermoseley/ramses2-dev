@@ -505,6 +505,7 @@ subroutine init_refine_restart(s,ilevel,ncpu_file,levelmin_file,nlevelmax_file,n
         close(13)
      endif
   end do
+  m%ifree=m%noct_used+1
 
   !-----------
   ! Super-octs
