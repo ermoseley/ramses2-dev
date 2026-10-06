@@ -37,6 +37,10 @@ recursive subroutine r_set_grid_device(pst)
      bold = pst%s%m%bold
 #endif
 #endif
+#ifdef GRAV
+     f = pst%s%m%f
+     phi = pst%s%m%phi
+#endif
      call GPU_Error_Check(__FILE__, __LINE__)
      call nvtxEndRange()
 
