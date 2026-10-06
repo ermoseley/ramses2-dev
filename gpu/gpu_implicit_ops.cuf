@@ -377,8 +377,7 @@ contains
     integer(kind=8), device :: hk(*)
     integer(kind=4), device :: hv(*)
     integer, value :: hs,l,head,noct
-    integer :: i,g,c,p(3),q(3),child,j,dx,dy,dz,tmp,n
-    logical :: grandchildren
+    integer :: i,g,c,p(3),q(3),child,j,dx,dy,dz,tmp,n,grandchildren
     i=(blockIdx%x-1)*blockDim%x+threadIdx%x
     if (i>noct) return
     g=head+i-1
@@ -391,12 +390,13 @@ contains
        if (child==0) then
           n=n+1; cycle
        endif
-       grandchildren=.false.
+       ! Integer flag: .not. on a device logical depends on its representation.
+       grandchildren=0
        do j=0,7
           q=2*p+(/ibits(j,0,1),ibits(j,1,1),ibits(j,2,1)/)
-          if (lookup(grid,hk,hv,hs,l+2,q)>0) grandchildren=.true.
+          if (lookup(grid,hk,hv,hs,l+2,q)>0) grandchildren=1
        enddo
-       if (.not.grandchildren) cycle
+       if (grandchildren==0) cycle
        do dz=-1,1
           do dy=-1,1
              do dx=-1,1
@@ -1525,24 +1525,23 @@ contains
   ! bounds thread-local storage; every contraction uses the precomputed 1D basis.
   attributes(device) subroutine quad_eval_d(u,face,qi,out)
     real(kind=8) :: u(*),out(3,5,5)
-    logical, value :: face
-    integer, value :: qi
+    integer, value :: face,qi ! 0: edges, 1: faces; avoid device logical representation.
     real(kind=8) :: coeff(0:2,0:2,0:2),s(0:2,0:2),t(5,0:2),val
     integer :: a,d,n(3),kind(3),r,first,last,p(3),i,j,k,q
     do a=1,3
        do d=1,3
           n(d)=3; kind(d)=0
-          if ((face.and.d/=a).or.(.not.face.and.d==a)) then
+          if ((face/=0.and.d/=a).or.(face==0.and.d==a)) then
              n(d)=2; kind(d)=1
           endif
        enddo
-       if (face) then
+       if (face/=0) then
           first=12*(a-1)+1; last=12*a
        else
           first=18*(a-1)+1; last=18*a
        endif
        do r=first,last
-          if (face) then
+          if (face/=0) then
              p=fpos(:,r)
           else
              p=epos(:,r)
@@ -1619,12 +1618,11 @@ contains
   ! Five-point mobility; physical h factors match the original basis action.
   ! B is evaluated afresh from the 36 cached coefficients, never cached at points.
   attributes(device) subroutine mobility_d(id,u,v,quad)
-    integer, value :: id
-    logical, value :: quad
+    integer, value :: id,quad ! 0: mass, 1: quadrature.
     real(kind=8) :: u(54),v(54),bb(3,5,5),ee(3,5,5),w(36)
     real(kind=8) :: h,weight,b2,bdote,val
     integer :: i,j,k,r,a
-    if (.not.quad) then
+    if (quad==0) then
        call mass_e_d(id,u,v)
        do r=1,54
           v(r)=imp_eta(1,id)*v(r)
@@ -1636,8 +1634,8 @@ contains
        w(r)=cache_w(r,id)
     enddo
     do i=1,5
-       call quad_eval_d(w,.true.,i,bb)
-       call quad_eval_d(u,.false.,i,ee)
+       call quad_eval_d(w,1,i,bb)
+       call quad_eval_d(u,0,i,ee)
        do j=1,5
           do k=1,5
              b2=0d0; bdote=0d0
@@ -1809,8 +1807,7 @@ contains
 
   ! Keep K separate from M_E in profiles and in the compiled kernel body.
   attributes(global) subroutine mobility_kernel(n,x,y,quad,mode)
-    integer, value :: n,mode ! 0: all leaves, 1: generic list, 2: nonuniform regular octs.
-    logical, value :: quad
+    integer, value :: n,quad,mode ! mode: 0 all leaves, 1 generic list, 2 nonuniform regular octs.
     real(kind=8), device :: x(*),y(*)
     real(kind=8) :: u(54),v(54)
     integer :: id,t,c,g
@@ -1860,14 +1857,14 @@ contains
     imp_k_calls=imp_k_calls+1
     call zero_kernel<<<(imp_nedge+255)/256,256>>>(imp_nedge,y)
     if (imp_quad.or.all_leaf_path) then
-       call mobility_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y,imp_quad,0)
+       call mobility_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y,merge(1,0,imp_quad),0)
     else
        if (nreg>0) then
           call regular_eta_kernel<<<(nreg+255)/256,256>>>(nreg)
           call regular_e_kernel<<<(nreg+127)/128,128>>>(nreg,x,y,.true.)
        endif
-       if (ngeneric>0) call mobility_kernel<<<(ngeneric+255)/256,256>>>(ngeneric,x,y,.false.,1)
-       if (nreg>0) call mobility_kernel<<<(8*nreg+255)/256,256>>>(8*nreg,x,y,.false.,2)
+       if (ngeneric>0) call mobility_kernel<<<(ngeneric+255)/256,256>>>(ngeneric,x,y,0,1)
+       if (nreg>0) call mobility_kernel<<<(8*nreg+255)/256,256>>>(8*nreg,x,y,0,2)
     endif
     call GPU_Error_Check(__FILE__, __LINE__)
   end subroutine
@@ -2065,8 +2062,7 @@ contains
   end subroutine
 
   attributes(global) subroutine form_k_kernel(n,x,y,out,quad)
-    integer, value :: n
-    logical, value :: quad
+    integer, value :: n,quad
     real(kind=8), device :: x(*),y(*),out(*)
     real(kind=8) :: u(54),v(54),mv(54)
     integer :: id,r
@@ -2089,7 +2085,7 @@ contains
   subroutine imp_leaf_k_form(x,y,out)
     real(kind=8), device :: x(*),y(*),out(*)
     if (imp_nleaf==0) return
-    call form_k_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y,out,imp_quad)
+    call form_k_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y,out,merge(1,0,imp_quad))
     call GPU_Error_Check(__FILE__, __LINE__)
   end subroutine
 
