@@ -52,7 +52,7 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   type(pst_t) :: pst
   integer :: ilevel,icount
   integer :: ilev
-  logical :: done,ok_fbk
+  logical :: done,ok_fbk,settle_nimhd
   !-------------------------------------------------------------------!
   ! This routine is the adaptive-mesh/adaptive-time-step main driver. !
   ! Each routine is called using a specific order, don't change it,   !
@@ -69,6 +69,10 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   logical, save :: bkp_last_done=.false.
 
   associate(r=>pst%s%r, g=>pst%s%g, m=>pst%s%m, mdl=>pst%s%mdl)
+
+  settle_nimhd=r%hydro.and..not.r%static_gas.and.r%nimhd_composite.and. &
+       & r%nimhd_solver=='implicit'.and.r%nimhd_split=='strang'.and. &
+       & .not.r%induction.and..not.r%isothermal
 
   if(m%noct_tot(ilevel)==0)return
   if(r%verbose)write(*,'(" Entering amr_step",i1," for level",i2)')icount,ilevel
@@ -283,6 +287,18 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   !---------------------------
   ! Recursive call to amr_step
   !---------------------------
+  ! Settle the heating CFL before the finest-level update_time advances
+  ! the clock (and the turbulent driving) with the accepted common step.
+  if(settle_nimhd)then
+     if(ilevel==r%nlevelmax.or.m%noct_tot(min(ilevel+1,r%nlevelmax))==0)then
+        call m_timer('hydro - non-ideal mhd','start')
+        call r_nimhd_fine(pst,(/ilevel,1/),2)
+        do ilev=r%levelmin,ilevel
+           call r_set_unew(pst,ilev,1)
+        end do
+     endif
+  endif
+
   if(ilevel<r%nlevelmax)then
      call m_timer('recursive call','start')
      if(m%noct_tot(ilevel+1)>0)then
@@ -318,7 +334,7 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   ! First half of the Strang-split non-ideal MHD diffusion of all
   ! levels, at the finest level once the common time step is known
   !-----------------------------------------------------------------
-  if(r%hydro.and.r%nimhd_composite.and.r%nimhd_split=='strang'.and..not.r%static_gas)then
+  if(r%hydro.and.r%nimhd_composite.and.r%nimhd_split=='strang'.and..not.r%static_gas.and..not.settle_nimhd)then
      if(ilevel==r%nlevelmax.or.m%noct_tot(min(ilevel+1,r%nlevelmax))==0)then
         call m_timer('hydro - non-ideal mhd','start')
         call r_nimhd_fine(pst,(/ilevel,1/),2)

@@ -387,6 +387,54 @@ contains
 
   end subroutine gpu_set_unew
 
+  ! Snapshot or restore every native variable, including cache octs, for a
+  ! settled implicit Strang half. The solver leaves unew and bnew untouched.
+  subroutine gpu_nimhd_copy(sim, lf, restore)
+    use ramses_commons, only: ramses_t
+    type(ramses_t), intent(inout) :: sim
+    integer, intent(in) :: lf
+    logical, intent(in) :: restore
+    integer :: l, k, head_idx, num_octs, num_blocks
+
+    do l = sim%r%levelmin, lf
+       do k = 1, 2
+          if (k == 1) then
+             head_idx = sim%m%head(l)
+             num_octs = sim%m%noct(l)
+          else
+             head_idx = sim%m%ngridmax + sim%m%head_cache(l)
+             num_octs = sim%m%noct_cache(l)
+          endif
+          if (num_octs <= 0) cycle
+          num_blocks = (num_octs*twotondim + 255)/256
+          if (restore) then
+             call nimhd_copy_kernel<<<num_blocks,256>>>(unew, uold, bnew, bold, head_idx, num_octs)
+          else
+             call nimhd_copy_kernel<<<num_blocks,256>>>(uold, unew, bold, bnew, head_idx, num_octs)
+          endif
+       end do
+    end do
+    call GPU_Error_Check(__FILE__, __LINE__)
+  end subroutine gpu_nimhd_copy
+
+  attributes(global) subroutine nimhd_copy_kernel(usrc, udst, bsrc, bdst, head_idx, num_octs)
+    real(kind=dp), device :: usrc(twotondim,nvar,*), udst(twotondim,nvar,*)
+    real(kind=dp), device :: bsrc(twotondim,6,*), bdst(twotondim,6,*)
+    integer, value :: head_idx, num_octs
+    integer :: i, ind, ioct, ivar
+
+    i = (blockIdx%x - 1)*blockDim%x + threadIdx%x - 1
+    if (i >= num_octs*twotondim) return
+    ind = mod(i,twotondim) + 1
+    ioct = head_idx + i/twotondim
+    do ivar = 1, nvar
+       udst(ind,ivar,ioct) = usrc(ind,ivar,ioct)
+    end do
+    do ivar = 1, 6
+       bdst(ind,ivar,ioct) = bsrc(ind,ivar,ioct)
+    end do
+  end subroutine nimhd_copy_kernel
+
   !> @brief
   !> Synchronization (corrector) step of old hydro variables (uold) due to gravity
   !>
@@ -1017,7 +1065,7 @@ contains
        end do
        call refresh_ghosts(bold)
        do l = lf - 1, lmin, -1
-          call gpu_upload(sim, l)
+          call gpu_upload(sim, l, internal_energy=.false.)
        end do
        call GPU_Error_Check(__FILE__, __LINE__)
        call nvtxEndRange()
@@ -1144,19 +1192,21 @@ contains
   !> @param[in] sim : The simulation object
   !> @param[in] ilevel : The refinement level to update
   !>
-  subroutine gpu_upload(sim, ilevel)
+  subroutine gpu_upload(sim, ilevel, internal_energy)
     use nvtx
     use hydro_device, only: upload_kernel
     use ramses_commons, only: ramses_t
     type(ramses_t), intent(inout)::sim
     integer, intent(in)::ilevel
+    logical, optional, intent(in) :: internal_energy
     !
     integer(kind=4) :: head_idx, num_octs
     integer(kind=4) :: num_threads, num_blocks
     real(kind=dp) :: gamma, smallr, smallc2
-    logical :: internal_energy
+    logical :: use_internal_energy
 
-    internal_energy = (sim%r%interpol_var == 1)
+    use_internal_energy = (sim%r%interpol_var == 1)
+    if (present(internal_energy)) use_internal_energy = internal_energy
     gamma   = sim%r%gamma
     smallr  = sim%r%smallr
     smallc2 = sim%r%smallc**2
@@ -1169,7 +1219,7 @@ contains
     if (num_octs > 0) then
        call nvtxStartRange("GPU upload", color=0)!green
        call upload_kernel<<<num_blocks, num_threads>>>(grid, father, uold, bold, head_idx, num_octs, &
-            & internal_energy, gamma, smallr, smallc2)
+            & use_internal_energy, gamma, smallr, smallc2)
        call nvtxEndRange()
     endif
 

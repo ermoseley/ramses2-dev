@@ -232,6 +232,28 @@ Otherwise the pre-step `bold` and `uold` are restored and the interval is
 split in two and then four equal steps (`nimhd_maxsplit=2` levels). Exhaustion
 aborts the run; no partial step is accepted.
 
+For an implicit Strang first half with evolving, non-isothermal gas (neither
+`static_gas` nor `induction`), the finest-level hydro timestep is first
+broadcast as the common `dtnew` on all levels. Previous-step `dtold` values
+are retained, as in `m_newdt_fine`. The first half is settled before
+`m_update_time` advances the clock and updates the turbulent driving.
+This also places it before the RT/CR update hooks inside `m_update_time`.
+After diffusion, `gpu_cmpdt_2` queries the hydro CFL timestep on every
+populated level; only reduction scratch is changed, with no accumulation
+of the returned mass/energy diagnostics into global counters. If the common
+timestep exceeds the minimum query by more than a relative `1d-12`, all
+native `uold`/`bold`, including cache octs, are restored from `unew`/`bnew`,
+the reduced common timestep is broadcast, and the first half is repeated.
+Three first-half attempts are allowed in total; exhaustion restores the
+pre-diffusion state and aborts. A reduction prints
+`implicit: heating reduced the common dt from X to Y`.
+The existing MDL `r_nimhd_fine` wrapper owns this single-rank retry.
+Its initial snapshot copies all native variables and cache octs explicitly:
+the ordinary GPU `set_unew` copies only real octs and skips extra energy
+variables. The implicit solver does not modify these backup arrays.
+This check adds no namelist parameter; explicit/STS, Godunov splitting,
+static-gas, induction and isothermal paths retain their existing placement.
+
 ## 10. Native transfer
 
 - Gather: `b_f = A_f * bold(owner slot)`. Every other native copy (the
@@ -242,6 +264,10 @@ aborts the run; no partial step is accepted.
   refined cells are then restricted from the finest level down
   (`nimhd_restrict_b_kernel`) and the ghost octs are refreshed from the
   coarser level, as in the composite STS path; `uold` is then uploaded.
+  This implicit upload averages total energy (`internal_energy=.false.`),
+  regardless of `interpol_var`, so restriction preserves the conservative
+  leaf energy update. Other uploads retain their existing `interpol_var`
+  behaviour.
 
 ## 11. Parameters
 
@@ -250,6 +276,14 @@ aborts the run; no partial step is accepted.
 - `nimhd_maxiter` (default `1000`): maximum COCG / inner CG / Picard iterations.
 - `nimhd_check` (default `.false.`): run the identity and native-copy checks at
   every topology build and report the residuals.
+
+The first topology build reports the retained topology+workspace device
+memory and remaining free memory in MiB; `verbose` repeats the receipt on
+each rebuild. `cudaMemGetInfo` brackets the build and workspace setup at
+synchronized boundaries. Net allocation changes are accumulated across
+rebuilds to include reused allocations. The receipt measures CUDA free-memory
+changes, rather than an exact sum of array sizes or a peak during the solve.
+Check-only storage allocated afterwards and transient solve vectors are excluded.
 
 ## 12. Code organisation (binding interfaces)
 

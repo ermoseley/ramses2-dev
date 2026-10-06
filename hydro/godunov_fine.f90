@@ -1,6 +1,6 @@
 module godunov_fine_module
 #ifdef _CUDA
-  use gpu_runner, only: gpu_godunov, gpu_set_unew, gpu_set_uold, gpu_nimhd_fine
+  use gpu_runner, only: gpu_godunov, gpu_set_unew, gpu_set_uold, gpu_nimhd_fine, gpu_nimhd_copy, gpu_cmpdt_2
 #endif
 #ifdef _METAL
   use metal_runner, only: metal_godunov, metal_set_unew, metal_set_uold
@@ -245,11 +245,73 @@ recursive subroutine r_nimhd_fine(pst,input_array,input_size)
      call mdl_get_reply(pst%s%mdl,rID,0)
   else
 #ifdef _CUDA
-     call gpu_nimhd_fine(pst%s, input_array(1), input_array(2))
+     if(input_array(2)==1.and.pst%s%r%nimhd_solver=='implicit'.and. &
+          & pst%s%r%nimhd_split=='strang'.and.pst%s%r%nimhd_composite.and. &
+          & pst%s%r%hydro.and..not.pst%s%r%static_gas.and. &
+          & .not.pst%s%r%induction.and..not.pst%s%r%isothermal)then
+        call nimhd_first_half(pst,input_array(1))
+     else
+        call gpu_nimhd_fine(pst%s, input_array(1), input_array(2))
+     endif
 #endif
   endif
 
 end subroutine r_nimhd_fine
+#ifdef _CUDA
+!###########################################################
+subroutine nimhd_first_half(pst,lf)
+  use ramses_commons, only: pst_t
+  use newdt_fine_module, only: r_broadcast_dt,in_broadcast_dt_t
+  implicit none
+  type(pst_t)::pst
+  integer::lf
+  integer::l,attempt
+  real(kind=8)::dt_common,dt_cfl,dt,mass,ekin,eint,emag
+  type(in_broadcast_dt_t)::in_broadcast_dt
+
+  associate(r=>pst%s%r,g=>pst%s%g,m=>pst%s%m)
+  if(g%ncpu/=1)error stop 'implicit: settled Strang half requires one rank'
+  ! The finest level has chosen the common step; recursion has not yet
+  ! propagated it back to the coarser levels. Retain the previous dtold.
+  dt_common=g%dtnew(lf)
+  call broadcast_common_dt()
+  ! set_unew did not copy cache octs or extra energy variables on the GPU.
+  call gpu_nimhd_copy(pst%s,lf,.false.)
+  do attempt=1,3
+     call gpu_nimhd_fine(pst%s,lf,1)
+     dt_cfl=huge(1d0)
+     do l=r%levelmin,lf
+        if(m%noct(l)<=0)cycle
+        ! Same query as r_courant_fine: only reduction scratch is written.
+        call gpu_cmpdt_2(pst%s,l,mass,ekin,eint,emag,dt)
+        dt_cfl=min(dt_cfl,dt)
+     end do
+     ! dt_cfl includes courant_factor; the accepted step only has to stay within the
+     ! stability limit courant number 1 after the heating of this half.
+     if(g%dtnew(r%levelmin)<=dt_cfl/r%courant_factor)exit
+     call gpu_nimhd_copy(pst%s,lf,.true.)
+     if(attempt==3)error stop 'implicit: heating CFL did not settle after 3 first-half attempts'
+     if(g%myid==1)write(*,'(A,1PE23.15,A,1PE23.15)') &
+          & 'implicit: heating reduced the common dt from ',dt_common,' to ',dt_cfl
+     dt_common=dt_cfl
+     call broadcast_common_dt()
+  end do
+  end associate
+
+contains
+
+  subroutine broadcast_common_dt()
+    integer::ilev
+    do ilev=pst%s%r%levelmin,pst%s%r%nlevelmax
+       in_broadcast_dt%ilevel=ilev
+       in_broadcast_dt%dtnew=dt_common
+       in_broadcast_dt%dtold=pst%s%g%dtold(ilev)
+       call r_broadcast_dt(pst,in_broadcast_dt,storage_size(in_broadcast_dt)/32)
+    end do
+  end subroutine broadcast_common_dt
+
+end subroutine nimhd_first_half
+#endif
 !###########################################################
 !###########################################################
 !###########################################################

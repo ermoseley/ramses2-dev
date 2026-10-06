@@ -1,6 +1,7 @@
 ! Composite implicit non-ideal MHD: doc/implicit_diffusion.md, sections 6-12.
 module implicit_solver
   use cudafor
+  use, intrinsic :: iso_c_binding, only: c_size_t
   use amr_parameters, only: dp, twotondim
   use hydro_parameters, only: nvar
   use oct_commons, only: oct
@@ -18,6 +19,8 @@ module implicit_solver
   real(kind=8) :: rtol, tol_in, eta_uniform
   real(kind=8) :: time_coeff, time_solve, time_commit
   logical :: uniform_ohmic, first_call=.true.
+  logical :: memory_reported=.false.
+  integer(kind=c_size_t) :: memory_used=0
   real(kind=8), device, allocatable :: diag(:), cg_r(:), cg_z(:), cg_p(:), cg_ap(:), cg_true(:)
   real(kind=8), device, allocatable :: eq(:), ej(:), ee(:), ek(:)
   real(kind=8), device, allocatable :: diag_f(:), diag_g(:)
@@ -744,6 +747,7 @@ contains
     real(kind=8) :: endpoint,esum,minratio,maxendpoint,total_esum,minpressure,elapsed,avg_inner
     real(kind=8) :: tstart,t0,time_build,time_check
     integer :: info,split,sub,nsub,bad,i
+    integer(kind=c_size_t) :: memory_before,memory_after,memory_total
     logical :: ok,rejected
     tstart=wall_time()
     time_build=0d0; time_check=0d0; time_coeff=0d0; time_solve=0d0; time_commit=0d0
@@ -752,6 +756,8 @@ contains
     inner_max=0; inner_calls=0; inner_total=0; cocg_iters=0; picard_iters=0; pre_nonpositive=0
     if(.not.imp_valid.or.lmin/=cached_lmin.or.lf/=cached_lf.or.ngridmax/=cached_ngridmax) then
        t0=wall_time()
+       info=cudaMemGetInfo(memory_before,memory_total)
+       if(info/=0) error stop 'implicit: cudaMemGetInfo failed before topology build'
        call imp_build(grid,hash_key,hash_val,hash_size,ckey_max,key_off,box_ckey_min,box_ckey_max, &
             & head,noct,ngridmax,lmin,lf,boxlen,info)
        if(info/=0) error stop 'implicit: topology build failed (condition P)'
@@ -767,6 +773,16 @@ contains
           if(bad/=0) error stop 'implicit: invalid M_E/G diagonal'
        endif
        time_build=wall_time()-t0
+       info=cudaMemGetInfo(memory_after,memory_total)
+       if(info/=0) error stop 'implicit: cudaMemGetInfo failed after topology build'
+       ! Retained allocations can be reused or resized on rebuild. Accumulate
+       ! their net change so a rebuild reports the full retained footprint.
+       memory_used=memory_used+memory_before-memory_after
+       if((.not.memory_reported.or.verbose).and.myid==1) then
+          write(*,'(A,F12.3,A,F12.3,A)')'implicit: topology+workspace device memory=', &
+               & real(memory_used,8)/1048576d0,' MiB, free=',real(memory_after,8)/1048576d0,' MiB'
+       endif
+       memory_reported=.true.
        cached_lmin=lmin; cached_lf=lf; cached_ngridmax=ngridmax; imp_valid=.true.
        if(nimhd_check) then
           t0=wall_time()
