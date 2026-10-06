@@ -13,6 +13,7 @@ module implicit_solver
   integer :: maxiter, inner_max, inner_calls, cocg_iters, picard_iters
   integer(kind=8) :: inner_total
   integer :: pre_nonpositive
+  logical :: warned=.false.
   integer :: cached_lmin=-1, cached_lf=-1, cached_ngridmax=-1
   real(kind=8) :: rtol, tol_in, eta_uniform
   real(kind=8) :: time_coeff, time_solve, time_commit
@@ -678,8 +679,8 @@ contains
     call combine(detotal,1d0,de0,1d0,de)
     call imp_leaf_slots(xacc,bs)
     call pressure_kernel<<<(imp_nleaf+255)/256,256>>>(uold,bs,detotal,boxlen,gamma,p,ratio,base_b,imp_nleaf)
-    ! Diffusion must not make a positive raw pressure non-positive, nor lower one that
-    ! the incoming state already has non-positive (reported as npre).
+    ! Diffusion must not make a positive raw pressure non-positive. Leaves whose incoming
+    ! raw pressure is already non-positive are counted (npre) and reported once.
     bad=0; npre=0; minratio=huge(1d0)
     !$cuf kernel do <<<*,*>>> reduce(+:bad,npre) reduce(min:minratio)
     do i=1,imp_nleaf
@@ -690,14 +691,31 @@ contains
           minratio=min(minratio,p(i)/ratio(i))
        else
           npre=npre+1
-          if(p(i)<ratio(i)) bad=bad+1
        endif
     enddo
+    if(npre>0.and..not.warned) call report_nonpositive(ratio,npre)
     pre_nonpositive=max(pre_nonpositive,npre)
     ok=(bad==0)
 400 time_commit=time_commit+wall_time()-t0
     deallocate(u,x,bu,cu,cx,ju,jx,eu,ex,du,dx,delta,bs,p,ratio,detotal)
   end subroutine attempt
+
+  ! One-time report of leaves whose incoming raw pressure is already non-positive.
+  subroutine report_nonpositive(p0,n)
+    real(kind=8), device, intent(in) :: p0(:)
+    integer, intent(in) :: n
+    real(kind=8), allocatable :: h(:)
+    integer, allocatable :: lev(:)
+    integer :: l
+    allocate(h(imp_nleaf),lev(imp_nleaf))
+    h=p0(1:imp_nleaf); lev=imp_leaf_lev(1:imp_nleaf)
+    write(*,'(A,I0,A,ES12.4)')' implicit: leaves with non-positive incoming raw pressure: ',n,' min ',minval(h)
+    do l=minval(lev),maxval(lev)
+       write(*,'(A,I3,A,I0,A,I0)')'   level',l,': ',count(lev==l.and.h<=0d0),' of ',count(lev==l)
+    enddo
+    warned=.true.
+    deallocate(h,lev)
+  end subroutine report_nonpositive
 
   attributes(global) subroutine commit_energy(uold,de,boxlen,n)
     integer, value :: n

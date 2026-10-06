@@ -6,6 +6,7 @@ module implicit_ops
   use refine_device, only: hash_get
   use implicit_tables, only: lift_f, lift_e
   use cub_inclusive_scan_mod, only: cub_inclusive_sum
+  use cub_module, only: radix_sort
   use iso_c_binding, only: c_loc
   implicit none
   private
@@ -34,7 +35,9 @@ module implicit_ops
   integer(kind=4), device, allocatable :: leaf_id(:,:), oct_id(:), contributing(:), leaf_t(:), leaf_pos(:,:)
   integer(kind=4), device, allocatable :: fc(:), ec(:), fp(:), ep(:), fid(:,:), eid(:,:)
   integer(kind=4), device, allocatable :: face_rec(:,:), edge_rec(:,:)
-  integer(kind=4), device, allocatable :: cr(:), ci(:), cs(:), ctr(:), cti(:), cts(:), work(:)
+  integer(kind=4), device, allocatable :: cr(:), ci(:), cs(:), ctr(:), cts(:), work(:)
+  integer(kind=4), device, allocatable, target :: cti(:), transpose_val(:)
+  integer(kind=8), device, allocatable, target :: transpose_key(:), transpose_sorted_key(:)
   integer(kind=4), device, allocatable :: rfr(:), rfi(:), rer(:), rei(:)
   integer(kind=4), device, allocatable :: slots(:,:,:), slot_n(:,:), tr_id(:), tr_leaf(:)
   integer(kind=4), device, allocatable :: sf(:,:), se(:,:), bf(:,:), be(:,:)
@@ -42,7 +45,9 @@ module implicit_ops
   integer(kind=4), device :: totals(4), bad(2)
   integer(kind=4), device :: fa(36), fpos(3,36), ea(54), epos(3,54)
   integer(kind=4), device :: fb(24), eb(48), cref(36,54), gref(54,27)
-  real(kind=8), device :: rf(36,36,8), re(54,54,8), mfref(36,36), meref(54,54)
+  real(kind=8), device :: mfref(36,36), meref(54,54)
+  real(kind=8), device :: restrict0(0:2,0:2,0:1), restrict1(0:1,0:1,0:1)
+  real(kind=8), device :: basis(0:2,5,0:1) ! Nodal (0) and interval (1) values.
   real(kind=8), device :: lf_table(36,24), le_table(54,48)
   real(kind=8), device :: gn(5), gw(5), bn(3,5), ba(2,5), gn3(3), gw3(3)
   real(kind=8), device, allocatable :: check_f(:,:), check_e(:,:), check_l(:,:)
@@ -74,9 +79,9 @@ contains
   ! Reference records are enumerated explicitly in the contract's local order.
   subroutine init_tables()
     integer :: af(36),pf(3,36),ae(54),pe(3,54),bfi(24),bei(48)
-    integer :: cc(36,54),gg(54,27),a,b,c,i,j,k,d,f,e,r,t,v,q(3),p(3),bit(3)
+    integer :: cc(36,54),gg(54,27),a,b,c,i,j,k,d,f,e,r,t,v,q(3),p(3)
     real(kind=8) :: m0(0:2,0:2),m1(0:1,0:1),fm(36,36),em(54,54)
-    real(kind=8) :: fr(36,36,8),er(54,54,8),lo(3),z,val
+    real(kind=8) :: rn(0:2,0:2,0:1),ra(0:1,0:1,0:1),qb(0:2,5,0:1),z,val
     real(kind=8) :: nodes(5),weights(5),nn(3,5),aa(2,5)
     if (tables_ready) return
     f=0; e=0
@@ -130,7 +135,7 @@ contains
     enddo
     m0=reshape((/4d0,2d0,-1d0,2d0,16d0,2d0,-1d0,2d0,4d0/),(/3,3/))/15d0
     m1=reshape((/7d0,-1d0,-1d0,7d0/),(/2,2/))/6d0
-    fm=0d0; em=0d0; fr=0d0; er=0d0
+    fm=0d0; em=0d0
     do f=1,36
        a=af(f)
        do r=1,36
@@ -161,36 +166,17 @@ contains
           em(e,r)=val
        enddo
     enddo
-    do t=1,8
-       bit=(/ibits(t-1,0,1),ibits(t-1,1,1),ibits(t-1,2,1)/)
-       do f=1,36
-          a=af(f); lo=real(bit,8)-1d0+real(pf(:,f),8)/2d0
-          do r=1,36
-             if (af(r)/=a) cycle
-             val=1d0
-             do d=1,3
-                if (d==a) then
-                   val=val*nodal(pf(d,r),lo(d))
-                else
-                   val=val*integral(pf(d,r),lo(d),lo(d)+0.5d0)
-                endif
-             enddo
-             fr(f,r,t)=val
+    do t=0,1
+       do i=0,2
+          z=real(t,8)-1d0+real(i,8)/2d0
+          do j=0,2
+             rn(i,j,t)=nodal(j,z)
           enddo
        enddo
-       do e=1,54
-          a=ae(e); lo=real(bit,8)-1d0+real(pe(:,e),8)/2d0
-          do r=1,54
-             if (ae(r)/=a) cycle
-             val=1d0
-             do d=1,3
-                if (d==a) then
-                   val=val*integral(pe(d,r),lo(d),lo(d)+0.5d0)
-                else
-                   val=val*nodal(pe(d,r),lo(d))
-                endif
-             enddo
-             er(e,r,t)=val
+       do i=0,1
+          z=real(t,8)-1d0+real(i,8)/2d0
+          do j=0,1
+             ra(i,j,t)=integral(j,z,z+0.5d0)
           enddo
        enddo
     enddo
@@ -207,7 +193,9 @@ contains
        aa(:,i)=(/0.5d0-z,0.5d0+z/)
     enddo
     fa=af; fpos=pf; ea=ae; epos=pe; fb=bfi; eb=bei
-    cref=cc; gref=gg; mfref=fm; meref=em; rf=fr; re=er
+    cref=cc; gref=gg; mfref=fm; meref=em
+    restrict0=rn; restrict1=ra
+    qb(:,:,0)=nn; qb(:,:,1)=0d0; qb(0:1,:,1)=aa; basis=qb
     mass0=m0; mass1=m1
     gn=nodes; gw=weights; bn=nn; ba=aa
     gn3=(/-sqrt(3d0/5d0),0d0,sqrt(3d0/5d0)/); gw3=(/5d0/9d0,8d0/9d0,5d0/9d0/)
@@ -556,17 +544,26 @@ contains
     if (.not.fill) work(f)=nn
   end subroutine
 
-  ! A serial fill preserves face/side order within every transpose row.
+  ! Input positions follow face/side order. CUB's stable edge sort preserves
+  ! that order within every row, including duplicate periodic incidences.
+  attributes(global) subroutine transpose_pairs_kernel(n)
+    integer, value :: n
+    integer :: f,j
+    f=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (f>n) return
+    do j=cr(f),cr(f+1)-1
+       transpose_key(j)=int(ci(j),8); transpose_val(j)=cs(j)*f
+    enddo
+  end subroutine
+
+  ! Sorted position is ctr(edge)+rank; the signed face carries its incidence.
   attributes(global) subroutine transpose_fill_kernel(n)
     integer, value :: n
-    integer :: f,j,e,k
-    if (blockIdx%x/=1.or.threadIdx%x/=1) return
-    do f=1,n
-       do j=cr(f),cr(f+1)-1
-          e=ci(j); k=ctr(e)+work(e); work(e)=work(e)+1
-          cti(k)=f; cts(k)=cs(j)
-       enddo
-    enddo
+    integer :: k,f
+    k=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (k>n) return
+    f=cti(k); cti(k)=abs(f); cts(k)=1
+    if (f<0) cts(k)=-1
   end subroutine
 
   attributes(global) subroutine leaf_topology_kernel(grid,hk,hv,hs,n)
@@ -912,7 +909,18 @@ contains
     work=0
     call incidence_kernel<<<(imp_nface+255)/256,256>>>(grid,hash_key,hash_val,hash_size,imp_nface,.true.)
     call imp_scan(imp_nedge,work,ctr,totals,1)
-    work=0; call transpose_fill_kernel<<<1,1>>>(imp_nface)
+    if (allocated(transpose_key)) then
+       if (size(transpose_key)<max(1,ncz)) deallocate(transpose_key,transpose_sorted_key,transpose_val)
+    endif
+    if (.not.allocated(transpose_key)) then
+       allocate(transpose_key(max(1,ncz)),transpose_sorted_key(max(1,ncz)),transpose_val(max(1,ncz)))
+    endif
+    if (ncz>0) then
+       call transpose_pairs_kernel<<<(imp_nface+255)/256,256>>>(imp_nface)
+       call radix_sort(c_loc(transpose_key(1)),c_loc(transpose_sorted_key(1)), &
+            c_loc(transpose_val(1)),c_loc(cti(1)),1,ncz,0,32)
+       call transpose_fill_kernel<<<(ncz+255)/256,256>>>(ncz)
+    endif
     if (allocated(slots)) then
        if (size(slots,1)/=4.or.size(slots,2)/=6.or.size(slots,3)<max(1,imp_nleaf)) deallocate(slots)
     endif
@@ -996,6 +1004,171 @@ contains
     endif
   end function
 
+  ! mode: 0 reference mass, 1 child restriction, 2 its transpose.
+  attributes(device) subroutine tensor_f_d(u,v,bit,mode)
+    real(kind=8) :: u(36),v(36)
+    integer, value :: bit,mode
+    real(kind=8) :: x(0:2,0:2),y(0:1,0:1),z(0:1,0:1)
+    real(kind=8) :: w(0:2,0:1,0:1),s(0:2,0:1,0:1),val
+    integer :: a,b,c,i,j,k,q,r,half
+    do a=1,3
+       b=mod(a,3)+1; c=mod(a+1,3)+1
+       half=ibits(bit-1,a-1,1)
+       do i=0,2
+          do q=0,2
+             if (mode==0) then
+                x(i,q)=mass0(i,q)
+             else if (mode==1) then
+                x(i,q)=restrict0(i,q,half)
+             else
+                x(i,q)=restrict0(q,i,half)
+             endif
+          enddo
+       enddo
+       half=ibits(bit-1,b-1,1)
+       do i=0,1
+          do q=0,1
+             if (mode==0) then
+                y(i,q)=mass1(i,q)
+             else if (mode==1) then
+                y(i,q)=restrict1(i,q,half)
+             else
+                y(i,q)=restrict1(q,i,half)
+             endif
+          enddo
+       enddo
+       half=ibits(bit-1,c-1,1)
+       do i=0,1
+          do q=0,1
+             if (mode==0) then
+                z(i,q)=mass1(i,q)
+             else if (mode==1) then
+                z(i,q)=restrict1(i,q,half)
+             else
+                z(i,q)=restrict1(q,i,half)
+             endif
+          enddo
+       enddo
+       do i=0,2
+          do j=0,1
+             do k=0,1
+                val=0d0
+                do q=0,2
+                   r=12*(a-1)+4*q+2*j+k+1
+                   val=val+x(i,q)*u(r)
+                enddo
+                w(i,j,k)=val
+             enddo
+          enddo
+       enddo
+       do i=0,2
+          do j=0,1
+             do k=0,1
+                val=0d0
+                do q=0,1
+                   val=val+y(j,q)*w(i,q,k)
+                enddo
+                s(i,j,k)=val
+             enddo
+          enddo
+       enddo
+       do i=0,2
+          do j=0,1
+             do k=0,1
+                val=0d0
+                do q=0,1
+                   val=val+z(k,q)*s(i,j,q)
+                enddo
+                r=12*(a-1)+4*i+2*j+k+1; v(r)=val
+             enddo
+          enddo
+       enddo
+    enddo
+  end subroutine
+
+  ! mode: 0 reference mass, 1 child restriction, 2 its transpose.
+  attributes(device) subroutine tensor_e_d(u,v,bit,mode)
+    real(kind=8) :: u(54),v(54)
+    integer, value :: bit,mode
+    real(kind=8) :: x(0:1,0:1),y(0:2,0:2),z(0:2,0:2)
+    real(kind=8) :: w(0:1,0:2,0:2),s(0:1,0:2,0:2),val
+    integer :: a,b,c,i,j,k,q,r,half
+    do a=1,3
+       b=1; if (a==1) b=2
+       c=3; if (a==3) c=2
+       half=ibits(bit-1,a-1,1)
+       do i=0,1
+          do q=0,1
+             if (mode==0) then
+                x(i,q)=mass1(i,q)
+             else if (mode==1) then
+                x(i,q)=restrict1(i,q,half)
+             else
+                x(i,q)=restrict1(q,i,half)
+             endif
+          enddo
+       enddo
+       half=ibits(bit-1,b-1,1)
+       do i=0,2
+          do q=0,2
+             if (mode==0) then
+                y(i,q)=mass0(i,q)
+             else if (mode==1) then
+                y(i,q)=restrict0(i,q,half)
+             else
+                y(i,q)=restrict0(q,i,half)
+             endif
+          enddo
+       enddo
+       half=ibits(bit-1,c-1,1)
+       do i=0,2
+          do q=0,2
+             if (mode==0) then
+                z(i,q)=mass0(i,q)
+             else if (mode==1) then
+                z(i,q)=restrict0(i,q,half)
+             else
+                z(i,q)=restrict0(q,i,half)
+             endif
+          enddo
+       enddo
+       do i=0,1
+          do j=0,2
+             do k=0,2
+                val=0d0
+                do q=0,1
+                   r=18*(a-1)+9*q+3*j+k+1
+                   val=val+x(i,q)*u(r)
+                enddo
+                w(i,j,k)=val
+             enddo
+          enddo
+       enddo
+       do i=0,1
+          do j=0,2
+             do k=0,2
+                val=0d0
+                do q=0,2
+                   val=val+y(j,q)*w(i,q,k)
+                enddo
+                s(i,j,k)=val
+             enddo
+          enddo
+       enddo
+       do i=0,1
+          do j=0,2
+             do k=0,2
+                val=0d0
+                do q=0,2
+                   val=val+z(k,q)*s(i,j,q)
+                enddo
+                r=18*(a-1)+9*i+3*j+k+1; v(r)=val
+             enddo
+          enddo
+       enddo
+    enddo
+  end subroutine
+
   attributes(device) subroutine reconstruct_f(id,x,u,unit)
     integer, value :: id,unit
     real(kind=8), device :: x(*)
@@ -1008,12 +1181,7 @@ contains
           v(r)=v(r)+entry(x,rfi(p),unit)
        enddo
     enddo
-    do r=1,36
-       u(r)=0d0
-       do j=1,36
-          u(r)=u(r)+rf(r,j,bit)*v(j)
-       enddo
-    enddo
+    call tensor_f_d(v,u,bit,1)
     t=tr_id(id)
     if (t==0) return
     nu=0d0
@@ -1131,12 +1299,7 @@ contains
           v(r)=v(r)+entry(x,rei(p),unit)
        enddo
     enddo
-    do r=1,54
-       u(r)=0d0
-       do j=1,54
-          u(r)=u(r)+re(r,j,bit)*v(j)
-       enddo
-    enddo
+    call tensor_e_d(v,u,bit,1)
     t=tr_id(id)
     if (t==0) return
     d=0d0
@@ -1169,11 +1332,8 @@ contains
        enddo
     endif
     t=leaf_t(id); bit=imp_leaf_cell(id)
+    call tensor_f_d(q,v,bit,2)
     do r=1,36
-       v(r)=0d0
-       do j=1,36
-          v(r)=v(r)+rf(j,r,bit)*q(j)
-       enddo
        row=36*(t-1)+r
        do p=rfr(row),rfr(row+1)-1
           tmp=atomicadd(y(rfi(p)),v(r))
@@ -1201,11 +1361,8 @@ contains
        enddo
     endif
     t=leaf_t(id); bit=imp_leaf_cell(id)
+    call tensor_e_d(q,v,bit,2)
     do r=1,54
-       v(r)=0d0
-       do j=1,54
-          v(r)=v(r)+re(j,r,bit)*q(j)
-       enddo
        row=54*(t-1)+r
        do p=rer(row),rer(row+1)-1
           tmp=atomicadd(y(rei(p)),v(r))
@@ -1345,77 +1502,157 @@ contains
   attributes(device) subroutine mass_f_d(id,u,v)
     integer, value :: id
     real(kind=8) :: u(36),v(36),scale
-    integer :: i,j
+    integer :: i
     scale=2d0/width(id)
+    call tensor_f_d(u,v,1,0)
     do i=1,36
-       v(i)=0d0
-       do j=1,36
-          v(i)=v(i)+mfref(i,j)*u(j)*scale
-       enddo
+       v(i)=scale*v(i)
     enddo
   end subroutine
 
   attributes(device) subroutine mass_e_d(id,u,v)
     integer, value :: id
     real(kind=8) :: u(54),v(54),scale
-    integer :: i,j
+    integer :: i
     scale=width(id)/2d0
+    call tensor_e_d(u,v,1,0)
     do i=1,54
-       v(i)=0d0
-       do j=1,54
-          v(i)=v(i)+meref(i,j)*u(j)*scale
+       v(i)=scale*v(i)
+    enddo
+  end subroutine
+
+  ! Evaluate one Cartesian x Gauss slab. Keeping only 25 points per component
+  ! bounds thread-local storage; every contraction uses the precomputed 1D basis.
+  attributes(device) subroutine quad_eval_d(u,face,qi,out)
+    real(kind=8) :: u(*),out(3,5,5)
+    logical, value :: face
+    integer, value :: qi
+    real(kind=8) :: coeff(0:2,0:2,0:2),s(0:2,0:2),t(5,0:2),val
+    integer :: a,d,n(3),kind(3),r,first,last,p(3),i,j,k,q
+    do a=1,3
+       do d=1,3
+          n(d)=3; kind(d)=0
+          if ((face.and.d/=a).or.(.not.face.and.d==a)) then
+             n(d)=2; kind(d)=1
+          endif
+       enddo
+       if (face) then
+          first=12*(a-1)+1; last=12*a
+       else
+          first=18*(a-1)+1; last=18*a
+       endif
+       do r=first,last
+          if (face) then
+             p=fpos(:,r)
+          else
+             p=epos(:,r)
+          endif
+          coeff(p(1),p(2),p(3))=u(r)
+       enddo
+       do j=0,n(2)-1
+          do k=0,n(3)-1
+             val=0d0
+             do i=0,n(1)-1
+                val=val+basis(i,qi,kind(1))*coeff(i,j,k)
+             enddo
+             s(j,k)=val
+          enddo
+       enddo
+       do j=1,5
+          do k=0,n(3)-1
+             val=0d0
+             do q=0,n(2)-1
+                val=val+basis(q,j,kind(2))*s(q,k)
+             enddo
+             t(j,k)=val
+          enddo
+       enddo
+       do j=1,5
+          do k=1,5
+             val=0d0
+             do q=0,n(3)-1
+                val=val+basis(q,k,kind(3))*t(j,q)
+             enddo
+             out(a,j,k)=val
+          enddo
        enddo
     enddo
   end subroutine
 
-  ! Five-point mobility; basis coefficients carry the physical h scalings.
+  ! Reverse z,y,x contractions accumulate a weighted slab into edge coefficients.
+  attributes(device) subroutine quad_project_e_d(qi,u,v)
+    integer, value :: qi
+    real(kind=8) :: u(3,5,5),v(54),t(5,0:2),s(0:2,0:2),val
+    integer :: a,d,n(3),kind(3),j,k,q,r,p(3)
+    do a=1,3
+       do d=1,3
+          n(d)=3; kind(d)=0
+          if (d==a) then
+             n(d)=2; kind(d)=1
+          endif
+       enddo
+       do j=1,5
+          do k=0,n(3)-1
+             val=0d0
+             do q=1,5
+                val=val+basis(k,q,kind(3))*u(a,j,q)
+             enddo
+             t(j,k)=val
+          enddo
+       enddo
+       do j=0,n(2)-1
+          do k=0,n(3)-1
+             val=0d0
+             do q=1,5
+                val=val+basis(j,q,kind(2))*t(q,k)
+             enddo
+             s(j,k)=val
+          enddo
+       enddo
+       do r=18*(a-1)+1,18*a
+          p=epos(:,r)
+          v(r)=v(r)+basis(p(1),qi,kind(1))*s(p(2),p(3))
+       enddo
+    enddo
+  end subroutine
+
+  ! Five-point mobility; physical h factors match the original basis action.
+  ! B is evaluated afresh from the 36 cached coefficients, never cached at points.
   attributes(device) subroutine mobility_d(id,u,v,quad)
     integer, value :: id
     logical, value :: quad
-    real(kind=8) :: u(54),v(54),bb(3),ee(3),te(3),ef(54)
-    real(kind=8) :: h,weight,val,b2,bdote
-    integer :: i,j,k,q(3),r,d,a
+    real(kind=8) :: u(54),v(54),bb(3,5,5),ee(3,5,5),w(36)
+    real(kind=8) :: h,weight,b2,bdote,val
+    integer :: i,j,k,r,a
     if (.not.quad) then
-       call mass_e_d(id,u,v); v=imp_eta(1,id)*v; return
+       call mass_e_d(id,u,v)
+       do r=1,54
+          v(r)=imp_eta(1,id)*v(r)
+       enddo
+       return
     endif
     h=width(id)/2d0; v=0d0
+    do r=1,36
+       w(r)=cache_w(r,id)
+    enddo
     do i=1,5
+       call quad_eval_d(w,.true.,i,bb)
+       call quad_eval_d(u,.false.,i,ee)
        do j=1,5
           do k=1,5
-             q=(/i,j,k/); bb=0d0; ee=0d0
-             do r=1,36
-                a=fa(r); val=1d0/(h*h)
-                do d=1,3
-                   if (d==a) then
-                      val=val*bn(fpos(d,r)+1,q(d))
-                   else
-                      val=val*ba(fpos(d,r)+1,q(d))
-                   endif
-                enddo
-                bb(a)=bb(a)+val*cache_w(r,id)
-             enddo
-             do r=1,54
-                a=ea(r); val=1d0/h
-                do d=1,3
-                   if (d==a) then
-                      val=val*ba(epos(d,r)+1,q(d))
-                   else
-                      val=val*bn(epos(d,r)+1,q(d))
-                   endif
-                enddo
-                ef(r)=val; ee(a)=ee(a)+val*u(r)
-             enddo
              b2=0d0; bdote=0d0
              do a=1,3
-                b2=b2+bb(a)*bb(a); bdote=bdote+bb(a)*ee(a)
+                bb(a,j,k)=bb(a,j,k)/(h*h); ee(a,j,k)=ee(a,j,k)/h
+                b2=b2+bb(a,j,k)*bb(a,j,k); bdote=bdote+bb(a,j,k)*ee(a,j,k)
              enddo
-             te=imp_eta(1,id)*ee+imp_eta(2,id)*(b2*ee-bb*bdote)
-             weight=h**3*gw(i)*gw(j)*gw(k)
-             do r=1,54
-                v(r)=v(r)+weight*ef(r)*te(ea(r))
+             weight=h**3*gw(i)*gw(j)*gw(k)/h
+             do a=1,3
+                val=imp_eta(1,id)*ee(a,j,k)+imp_eta(2,id)*(b2*ee(a,j,k)-bb(a,j,k)*bdote)
+                ee(a,j,k)=weight*val
              enddo
           enddo
        enddo
+       call quad_project_e_d(i,ee,v)
     enddo
   end subroutine
 
@@ -1558,9 +1795,22 @@ contains
     call reconstruct_f(id,x,u,0); call mass_f_d(id,u,v); call adjoint_f(id,v,y)
   end subroutine
 
-  attributes(global) subroutine mass_e_kernel(n,x,y,mobility,quad,mode)
+  attributes(global) subroutine mass_e_kernel(n,x,y,generic)
+    integer, value :: n
+    logical, value :: generic
+    real(kind=8), device :: x(*),y(*)
+    real(kind=8) :: u(54),v(54)
+    integer :: id
+    id=(blockIdx%x-1)*blockDim%x+threadIdx%x
+    if (id>n) return
+    if (generic) id=generic_leaf(id)
+    call reconstruct_e(id,x,u,0); call mass_e_d(id,u,v); call adjoint_e(id,v,y)
+  end subroutine
+
+  ! Keep K separate from M_E in profiles and in the compiled kernel body.
+  attributes(global) subroutine mobility_kernel(n,x,y,quad,mode)
     integer, value :: n,mode ! 0: all leaves, 1: generic list, 2: nonuniform regular octs.
-    logical, value :: mobility,quad
+    logical, value :: quad
     real(kind=8), device :: x(*),y(*)
     real(kind=8) :: u(54),v(54)
     integer :: id,t,c,g
@@ -1574,13 +1824,7 @@ contains
        if (reg_uniform(t)/=0) return
        g=contributing(reg_oct(t)); id=leaf_id(c,g)
     end select
-    call reconstruct_e(id,x,u,0)
-    if (mobility) then
-       call mobility_d(id,u,v,quad)
-    else
-       call mass_e_d(id,u,v)
-    endif
-    call adjoint_e(id,v,y)
+    call reconstruct_e(id,x,u,0); call mobility_d(id,u,v,quad); call adjoint_e(id,v,y)
   end subroutine
 
   subroutine imp_mf(x,y)
@@ -1602,10 +1846,10 @@ contains
     imp_me_calls=imp_me_calls+1
     call zero_kernel<<<(imp_nedge+255)/256,256>>>(imp_nedge,y)
     if (all_leaf_path) then
-       call mass_e_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y,.false.,.false.,0)
+       call mass_e_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y,.false.)
     else
        if (nreg>0) call regular_e_kernel<<<(nreg+127)/128,128>>>(nreg,x,y,.false.)
-       if (ngeneric>0) call mass_e_kernel<<<(ngeneric+255)/256,256>>>(ngeneric,x,y,.false.,.false.,1)
+       if (ngeneric>0) call mass_e_kernel<<<(ngeneric+255)/256,256>>>(ngeneric,x,y,.true.)
     endif
     call GPU_Error_Check(__FILE__, __LINE__)
   end subroutine
@@ -1616,14 +1860,14 @@ contains
     imp_k_calls=imp_k_calls+1
     call zero_kernel<<<(imp_nedge+255)/256,256>>>(imp_nedge,y)
     if (imp_quad.or.all_leaf_path) then
-       call mass_e_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y,.true.,imp_quad,0)
+       call mobility_kernel<<<(imp_nleaf+255)/256,256>>>(imp_nleaf,x,y,imp_quad,0)
     else
        if (nreg>0) then
           call regular_eta_kernel<<<(nreg+255)/256,256>>>(nreg)
           call regular_e_kernel<<<(nreg+127)/128,128>>>(nreg,x,y,.true.)
        endif
-       if (ngeneric>0) call mass_e_kernel<<<(ngeneric+255)/256,256>>>(ngeneric,x,y,.true.,.false.,1)
-       if (nreg>0) call mass_e_kernel<<<(8*nreg+255)/256,256>>>(8*nreg,x,y,.true.,.false.,2)
+       if (ngeneric>0) call mobility_kernel<<<(ngeneric+255)/256,256>>>(ngeneric,x,y,.false.,1)
+       if (nreg>0) call mobility_kernel<<<(8*nreg+255)/256,256>>>(8*nreg,x,y,.false.,2)
     endif
     call GPU_Error_Check(__FILE__, __LINE__)
   end subroutine
@@ -2247,6 +2491,7 @@ contains
     if (allocated(ctr)) deallocate(ctr)
     if (allocated(cti)) deallocate(cti)
     if (allocated(cts)) deallocate(cts)
+    if (allocated(transpose_key)) deallocate(transpose_key,transpose_sorted_key,transpose_val)
     if (allocated(work)) deallocate(work)
     if (allocated(rfr)) deallocate(rfr)
     if (allocated(rfi)) deallocate(rfi)
