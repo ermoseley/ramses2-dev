@@ -3976,75 +3976,6 @@ contains
     end do
   end subroutine nimhd_update_e
 
-  ! One substep or stage of the non-ideal MHD update. As in the Godunov step, the energy fluxes
-  ! use the EMF before the edges of refined cells are zeroed. With cf, coarse_b exchanges the
-  ! EMF of this stage between levels with weight bweight=1, while the energy keeps the stage weight.
-  attributes(global) launch_bounds(256,5) subroutine nimhd_stage_kernel( &
-       & grid, eta, yjm1, yjm2, y0, bmy0, yj, energy, eacc, eacc0, &
-       & coarse_u, coarse_b, heat, first, last, accumulate, cf, father, nbor, head_idx, num_subgrids, ngridmax, &
-       & ilevel, levelmin, levelmax, dt, dx, mu, nu, mut, gt, mut1, weight, bweight)
-    type(oct), device :: grid(*)
-    integer, device :: father(*), nbor(1:subgridsize,*)
-    real(kind=dp), device :: eta(1:twotondim,1:2,*)
-    real(kind=dp), device :: yjm1(1:twotondim,1:6,*), yjm2(1:twotondim,1:6,*)
-    real(kind=dp), device :: y0(1:twotondim,1:6,*), bmy0(1:twotondim,1:6,*), yj(1:twotondim,1:6,*)
-    real(kind=dp), device :: energy(1:twotondim,1:nvar,*), eacc(1:twotondim,*), eacc0(1:twotondim,*)
-    real(kind=dp), device :: coarse_u(1:twotondim,1:nvar,*), coarse_b(1:twotondim,1:6,*)
-    logical, intent(in), value :: heat, first, last, accumulate, cf
-    integer(kind=4), intent(in), value :: head_idx, num_subgrids
-    integer, intent(in), value :: ngridmax, ilevel, levelmin, levelmax
-    real(kind=dp), intent(in), value :: dt, dx, mu, nu, mut, gt, mut1, weight, bweight
-
-    real(kind=dp), shared :: eta_o(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
-    real(kind=dp), shared :: eta_a(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
-    logical(kind=1), shared :: refined(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
-    type(subgrid_face_b_t), shared :: bf
-    type(subgrid_2x3x3edge_primitive), shared :: emfx
-    type(subgrid_3x2x3edge_primitive), shared :: emfy
-    type(subgrid_3x3x2edge_primitive), shared :: emfz
-    real(kind=dp), shared :: vx( 1:2*nsubgrid+2, 2:2*nsubgrid+2, 2:2*nsubgrid+2,1:2)
-    real(kind=dp), shared :: vy( 2:2*nsubgrid+2, 1:2*nsubgrid+2, 2:2*nsubgrid+2,1:2)
-    real(kind=dp), shared :: vz( 2:2*nsubgrid+2, 2:2*nsubgrid+2, 1:2*nsubgrid+2,1:2)
-    real(kind=dp), shared :: fluxes_x(0:2*nsubgrid,0:2*nsubgrid-1,0:2*nsubgrid-1)
-    real(kind=dp), shared :: fluxes_y(0:2*nsubgrid-1,0:2*nsubgrid,0:2*nsubgrid-1)
-    real(kind=dp), shared :: fluxes_z(0:2*nsubgrid-1,0:2*nsubgrid-1,0:2*nsubgrid)
-    real(kind=dp) :: dtdx
-    integer :: block_idx, thread_idx
-
-    dtdx = dt / dx
-    block_idx = blockIdx%x - 1
-    thread_idx = threadIdx%x - 1
-    if (block_idx >= num_subgrids) return
-
-    call subgrid_load_nimhd(grid, eta, yjm1, nbor, head_idx, block_idx, thread_idx, &
-         & eta_o, eta_a, refined, bf)
-
-    call cmpnimhd_mhd(bf, eta_o, eta_a, emfx, emfy, emfz, vx, vy, vz, dx, thread_idx)
-
-    if (ilevel > levelmin) call nimhd_zero_energy_fluxes(fluxes_x, fluxes_y, fluxes_z, thread_idx)
-    if (heat) call nimhd_poynting_fluxes(fluxes_x, fluxes_y, fluxes_z, emfx, emfy, emfz, bf, thread_idx)
-
-    if (ilevel < levelmax) then
-       if (heat) call nimhd_zero_fine_energy_fluxes(refined, fluxes_x, fluxes_y, fluxes_z, thread_idx)
-       call zero_fine_emf(refined, emfx, emfy, emfz, thread_idx)
-    endif
-
-    call nimhd_update_b(yj, yjm1, yjm2, y0, bmy0, coarse_b, nbor, emfx, emfy, emfz, &
-         & head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, cf, mu, nu, mut, gt, mut1)
-
-    if (heat) call nimhd_update_e(energy, eacc, eacc0, coarse_u, nbor, fluxes_x, fluxes_y, fluxes_z, &
-         & emfx, emfy, emfz, bf, head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, weight)
-
-    if (ilevel > levelmin) then
-       if (heat .and. bweight /= weight) then
-          call syncthreads()
-          call nimhd_scale_fluxes(fluxes_x, fluxes_y, fluxes_z, weight/bweight, thread_idx)
-       endif
-       call nimhd_coarse_cell_update(grid, coarse_u, coarse_b, father, nbor, fluxes_x, fluxes_y, fluxes_z, &
-            & emfx, emfy, emfz, head_idx, block_idx, thread_idx, ngridmax, dtdx*bweight)
-    endif
-  end subroutine nimhd_stage_kernel
-
   attributes(device) subroutine nimhd_scale_fluxes(fluxes_x, fluxes_y, fluxes_z, factor, thread_idx)
     real(kind=dp), intent(inout) :: fluxes_x(0:2*nsubgrid,0:2*nsubgrid-1,0:2*nsubgrid-1)
     real(kind=dp), intent(inout) :: fluxes_y(0:2*nsubgrid-1,0:2*nsubgrid,0:2*nsubgrid-1)
@@ -6087,6 +6018,80 @@ contains
     end do ! iz loop
 
   end subroutine hydro_integrator_paper_kernel
+#endif
+  ! =========================================================================
+
+#ifdef MHD
+  ! One substep or stage of the non-ideal MHD update. As in the Godunov step, the energy fluxes
+  ! use the EMF before the edges of refined cells are zeroed. With cf, coarse_b exchanges the
+  ! EMF of this stage between levels with weight bweight=1, while the energy keeps the stage weight.
+  ! It is the last kernel of the module, because nvfortran also applies its launch_bounds to the
+  ! kernels that follow it.
+  attributes(global) launch_bounds(256,5) subroutine nimhd_stage_kernel( &
+       & grid, eta, yjm1, yjm2, y0, bmy0, yj, energy, eacc, eacc0, &
+       & coarse_u, coarse_b, heat, first, last, accumulate, cf, father, nbor, head_idx, num_subgrids, ngridmax, &
+       & ilevel, levelmin, levelmax, dt, dx, mu, nu, mut, gt, mut1, weight, bweight)
+    type(oct), device :: grid(*)
+    integer, device :: father(*), nbor(1:subgridsize,*)
+    real(kind=dp), device :: eta(1:twotondim,1:2,*)
+    real(kind=dp), device :: yjm1(1:twotondim,1:6,*), yjm2(1:twotondim,1:6,*)
+    real(kind=dp), device :: y0(1:twotondim,1:6,*), bmy0(1:twotondim,1:6,*), yj(1:twotondim,1:6,*)
+    real(kind=dp), device :: energy(1:twotondim,1:nvar,*), eacc(1:twotondim,*), eacc0(1:twotondim,*)
+    real(kind=dp), device :: coarse_u(1:twotondim,1:nvar,*), coarse_b(1:twotondim,1:6,*)
+    logical, intent(in), value :: heat, first, last, accumulate, cf
+    integer(kind=4), intent(in), value :: head_idx, num_subgrids
+    integer, intent(in), value :: ngridmax, ilevel, levelmin, levelmax
+    real(kind=dp), intent(in), value :: dt, dx, mu, nu, mut, gt, mut1, weight, bweight
+
+    real(kind=dp), shared :: eta_o(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    real(kind=dp), shared :: eta_a(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    logical(kind=1), shared :: refined(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    type(subgrid_face_b_t), shared :: bf
+    type(subgrid_2x3x3edge_primitive), shared :: emfx
+    type(subgrid_3x2x3edge_primitive), shared :: emfy
+    type(subgrid_3x3x2edge_primitive), shared :: emfz
+    real(kind=dp), shared :: vx( 1:2*nsubgrid+2, 2:2*nsubgrid+2, 2:2*nsubgrid+2,1:2)
+    real(kind=dp), shared :: vy( 2:2*nsubgrid+2, 1:2*nsubgrid+2, 2:2*nsubgrid+2,1:2)
+    real(kind=dp), shared :: vz( 2:2*nsubgrid+2, 2:2*nsubgrid+2, 1:2*nsubgrid+2,1:2)
+    real(kind=dp), shared :: fluxes_x(0:2*nsubgrid,0:2*nsubgrid-1,0:2*nsubgrid-1)
+    real(kind=dp), shared :: fluxes_y(0:2*nsubgrid-1,0:2*nsubgrid,0:2*nsubgrid-1)
+    real(kind=dp), shared :: fluxes_z(0:2*nsubgrid-1,0:2*nsubgrid-1,0:2*nsubgrid)
+    real(kind=dp) :: dtdx
+    integer :: block_idx, thread_idx
+
+    dtdx = dt / dx
+    block_idx = blockIdx%x - 1
+    thread_idx = threadIdx%x - 1
+    if (block_idx >= num_subgrids) return
+
+    call subgrid_load_nimhd(grid, eta, yjm1, nbor, head_idx, block_idx, thread_idx, &
+         & eta_o, eta_a, refined, bf)
+
+    call cmpnimhd_mhd(bf, eta_o, eta_a, emfx, emfy, emfz, vx, vy, vz, dx, thread_idx)
+
+    if (ilevel > levelmin) call nimhd_zero_energy_fluxes(fluxes_x, fluxes_y, fluxes_z, thread_idx)
+    if (heat) call nimhd_poynting_fluxes(fluxes_x, fluxes_y, fluxes_z, emfx, emfy, emfz, bf, thread_idx)
+
+    if (ilevel < levelmax) then
+       if (heat) call nimhd_zero_fine_energy_fluxes(refined, fluxes_x, fluxes_y, fluxes_z, thread_idx)
+       call zero_fine_emf(refined, emfx, emfy, emfz, thread_idx)
+    endif
+
+    call nimhd_update_b(yj, yjm1, yjm2, y0, bmy0, coarse_b, nbor, emfx, emfy, emfz, &
+         & head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, cf, mu, nu, mut, gt, mut1)
+
+    if (heat) call nimhd_update_e(energy, eacc, eacc0, coarse_u, nbor, fluxes_x, fluxes_y, fluxes_z, &
+         & emfx, emfy, emfz, bf, head_idx, block_idx, thread_idx, dtdx, first, last, accumulate, weight)
+
+    if (ilevel > levelmin) then
+       if (heat .and. bweight /= weight) then
+          call syncthreads()
+          call nimhd_scale_fluxes(fluxes_x, fluxes_y, fluxes_z, weight/bweight, thread_idx)
+       endif
+       call nimhd_coarse_cell_update(grid, coarse_u, coarse_b, father, nbor, fluxes_x, fluxes_y, fluxes_z, &
+            & emfx, emfy, emfz, head_idx, block_idx, thread_idx, ngridmax, dtdx*bweight)
+    endif
+  end subroutine nimhd_stage_kernel
 #endif
   ! =========================================================================
 
