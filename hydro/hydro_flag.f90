@@ -5,7 +5,7 @@ contains
 !#####################################################################
 !#####################################################################
 subroutine hydro_flag(s,ilevel)
-  use amr_parameters, only: ndim, twotondim, twondim
+  use amr_parameters, only: dp, ndim, twotondim, twondim
   use ramses_commons, only: ramses_t
   use hydro_parameters, only: nvar, nener
   use cache_commons
@@ -27,17 +27,31 @@ subroutine hydro_flag(s,ilevel)
   integer::igridd,igridg,indd,indg,igridp,icellp
   integer,dimension(1:twondim)::igridn,icelln
   integer(kind=8),dimension(0:ndim)::hash_key,hash_nbor
+  real(kind=8)::mgas
   real(kind=8),dimension(1:nvar)::uug,uum,uud
 #ifdef MHD
   real(kind=8),dimension(1:6)::bbg,bbm,bbd
 #endif
   logical::ok
   type(msg_realdp)::dummy_realdp
+
 #ifdef HYDRO
-
-
   associate(r=>s%r,g=>s%g,m=>s%m,mdl=>s%mdl)
 
+  ! Quasi-Lagrangian refinements without gravity
+  if (r%m_refine(ilevel)>=0. .and. (.not. r%poisson))then
+     do igrid = m%head(ilevel),m%tail(ilevel)  ! Loop over grids
+        do ind = 1,twotondim                   ! Loop over cells
+           mgas = max(m%uold(ind,1,igrid), real(0,kind=dp)) * (r%boxlen / 2**ilevel)**ndim
+           if (mgas >= r%m_refine(ilevel)*r%mass_sph) then
+              if (m%flag1(ind,igrid) == 0) g%nflag = g%nflag + 1
+              m%flag1(ind,igrid) = 1
+           endif
+        end do
+     end do
+  endif
+
+  ! Gradient-based refinements
   if(    r%err_grad_d==-1.0.and.&
 #ifdef MHD
        & r%err_grad_A==-1.0.and.&
@@ -58,7 +72,7 @@ subroutine hydro_flag(s,ilevel)
   call open_cache(mdl, m, pack_size=storage_size(dummy_realdp)/32, &
        pack=pack_fetch_hydro, unpack=unpack_fetch_hydro, bound=init_bound_refine)
 
-  ! Loop over active grids
+  ! Loop over grids
   do igrid=m%head(ilevel),m%tail(ilevel)
 
      ! Loop over cells
@@ -140,7 +154,6 @@ subroutine hydro_flag(s,ilevel)
   call close_cache(mdl)
 
   end associate
-
 #endif
 
 end subroutine hydro_flag
