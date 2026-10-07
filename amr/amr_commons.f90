@@ -165,14 +165,14 @@ module amr_commons
      integer ::niter_riemann=10
      integer ::slope_type=1
      integer ::slope_mag_type=1
-     real(kind=8)::difmag=0.0d0
-     real(kind=8)::etamag=0.0d0
-     real(kind=8)::eta_ad=0.0d0
-     real(kind=8)::nimhd_courant=0.8d0
-     real(kind=8)::nimhd_alpha=0.5d0
-     character(LEN=10)::nimhd_solver='unsplit'
-     character(LEN=10)::nimhd_split='strang'
-     logical::nimhd_composite=.false.
+     real(kind=8)::difmag=0.0d0                     ! Explicit diffusion of conservative variables
+     real(kind=8)::etamag=0.0d0                     ! Ohmic magnetic diffusivity
+     real(kind=8)::eta_ad=0.0d0                     ! Ambipolar diffusion coefficient
+     real(kind=8)::nimhd_courant=0.8d0              ! Safety factor of explicit diffusion timestep
+     real(kind=8)::nimhd_alpha=0.5d0                ! Gegenbauer parameter of STS (>=0.5)
+     character(LEN=10)::nimhd_solver='unsplit'      ! Non-ideal MHD solver: unsplit, explicit, sts
+     character(LEN=10)::nimhd_split='strang'        ! Operator splitting: strang or godunov
+     logical::nimhd_composite=.false.               ! All levels diffused together (nsubcycle=1)
      real(kind=8),dimension(1:nener+1)::gamma_rad=1.33333333334d0
      logical ::induction=.false.
      logical ::entropy=.false.
