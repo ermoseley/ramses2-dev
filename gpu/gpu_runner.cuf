@@ -877,6 +877,9 @@ contains
 #ifdef MHD
   !> Number of substeps s and stage coefficients of the split non-ideal MHD solver for
   !> tau=dt/dt_parab, with the weights q of the stage operators in Y_s - Y_0 = sum_k q_k M(Y_k).
+  !> The sts stages are the second-order Runge-Kutta-Gegenbauer scheme of Mattia et al. (2026),
+  !> arXiv:2606.13398, with Gegenbauer parameter alpha=nimhd_alpha; alpha=0.5 gives the
+  !> Runge-Kutta-Legendre scheme of Meyer, Balsara & Aslam (2014) JCP, 257, 594.
   subroutine nimhd_stage_coefficients(sim, tau, s, mu, nu, mut, gt, mut1, q)
     use ramses_commons, only: ramses_t
     type(ramses_t), intent(in) :: sim
