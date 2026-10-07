@@ -2672,11 +2672,6 @@ contains
     integer :: n
     real(kind=dp) :: fs(1:nscalar)
 #endif
-#ifdef MHD
-    real(kind=dp) :: dflux, weight
-    logical :: c1, c2, c3
-    integer :: oc1, oc2, oc3, cc1, cc2, cc3
-#endif
 
     interface_array_size = nsubgrid**(ndim-1)
     coarse_flux_scale = dtdx * inv_twotondim
@@ -3035,145 +3030,8 @@ contains
     end if
 
 #ifdef MHD
-    ! Coarse/fine EMF correction at oct boundary edges.
-    if (thread_idx == 0) then
-       do k_subgrid_idx = 1, nsubgrid
-          k = 2*k_subgrid_idx - 2
-          do j_subgrid_idx = 1, nsubgrid
-             j = 2*j_subgrid_idx - 2
-             do i_subgrid_idx = 1, nsubgrid
-                i = 2*i_subgrid_idx - 2
-
-                ! 4 EMFz edges
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,  j_subgrid_idx-1,k_subgrid_idx, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx-1,j_subgrid_idx-1,k_subgrid_idx, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx-1,j_subgrid_idx,  k_subgrid_idx, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfz%edge_e(i,j,k)+emfz%edge_e(i,j,k+1))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,5,oc1),dflux);  info=atomicadd(bnew(cc1,1,oc1),dflux);  endif
-          if(c2)then; info=atomicadd(bnew(cc2,4,oc2),dflux);  info=atomicadd(bnew(cc2,5,oc2),-dflux); endif
-          if(c3)then; info=atomicadd(bnew(cc3,2,oc3),-dflux); info=atomicadd(bnew(cc3,4,oc3),-dflux); endif
-       end if
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx-1,j_subgrid_idx,  k_subgrid_idx, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx-1,j_subgrid_idx+1,k_subgrid_idx, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,  j_subgrid_idx+1,k_subgrid_idx, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfz%edge_e(i,j+2,k)+emfz%edge_e(i,j+2,k+1))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,4,oc1),dflux);  info=atomicadd(bnew(cc1,5,oc1),-dflux); endif
-          if(c2)then; info=atomicadd(bnew(cc2,2,oc2),-dflux); info=atomicadd(bnew(cc2,4,oc2),-dflux); endif
-          if(c3)then; info=atomicadd(bnew(cc3,1,oc3),-dflux); info=atomicadd(bnew(cc3,2,oc3),dflux);  endif
-       end if
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,  j_subgrid_idx+1,k_subgrid_idx, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx+1,j_subgrid_idx+1,k_subgrid_idx, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx+1,j_subgrid_idx,  k_subgrid_idx, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfz%edge_e(i+2,j+2,k)+emfz%edge_e(i+2,j+2,k+1))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,2,oc1),-dflux); info=atomicadd(bnew(cc1,4,oc1),-dflux); endif
-          if(c2)then; info=atomicadd(bnew(cc2,1,oc2),-dflux); info=atomicadd(bnew(cc2,2,oc2),dflux);  endif
-          if(c3)then; info=atomicadd(bnew(cc3,5,oc3),dflux);  info=atomicadd(bnew(cc3,1,oc3),dflux);  endif
-       end if
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx+1,j_subgrid_idx,  k_subgrid_idx, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx+1,j_subgrid_idx-1,k_subgrid_idx, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,  j_subgrid_idx-1,k_subgrid_idx, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfz%edge_e(i+2,j,k)+emfz%edge_e(i+2,j,k+1))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,1,oc1),-dflux); info=atomicadd(bnew(cc1,2,oc1),dflux);  endif
-          if(c2)then; info=atomicadd(bnew(cc2,5,oc2),dflux);  info=atomicadd(bnew(cc2,1,oc2),dflux);  endif
-          if(c3)then; info=atomicadd(bnew(cc3,4,oc3),dflux);  info=atomicadd(bnew(cc3,5,oc3),-dflux); endif
-       end if
-
-                ! 4 EMFx edges
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx,  k_subgrid_idx-1, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx-1,k_subgrid_idx-1, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx-1,k_subgrid_idx,   c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfx%edge_e(i,j,k)+emfx%edge_e(i+1,j,k))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,6,oc1),dflux);  info=atomicadd(bnew(cc1,2,oc1),dflux);  endif
-          if(c2)then; info=atomicadd(bnew(cc2,5,oc2),dflux);  info=atomicadd(bnew(cc2,6,oc2),-dflux); endif
-          if(c3)then; info=atomicadd(bnew(cc3,3,oc3),-dflux); info=atomicadd(bnew(cc3,5,oc3),-dflux); endif
-       end if
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx-1,k_subgrid_idx,   c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx-1,k_subgrid_idx+1, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx,  k_subgrid_idx+1, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfx%edge_e(i,j,k+2)+emfx%edge_e(i+1,j,k+2))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,5,oc1),dflux);  info=atomicadd(bnew(cc1,6,oc1),-dflux); endif
-          if(c2)then; info=atomicadd(bnew(cc2,3,oc2),-dflux); info=atomicadd(bnew(cc2,5,oc2),-dflux); endif
-          if(c3)then; info=atomicadd(bnew(cc3,2,oc3),-dflux); info=atomicadd(bnew(cc3,3,oc3),dflux);  endif
-       end if
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx,  k_subgrid_idx+1, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx+1,k_subgrid_idx+1, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx+1,k_subgrid_idx,   c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfx%edge_e(i,j+2,k+2)+emfx%edge_e(i+1,j+2,k+2))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,3,oc1),-dflux); info=atomicadd(bnew(cc1,5,oc1),-dflux); endif
-          if(c2)then; info=atomicadd(bnew(cc2,2,oc2),-dflux); info=atomicadd(bnew(cc2,3,oc2),dflux);  endif
-          if(c3)then; info=atomicadd(bnew(cc3,6,oc3),dflux);  info=atomicadd(bnew(cc3,2,oc3),dflux);  endif
-       end if
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx+1,k_subgrid_idx,   c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx+1,k_subgrid_idx-1, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx,  k_subgrid_idx-1, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfx%edge_e(i,j+2,k)+emfx%edge_e(i+1,j+2,k))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,2,oc1),-dflux); info=atomicadd(bnew(cc1,3,oc1),dflux);  endif
-          if(c2)then; info=atomicadd(bnew(cc2,6,oc2),dflux);  info=atomicadd(bnew(cc2,2,oc2),dflux);  endif
-          if(c3)then; info=atomicadd(bnew(cc3,5,oc3),dflux);  info=atomicadd(bnew(cc3,6,oc3),-dflux); endif
-       end if
-
-                ! 4 EMFy edges
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,  j_subgrid_idx,k_subgrid_idx-1, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx-1,j_subgrid_idx,k_subgrid_idx-1, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx-1,j_subgrid_idx,k_subgrid_idx,   c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfy%edge_e(i,j,k)+emfy%edge_e(i,j+1,k))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,6,oc1),-dflux); info=atomicadd(bnew(cc1,1,oc1),-dflux); endif
-          if(c2)then; info=atomicadd(bnew(cc2,4,oc2),-dflux); info=atomicadd(bnew(cc2,6,oc2),dflux);  endif
-          if(c3)then; info=atomicadd(bnew(cc3,3,oc3),dflux);  info=atomicadd(bnew(cc3,4,oc3),dflux);  endif
-       end if
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx-1,j_subgrid_idx,k_subgrid_idx,   c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx-1,j_subgrid_idx,k_subgrid_idx+1, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,  j_subgrid_idx,k_subgrid_idx+1, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfy%edge_e(i,j,k+2)+emfy%edge_e(i,j+1,k+2))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,4,oc1),-dflux); info=atomicadd(bnew(cc1,6,oc1),dflux);  endif
-          if(c2)then; info=atomicadd(bnew(cc2,3,oc2),dflux);  info=atomicadd(bnew(cc2,4,oc2),dflux);  endif
-          if(c3)then; info=atomicadd(bnew(cc3,1,oc3),dflux);  info=atomicadd(bnew(cc3,3,oc3),-dflux); endif
-       end if
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,  j_subgrid_idx,k_subgrid_idx+1, c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx+1,j_subgrid_idx,k_subgrid_idx+1, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx+1,j_subgrid_idx,k_subgrid_idx,   c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfy%edge_e(i+2,j,k+2)+emfy%edge_e(i+2,j+1,k+2))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,3,oc1),dflux);  info=atomicadd(bnew(cc1,4,oc1),dflux);  endif
-          if(c2)then; info=atomicadd(bnew(cc2,1,oc2),dflux);  info=atomicadd(bnew(cc2,3,oc2),-dflux); endif
-          if(c3)then; info=atomicadd(bnew(cc3,6,oc3),-dflux); info=atomicadd(bnew(cc3,1,oc3),-dflux); endif
-       end if
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx+1,j_subgrid_idx,k_subgrid_idx,   c1,oc1,cc1)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx+1,j_subgrid_idx,k_subgrid_idx-1, c2,oc2,cc2)
-       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,  j_subgrid_idx,k_subgrid_idx-1, c3,oc3,cc3)
-       if (c1 .or. c3) then
-          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
-          dflux=(emfy%edge_e(i+2,j,k)+emfy%edge_e(i+2,j+1,k))*0.25_dp*weight*dtdx
-          if(c1)then; info=atomicadd(bnew(cc1,1,oc1),dflux);  info=atomicadd(bnew(cc1,3,oc1),-dflux); endif
-          if(c2)then; info=atomicadd(bnew(cc2,6,oc2),-dflux); info=atomicadd(bnew(cc2,1,oc2),-dflux); endif
-          if(c3)then; info=atomicadd(bnew(cc3,4,oc3),-dflux); info=atomicadd(bnew(cc3,6,oc3),dflux);  endif
-       end if
-
-             end do
-          end do
-       end do
-    end if
+    call coarse_emf_update(grid, bnew, father, nbor, emfx, emfy, emfz, &
+         & head_idx, block_idx, thread_idx, ngridmax, dtdx)
 #endif
 
   end subroutine coarse_cell_update
@@ -3725,9 +3583,9 @@ contains
     type(subgrid_2x3x3edge_primitive), intent(inout) :: emfx
     type(subgrid_3x2x3edge_primitive), intent(inout) :: emfy
     type(subgrid_3x3x2edge_primitive), intent(inout) :: emfz
-    real(kind=dp), intent(inout) :: vx(1:2, 1:2*nsubgrid+2, 2:2*nsubgrid+2, 2:2*nsubgrid+2)
-    real(kind=dp), intent(inout) :: vy(1:2, 2:2*nsubgrid+2, 1:2*nsubgrid+2, 2:2*nsubgrid+2)
-    real(kind=dp), intent(inout) :: vz(1:2, 2:2*nsubgrid+2, 2:2*nsubgrid+2, 1:2*nsubgrid+2)
+    real(kind=dp), intent(inout) :: vx( 1:2*nsubgrid+2, 2:2*nsubgrid+2, 2:2*nsubgrid+2,1:2)
+    real(kind=dp), intent(inout) :: vy( 2:2*nsubgrid+2, 1:2*nsubgrid+2, 2:2*nsubgrid+2,1:2)
+    real(kind=dp), intent(inout) :: vz( 2:2*nsubgrid+2, 2:2*nsubgrid+2, 1:2*nsubgrid+2,1:2)
     real(kind=dp), value :: dx
     integer, value :: thread_idx
     integer :: work_idx, emf_size, ext_size, I, J, K, X, Y, Z
@@ -3760,8 +3618,8 @@ contains
           jdotb = jx*bxe + jy*bye + jz*bze
           b2 = bxe*bxe + bye*bye + bze*bze
           ea = ea/dx
-          vz(1,X,Y,Z) = ea*(jdotb*bxe - b2*jx)
-          vz(2,X,Y,Z) = ea*(jdotb*bye - b2*jy)
+          vz(X,Y,Z,1) = ea*(jdotb*bxe - b2*jx)
+          vz(X,Y,Z,2) = ea*(jdotb*bye - b2*jy)
           if (K >= 1 .and. K <= 2*nsubgrid) emfz%edge_e(I,J,K-1) = ea*(jdotb*bze - b2*jz)/3.0_dp - eo*jz/dx
        else if (work_idx < 2*ext_size) then
           call index_1Dto3D(work_idx - ext_size, 2*nsubgrid+1, 2*nsubgrid+2, I, J, K)
@@ -3786,8 +3644,8 @@ contains
           jdotb = jx*bxe + jy*bye + jz*bze
           b2 = bxe*bxe + bye*bye + bze*bze
           ea = ea/dx
-          vy(1,X,Y,Z) = ea*(jdotb*bxe - b2*jx)
-          vy(2,X,Y,Z) = ea*(jdotb*bze - b2*jz)
+          vy(X,Y,Z,1) = ea*(jdotb*bxe - b2*jx)
+          vy(X,Y,Z,2) = ea*(jdotb*bze - b2*jz)
           if (J >= 1 .and. J <= 2*nsubgrid) emfy%edge_e(I,J-1,K) = ea*(jdotb*bye - b2*jy)/3.0_dp - eo*jy/dx
        else
           call index_1Dto3D(work_idx - 2*ext_size, 2*nsubgrid+2, 2*nsubgrid+1, I, J, K)
@@ -3812,8 +3670,8 @@ contains
           jdotb = jx*bxe + jy*bye + jz*bze
           b2 = bxe*bxe + bye*bye + bze*bze
           ea = ea/dx
-          vx(1,X,Y,Z) = ea*(jdotb*bye - b2*jy)
-          vx(2,X,Y,Z) = ea*(jdotb*bze - b2*jz)
+          vx(X,Y,Z,1) = ea*(jdotb*bye - b2*jy)
+          vx(X,Y,Z,2) = ea*(jdotb*bze - b2*jz)
           if (I >= 1 .and. I <= 2*nsubgrid) emfx%edge_e(I-1,J,K) = ea*(jdotb*bxe - b2*jx)/3.0_dp - eo*jx/dx
        end if
     end do
@@ -3825,20 +3683,20 @@ contains
           call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid+1, I, J, K)
           X = I+2; Y = J+2; Z = K+2
           emfz%edge_e(I,J,K) = emfz%edge_e(I,J,K) + ( &
-               & vx(2,X-1,Y,Z  ) + vx(2,X,Y,Z  ) + vx(2,X-1,Y,Z+1) + vx(2,X,Y,Z+1) + &
-               & vy(2,X,Y-1,Z  ) + vy(2,X,Y,Z  ) + vy(2,X,Y-1,Z+1) + vy(2,X,Y,Z+1) )/12.0_dp
+               & vx(X-1,Y,Z  ,2) + vx(X,Y,Z  ,2) + vx(X-1,Y,Z+1,2) + vx(X,Y,Z+1,2) + &
+               & vy(X,Y-1,Z  ,2) + vy(X,Y,Z  ,2) + vy(X,Y-1,Z+1,2) + vy(X,Y,Z+1,2) )/12.0_dp
        else if (work_idx < 2*emf_size) then
           call index_1Dto3D(work_idx - emf_size, 2*nsubgrid+1, 2*nsubgrid, I, J, K)
           X = I+2; Y = J+2; Z = K+2
           emfy%edge_e(I,J,K) = emfy%edge_e(I,J,K) + ( &
-               & vz(2,X,Y,Z-1) + vz(2,X,Y+1,Z-1) + vz(2,X,Y,Z) + vz(2,X,Y+1,Z) + &
-               & vx(1,X-1,Y,Z) + vx(1,X,Y,Z) + vx(1,X-1,Y+1,Z) + vx(1,X,Y+1,Z) )/12.0_dp
+               & vz(X,Y,Z-1,2) + vz(X,Y+1,Z-1,2) + vz(X,Y,Z,2) + vz(X,Y+1,Z,2) + &
+               & vx(X-1,Y,Z,1) + vx(X,Y,Z,1) + vx(X-1,Y+1,Z,1) + vx(X,Y+1,Z,1) )/12.0_dp
        else
           call index_1Dto3D(work_idx - 2*emf_size, 2*nsubgrid, 2*nsubgrid+1, I, J, K)
           X = I+2; Y = J+2; Z = K+2
           emfx%edge_e(I,J,K) = emfx%edge_e(I,J,K) + ( &
-               & vy(1,X,Y-1,Z) + vy(1,X+1,Y-1,Z) + vy(1,X,Y,Z) + vy(1,X+1,Y,Z) + &
-               & vz(1,X,Y,Z-1) + vz(1,X+1,Y,Z-1) + vz(1,X,Y,Z) + vz(1,X+1,Y,Z) )/12.0_dp
+               & vy(X,Y-1,Z,1) + vy(X+1,Y-1,Z,1) + vy(X,Y,Z,1) + vy(X+1,Y,Z,1) + &
+               & vz(X,Y,Z-1,1) + vz(X+1,Y,Z-1,1) + vz(X,Y,Z,1) + vz(X+1,Y,Z,1) )/12.0_dp
        end if
     end do
 
@@ -3847,14 +3705,14 @@ contains
 
   ! Face B from the copies of the two cells sharing the face. The copy of a refined cell is
   ! only updated by the next upload, so after set_uold the copy of the leaf cell is used.
-  attributes(device) function nimhd_face_b(grid, bin, c1, n1, o1, c2, n2, o2) result(b)
-    type(oct), device :: grid(*)
+  attributes(device) function nimhd_face_b(bin, c1, n1, o1, c2, n2, o2, r1, r2) result(b)
     real(kind=dp), device :: bin(1:twotondim,1:6,*)
     integer, value :: c1, n1, o1, c2, n2, o2
     real(kind=dp) :: b
-    if (grid(o1)%refined(c1) .eqv. grid(o2)%refined(c2)) then
+    logical, value :: r1, r2
+    if (r1 .eqv. r2) then
        b = 0.5_dp*(bin(c1,n1,o1) + bin(c2,n2,o2))
-    else if (grid(o1)%refined(c1)) then
+    else if (r1) then
        b = bin(c2,n2,o2)
     else
        b = bin(c1,n1,o1)
@@ -3875,6 +3733,7 @@ contains
     integer :: work_idx, ind_nbor, work_size
     integer :: i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
     integer :: ib, jb, kb, cell_idx, source_idx, source_idx_face, subgrid_idx
+    logical :: refined_cell
 
     work_size = 2*nsubgrid+4
     do work_idx = thread_idx, work_size**3 - 1, blockDim%x
@@ -3887,26 +3746,30 @@ contains
        i = ib + 2*i_subgrid_idx
        j = jb + 2*j_subgrid_idx
        k = kb + 2*k_subgrid_idx
+       if (i >= 1 .or. j >= 1 .or. k >= 1) refined_cell = grid(source_idx)%refined(cell_idx)
 
        if (i >= 1) then
           source_idx_face = source_idx
           if (ib == 0) source_idx_face = nbor(ind_nbor - 1, subgrid_idx)
-          bf%bx(i,j,k) = nimhd_face_b(grid, bin, cell_idx, 1, source_idx, cell_idx + 1 - 2*ib, 4, source_idx_face)
+          bf%bx(i,j,k) = nimhd_face_b(bin, cell_idx, 1, source_idx, cell_idx + 1 - 2*ib, 4, source_idx_face, &
+               & refined_cell, grid(source_idx_face)%refined(cell_idx + 1 - 2*ib))
        endif
        if (j >= 1) then
           source_idx_face = source_idx
           if (jb == 0) source_idx_face = nbor(ind_nbor - nsubgridp2, subgrid_idx)
-          bf%by(i,j,k) = nimhd_face_b(grid, bin, cell_idx, 2, source_idx, cell_idx + 2*(1 - 2*jb), 5, source_idx_face)
+          bf%by(i,j,k) = nimhd_face_b(bin, cell_idx, 2, source_idx, cell_idx + 2*(1 - 2*jb), 5, source_idx_face, &
+               & refined_cell, grid(source_idx_face)%refined(cell_idx + 2*(1 - 2*jb)))
        endif
        if (k >= 1) then
           source_idx_face = source_idx
           if (kb == 0) source_idx_face = nbor(ind_nbor - nsubgridp2sq, subgrid_idx)
-          bf%bz(i,j,k) = nimhd_face_b(grid, bin, cell_idx, 3, source_idx, cell_idx + 4*(1 - 2*kb), 6, source_idx_face)
+          bf%bz(i,j,k) = nimhd_face_b(bin, cell_idx, 3, source_idx, cell_idx + 4*(1 - 2*kb), 6, source_idx_face, &
+               & refined_cell, grid(source_idx_face)%refined(cell_idx + 4*(1 - 2*kb)))
        endif
 
        if (i >= 1 .and. i <= 2*nsubgrid+2 .and. j >= 1 .and. j <= 2*nsubgrid+2 &
             & .and. k >= 1 .and. k <= 2*nsubgrid+2) then
-          refined(i,j,k) = grid(source_idx)%refined(cell_idx)
+          refined(i,j,k) = refined_cell
           eta_o(i,j,k) = eta(cell_idx, 1, source_idx)
           eta_a(i,j,k) = eta(cell_idx, 2, source_idx)
        endif
@@ -4020,9 +3883,9 @@ contains
 
   attributes(device) subroutine nimhd_poynting_fluxes(fluxes_x, fluxes_y, fluxes_z, &
        & emfx, emfy, emfz, bf, thread_idx)
-    type(subgrid_3x2x2cell_primitive), intent(inout) :: fluxes_x
-    type(subgrid_2x3x2cell_primitive), intent(inout) :: fluxes_y
-    type(subgrid_2x2x3cell_primitive), intent(inout) :: fluxes_z
+    real(kind=dp), intent(inout) :: fluxes_x(0:2*nsubgrid,0:2*nsubgrid-1,0:2*nsubgrid-1)
+    real(kind=dp), intent(inout) :: fluxes_y(0:2*nsubgrid-1,0:2*nsubgrid,0:2*nsubgrid-1)
+    real(kind=dp), intent(inout) :: fluxes_z(0:2*nsubgrid-1,0:2*nsubgrid-1,0:2*nsubgrid)
     type(subgrid_2x3x3edge_primitive), intent(in) :: emfx
     type(subgrid_3x2x3edge_primitive), intent(in) :: emfy
     type(subgrid_3x3x2edge_primitive), intent(in) :: emfz
@@ -4034,13 +3897,13 @@ contains
     do work_idx = thread_idx, interface_array_size*3 - 1, blockDim%x
        if (work_idx < interface_array_size) then
           call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid, i, j, k)
-          fluxes_x%pressure(i,j,k) = -poynting_x(emfy, emfz, bf, i, j, k)
+          fluxes_x(i,j,k) = -poynting_x(emfy, emfz, bf, i, j, k)
        else if (work_idx < 2*interface_array_size) then
           call index_1Dto3D(work_idx - interface_array_size, 2*nsubgrid, 2*nsubgrid+1, i, j, k)
-          fluxes_y%pressure(i,j,k) = -poynting_y(emfz, emfx, bf, i, j, k)
+          fluxes_y(i,j,k) = -poynting_y(emfz, emfx, bf, i, j, k)
        else
           call index_1Dto3D(work_idx - 2*interface_array_size, 2*nsubgrid, 2*nsubgrid, i, j, k)
-          fluxes_z%pressure(i,j,k) = -poynting_z(emfx, emfy, bf, i, j, k)
+          fluxes_z(i,j,k) = -poynting_z(emfx, emfy, bf, i, j, k)
        endif
     end do
     call syncthreads()
@@ -4053,9 +3916,9 @@ contains
     real(kind=dp), device :: energy(1:twotondim,1:nvar,*), eacc(1:twotondim,*), eacc0(1:twotondim,*)
     real(kind=dp), device :: uacc(1:twotondim,1:nvar,*)
     integer(kind=4), device :: nbor(1:subgridsize,*)
-    type(subgrid_3x2x2cell_primitive), intent(in) :: fluxes_x
-    type(subgrid_2x3x2cell_primitive), intent(in) :: fluxes_y
-    type(subgrid_2x2x3cell_primitive), intent(in) :: fluxes_z
+    real(kind=dp), intent(in) :: fluxes_x(0:2*nsubgrid,0:2*nsubgrid-1,0:2*nsubgrid-1)
+    real(kind=dp), intent(in) :: fluxes_y(0:2*nsubgrid-1,0:2*nsubgrid,0:2*nsubgrid-1)
+    real(kind=dp), intent(in) :: fluxes_z(0:2*nsubgrid-1,0:2*nsubgrid-1,0:2*nsubgrid)
     type(subgrid_2x3x3edge_primitive), intent(in) :: emfx
     type(subgrid_3x2x3edge_primitive), intent(in) :: emfy
     type(subgrid_3x3x2edge_primitive), intent(in) :: emfz
@@ -4083,9 +3946,9 @@ contains
        j = j + 2*(j_subgrid_idx - 1)
        k = k + 2*(k_subgrid_idx - 1)
        de = ( &
-            & (fluxes_x%pressure(i, j, k) - fluxes_x%pressure(i+1, j,   k  )) + &
-            & (fluxes_y%pressure(i, j, k) - fluxes_y%pressure(i,   j+1, k  )) + &
-            & (fluxes_z%pressure(i, j, k) - fluxes_z%pressure(i,   j,   k+1)) ) * dtdx
+            & (fluxes_x(i, j, k) - fluxes_x(i+1, j,   k  )) + &
+            & (fluxes_y(i, j, k) - fluxes_y(i,   j+1, k  )) + &
+            & (fluxes_z(i, j, k) - fluxes_z(i,   j,   k+1)) ) * dtdx
        if (first) then
           eacc(cell_idx,oct_idx) = weight*de
        else
@@ -4116,7 +3979,8 @@ contains
   ! One substep or stage of the non-ideal MHD update. As in the Godunov step, the energy fluxes
   ! use the EMF before the edges of refined cells are zeroed. With cf, coarse_b exchanges the
   ! EMF of this stage between levels with weight bweight=1, while the energy keeps the stage weight.
-  attributes(global) subroutine nimhd_stage_kernel(grid, eta, yjm1, yjm2, y0, bmy0, yj, energy, eacc, eacc0, &
+  attributes(global) launch_bounds(256,5) subroutine nimhd_stage_kernel( &
+       & grid, eta, yjm1, yjm2, y0, bmy0, yj, energy, eacc, eacc0, &
        & coarse_u, coarse_b, heat, first, last, accumulate, cf, father, nbor, head_idx, num_subgrids, ngridmax, &
        & ilevel, levelmin, levelmax, dt, dx, mu, nu, mut, gt, mut1, weight, bweight)
     type(oct), device :: grid(*)
@@ -4138,12 +4002,12 @@ contains
     type(subgrid_2x3x3edge_primitive), shared :: emfx
     type(subgrid_3x2x3edge_primitive), shared :: emfy
     type(subgrid_3x3x2edge_primitive), shared :: emfz
-    real(kind=dp), shared :: vx(1:2, 1:2*nsubgrid+2, 2:2*nsubgrid+2, 2:2*nsubgrid+2)
-    real(kind=dp), shared :: vy(1:2, 2:2*nsubgrid+2, 1:2*nsubgrid+2, 2:2*nsubgrid+2)
-    real(kind=dp), shared :: vz(1:2, 2:2*nsubgrid+2, 2:2*nsubgrid+2, 1:2*nsubgrid+2)
-    type(subgrid_3x2x2cell_primitive), shared :: fluxes_x
-    type(subgrid_2x3x2cell_primitive), shared :: fluxes_y
-    type(subgrid_2x2x3cell_primitive), shared :: fluxes_z
+    real(kind=dp), shared :: vx( 1:2*nsubgrid+2, 2:2*nsubgrid+2, 2:2*nsubgrid+2,1:2)
+    real(kind=dp), shared :: vy( 2:2*nsubgrid+2, 1:2*nsubgrid+2, 2:2*nsubgrid+2,1:2)
+    real(kind=dp), shared :: vz( 2:2*nsubgrid+2, 2:2*nsubgrid+2, 1:2*nsubgrid+2,1:2)
+    real(kind=dp), shared :: fluxes_x(0:2*nsubgrid,0:2*nsubgrid-1,0:2*nsubgrid-1)
+    real(kind=dp), shared :: fluxes_y(0:2*nsubgrid-1,0:2*nsubgrid,0:2*nsubgrid-1)
+    real(kind=dp), shared :: fluxes_z(0:2*nsubgrid-1,0:2*nsubgrid-1,0:2*nsubgrid)
     real(kind=dp) :: dtdx
     integer :: block_idx, thread_idx
 
@@ -4157,11 +4021,11 @@ contains
 
     call cmpnimhd_mhd(bf, eta_o, eta_a, emfx, emfy, emfz, vx, vy, vz, dx, thread_idx)
 
-    if (ilevel > levelmin) call zero_euler_fluxes_mhd(fluxes_x, fluxes_y, fluxes_z, thread_idx)
+    if (ilevel > levelmin) call nimhd_zero_energy_fluxes(fluxes_x, fluxes_y, fluxes_z, thread_idx)
     if (heat) call nimhd_poynting_fluxes(fluxes_x, fluxes_y, fluxes_z, emfx, emfy, emfz, bf, thread_idx)
 
     if (ilevel < levelmax) then
-       if (heat) call zero_fine_fluxes(refined, fluxes_x, fluxes_y, fluxes_z, thread_idx)
+       if (heat) call nimhd_zero_fine_energy_fluxes(refined, fluxes_x, fluxes_y, fluxes_z, thread_idx)
        call zero_fine_emf(refined, emfx, emfy, emfz, thread_idx)
     endif
 
@@ -4176,15 +4040,15 @@ contains
           call syncthreads()
           call nimhd_scale_fluxes(fluxes_x, fluxes_y, fluxes_z, weight/bweight, thread_idx)
        endif
-       call coarse_cell_update(grid, coarse_u, coarse_b, father, nbor, fluxes_x, fluxes_y, fluxes_z, &
+       call nimhd_coarse_cell_update(grid, coarse_u, coarse_b, father, nbor, fluxes_x, fluxes_y, fluxes_z, &
             & emfx, emfy, emfz, head_idx, block_idx, thread_idx, ngridmax, dtdx*bweight)
     endif
   end subroutine nimhd_stage_kernel
 
   attributes(device) subroutine nimhd_scale_fluxes(fluxes_x, fluxes_y, fluxes_z, factor, thread_idx)
-    type(subgrid_3x2x2cell_primitive), intent(inout) :: fluxes_x
-    type(subgrid_2x3x2cell_primitive), intent(inout) :: fluxes_y
-    type(subgrid_2x2x3cell_primitive), intent(inout) :: fluxes_z
+    real(kind=dp), intent(inout) :: fluxes_x(0:2*nsubgrid,0:2*nsubgrid-1,0:2*nsubgrid-1)
+    real(kind=dp), intent(inout) :: fluxes_y(0:2*nsubgrid-1,0:2*nsubgrid,0:2*nsubgrid-1)
+    real(kind=dp), intent(inout) :: fluxes_z(0:2*nsubgrid-1,0:2*nsubgrid-1,0:2*nsubgrid)
     real(kind=dp), value :: factor
     integer, value :: thread_idx
     integer :: work_idx, interface_array_size, i, j, k
@@ -4193,17 +4057,324 @@ contains
     do work_idx = thread_idx, interface_array_size*3 - 1, blockDim%x
        if (work_idx < interface_array_size) then
           call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid, i, j, k)
-          fluxes_x%pressure(i,j,k) = factor*fluxes_x%pressure(i,j,k)
+          fluxes_x(i,j,k) = factor*fluxes_x(i,j,k)
        else if (work_idx < 2*interface_array_size) then
           call index_1Dto3D(work_idx - interface_array_size, 2*nsubgrid, 2*nsubgrid+1, i, j, k)
-          fluxes_y%pressure(i,j,k) = factor*fluxes_y%pressure(i,j,k)
+          fluxes_y(i,j,k) = factor*fluxes_y(i,j,k)
        else
           call index_1Dto3D(work_idx - 2*interface_array_size, 2*nsubgrid, 2*nsubgrid, i, j, k)
-          fluxes_z%pressure(i,j,k) = factor*fluxes_z%pressure(i,j,k)
+          fluxes_z(i,j,k) = factor*fluxes_z(i,j,k)
        endif
     end do
     call syncthreads()
   end subroutine nimhd_scale_fluxes
+
+  attributes(device) subroutine coarse_emf_update(grid, bnew, father, nbor, emfx, emfy, emfz, &
+       & head_idx, block_idx, thread_idx, ngridmax, dtdx)
+    type(oct), device :: grid(*)
+    integer, device :: father(*), nbor(1:subgridsize,*)
+    real(kind=dp), device :: bnew(1:twotondim,1:6,*)
+    type(subgrid_2x3x3edge_primitive), intent(in) :: emfx
+    type(subgrid_3x2x3edge_primitive), intent(in) :: emfy
+    type(subgrid_3x3x2edge_primitive), intent(in) :: emfz
+    integer, value :: head_idx, block_idx, thread_idx, ngridmax
+    real(kind=dp), value :: dtdx
+    integer :: i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx, subgrid_idx, info
+    integer :: oc1, oc2, oc3, cc1, cc2, cc3
+    real(kind=dp) :: dflux, weight
+    logical :: c1, c2, c3
+
+    subgrid_idx = head_idx + block_idx
+    ! Coarse/fine EMF correction, with one thread per oct in the tile.
+    if (thread_idx < nsubgridtondim) then
+       call index_1Dto3D(thread_idx, nsubgrid, nsubgrid, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx)
+       i = 2*i_subgrid_idx; j = 2*j_subgrid_idx; k = 2*k_subgrid_idx
+       i_subgrid_idx = i_subgrid_idx + 1
+       j_subgrid_idx = j_subgrid_idx + 1
+       k_subgrid_idx = k_subgrid_idx + 1
+
+                ! 4 EMFz edges
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,  j_subgrid_idx-1,k_subgrid_idx, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx-1,j_subgrid_idx-1,k_subgrid_idx, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx-1,j_subgrid_idx,  k_subgrid_idx, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfz%edge_e(i,j,k)+emfz%edge_e(i,j,k+1))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,5,oc1),dflux);  info=atomicadd(bnew(cc1,1,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,4,oc2),dflux);  info=atomicadd(bnew(cc2,5,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,2,oc3),-dflux); info=atomicadd(bnew(cc3,4,oc3),-dflux); endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx-1,j_subgrid_idx,  k_subgrid_idx, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx-1,j_subgrid_idx+1,k_subgrid_idx, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,  j_subgrid_idx+1,k_subgrid_idx, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfz%edge_e(i,j+2,k)+emfz%edge_e(i,j+2,k+1))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,4,oc1),dflux);  info=atomicadd(bnew(cc1,5,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,2,oc2),-dflux); info=atomicadd(bnew(cc2,4,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,1,oc3),-dflux); info=atomicadd(bnew(cc3,2,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,  j_subgrid_idx+1,k_subgrid_idx, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx+1,j_subgrid_idx+1,k_subgrid_idx, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx+1,j_subgrid_idx,  k_subgrid_idx, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfz%edge_e(i+2,j+2,k)+emfz%edge_e(i+2,j+2,k+1))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,2,oc1),-dflux); info=atomicadd(bnew(cc1,4,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,1,oc2),-dflux); info=atomicadd(bnew(cc2,2,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,5,oc3),dflux);  info=atomicadd(bnew(cc3,1,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx+1,j_subgrid_idx,  k_subgrid_idx, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx+1,j_subgrid_idx-1,k_subgrid_idx, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,  j_subgrid_idx-1,k_subgrid_idx, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfz%edge_e(i+2,j,k)+emfz%edge_e(i+2,j,k+1))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,1,oc1),-dflux); info=atomicadd(bnew(cc1,2,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,5,oc2),dflux);  info=atomicadd(bnew(cc2,1,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,4,oc3),dflux);  info=atomicadd(bnew(cc3,5,oc3),-dflux); endif
+       end if
+
+                ! 4 EMFx edges
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx,  k_subgrid_idx-1, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx-1,k_subgrid_idx-1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx-1,k_subgrid_idx,   c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfx%edge_e(i,j,k)+emfx%edge_e(i+1,j,k))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,6,oc1),dflux);  info=atomicadd(bnew(cc1,2,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,5,oc2),dflux);  info=atomicadd(bnew(cc2,6,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,3,oc3),-dflux); info=atomicadd(bnew(cc3,5,oc3),-dflux); endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx-1,k_subgrid_idx,   c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx-1,k_subgrid_idx+1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx,  k_subgrid_idx+1, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfx%edge_e(i,j,k+2)+emfx%edge_e(i+1,j,k+2))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,5,oc1),dflux);  info=atomicadd(bnew(cc1,6,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,3,oc2),-dflux); info=atomicadd(bnew(cc2,5,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,2,oc3),-dflux); info=atomicadd(bnew(cc3,3,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx,  k_subgrid_idx+1, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx+1,k_subgrid_idx+1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx+1,k_subgrid_idx,   c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfx%edge_e(i,j+2,k+2)+emfx%edge_e(i+1,j+2,k+2))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,3,oc1),-dflux); info=atomicadd(bnew(cc1,5,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,2,oc2),-dflux); info=atomicadd(bnew(cc2,3,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,6,oc3),dflux);  info=atomicadd(bnew(cc3,2,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx+1,k_subgrid_idx,   c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx+1,k_subgrid_idx-1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx,  k_subgrid_idx-1, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfx%edge_e(i,j+2,k)+emfx%edge_e(i+1,j+2,k))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,2,oc1),-dflux); info=atomicadd(bnew(cc1,3,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,6,oc2),dflux);  info=atomicadd(bnew(cc2,2,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,5,oc3),dflux);  info=atomicadd(bnew(cc3,6,oc3),-dflux); endif
+       end if
+
+                ! 4 EMFy edges
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,  j_subgrid_idx,k_subgrid_idx-1, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx-1,j_subgrid_idx,k_subgrid_idx-1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx-1,j_subgrid_idx,k_subgrid_idx,   c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfy%edge_e(i,j,k)+emfy%edge_e(i,j+1,k))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,6,oc1),-dflux); info=atomicadd(bnew(cc1,1,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,4,oc2),-dflux); info=atomicadd(bnew(cc2,6,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,3,oc3),dflux);  info=atomicadd(bnew(cc3,4,oc3),dflux);  endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx-1,j_subgrid_idx,k_subgrid_idx,   c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx-1,j_subgrid_idx,k_subgrid_idx+1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,  j_subgrid_idx,k_subgrid_idx+1, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfy%edge_e(i,j,k+2)+emfy%edge_e(i,j+1,k+2))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,4,oc1),-dflux); info=atomicadd(bnew(cc1,6,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,3,oc2),dflux);  info=atomicadd(bnew(cc2,4,oc2),dflux);  endif
+          if(c3)then; info=atomicadd(bnew(cc3,1,oc3),dflux);  info=atomicadd(bnew(cc3,3,oc3),-dflux); endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,  j_subgrid_idx,k_subgrid_idx+1, c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx+1,j_subgrid_idx,k_subgrid_idx+1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx+1,j_subgrid_idx,k_subgrid_idx,   c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfy%edge_e(i+2,j,k+2)+emfy%edge_e(i+2,j+1,k+2))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,3,oc1),dflux);  info=atomicadd(bnew(cc1,4,oc1),dflux);  endif
+          if(c2)then; info=atomicadd(bnew(cc2,1,oc2),dflux);  info=atomicadd(bnew(cc2,3,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,6,oc3),-dflux); info=atomicadd(bnew(cc3,1,oc3),-dflux); endif
+       end if
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx+1,j_subgrid_idx,k_subgrid_idx,   c1,oc1,cc1)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx+1,j_subgrid_idx,k_subgrid_idx-1, c2,oc2,cc2)
+       call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,  j_subgrid_idx,k_subgrid_idx-1, c3,oc3,cc3)
+       if (c1 .or. c3) then
+          weight=1.0_dp; if(.not.c1 .or. .not.c2 .or. .not.c3) weight=0.5_dp
+          dflux=(emfy%edge_e(i+2,j,k)+emfy%edge_e(i+2,j+1,k))*0.25_dp*weight*dtdx
+          if(c1)then; info=atomicadd(bnew(cc1,1,oc1),dflux);  info=atomicadd(bnew(cc1,3,oc1),-dflux); endif
+          if(c2)then; info=atomicadd(bnew(cc2,6,oc2),-dflux); info=atomicadd(bnew(cc2,1,oc2),-dflux); endif
+          if(c3)then; info=atomicadd(bnew(cc3,4,oc3),-dflux); info=atomicadd(bnew(cc3,6,oc3),dflux);  endif
+       end if
+
+    end if
+  end subroutine coarse_emf_update
+
+  attributes(device) subroutine nimhd_zero_energy_fluxes(fluxes_x, fluxes_y, fluxes_z, thread_idx)
+    real(kind=dp), intent(inout) :: fluxes_x(0:2*nsubgrid,0:2*nsubgrid-1,0:2*nsubgrid-1)
+    real(kind=dp), intent(inout) :: fluxes_y(0:2*nsubgrid-1,0:2*nsubgrid,0:2*nsubgrid-1)
+    real(kind=dp), intent(inout) :: fluxes_z(0:2*nsubgrid-1,0:2*nsubgrid-1,0:2*nsubgrid)
+    integer, value :: thread_idx
+    integer :: work_idx, interface_array_size, i, j, k
+
+    interface_array_size = (2*nsubgrid+1) * (2*nsubgrid)**2
+
+    do work_idx = thread_idx, interface_array_size * 3 - 1, blockDim%x
+       if (work_idx < interface_array_size) then
+          call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid, i, j, k)
+          fluxes_x(i,j,k) = 0_dp
+       else if (work_idx < 2 * interface_array_size) then
+          call index_1Dto3D(work_idx - interface_array_size, 2*nsubgrid, 2*nsubgrid+1, i, j, k)
+          fluxes_y(i,j,k) = 0_dp
+       else
+          call index_1Dto3D(work_idx - 2*interface_array_size, 2*nsubgrid, 2*nsubgrid, i, j, k)
+          fluxes_z(i,j,k) = 0_dp
+       end if
+    end do
+
+    call syncthreads()
+
+  end subroutine nimhd_zero_energy_fluxes
+
+  attributes(device) subroutine nimhd_zero_fine_energy_fluxes(refined, fluxes_x, fluxes_y, fluxes_z, thread_idx)
+    logical(kind=1), intent(in) :: refined(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    real(kind=dp), intent(inout) :: fluxes_x(0:2*nsubgrid,0:2*nsubgrid-1,0:2*nsubgrid-1)
+    real(kind=dp), intent(inout) :: fluxes_y(0:2*nsubgrid-1,0:2*nsubgrid,0:2*nsubgrid-1)
+    real(kind=dp), intent(inout) :: fluxes_z(0:2*nsubgrid-1,0:2*nsubgrid-1,0:2*nsubgrid)
+    integer, value :: thread_idx
+
+    integer :: work_idx, interface_array_size
+    integer :: i, j, k
+
+    interface_array_size = (2*nsubgrid+1) * (2*nsubgrid)**2
+
+    do work_idx = thread_idx, interface_array_size * 3 - 1, blockDim%x
+
+       if (work_idx < interface_array_size) then ! Zero fluxes across the x interfaces
+          ! Compute the indices in the interface state arrays
+          call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid, i, j, k)
+
+          if (refined(i+1,j+2,k+2) .or. refined(i+2,j+2,k+2))then
+             fluxes_x(i, j, k) = 0_dp
+          endif
+
+       else if (work_idx < 2 * interface_array_size) then ! Zero fluxes across the y interfaces
+          ! Compute the indices in the interface state arrays
+          call index_1Dto3D(work_idx - interface_array_size, 2*nsubgrid, 2*nsubgrid+1, i, j, k)
+
+          if (refined(i+2,j+1,k+2) .or. refined(i+2,j+2,k+2))then
+             fluxes_y(i, j, k) = 0_dp
+          endif
+
+       else ! Zero fluxes across the z interfaces
+          ! Compute the indices in the interface state arrays
+          call index_1Dto3D(work_idx - 2 * interface_array_size, 2*nsubgrid, 2*nsubgrid, i, j, k)
+
+          if (refined(i+2,j+2,k+1) .or. refined(i+2,j+2,k+2))then
+             fluxes_z(i, j, k) = 0_dp
+          endif
+
+       end if
+    end do
+
+    call syncthreads()
+
+  end subroutine nimhd_zero_fine_energy_fluxes
+
+  ! Only the total-energy flux is transported by non-ideal diffusion.
+  attributes(device) subroutine nimhd_coarse_cell_update(grid, unew, bnew, father, nbor, fluxes_x, fluxes_y, fluxes_z, &
+       & emfx, emfy, emfz, head_idx, block_idx, thread_idx, ngridmax, dtdx)
+    type(oct), device :: grid(*)
+    integer, device :: father(*), nbor(1:subgridsize,*)
+    real(kind=dp), device :: unew(1:twotondim,1:nvar,*), bnew(1:twotondim,1:6,*)
+    real(kind=dp), intent(in) :: fluxes_x(0:2*nsubgrid,0:2*nsubgrid-1,0:2*nsubgrid-1)
+    real(kind=dp), intent(in) :: fluxes_y(0:2*nsubgrid-1,0:2*nsubgrid,0:2*nsubgrid-1)
+    real(kind=dp), intent(in) :: fluxes_z(0:2*nsubgrid-1,0:2*nsubgrid-1,0:2*nsubgrid)
+    type(subgrid_2x3x3edge_primitive), intent(in) :: emfx
+    type(subgrid_3x2x3edge_primitive), intent(in) :: emfy
+    type(subgrid_3x3x2edge_primitive), intent(in) :: emfz
+    integer, value :: head_idx, block_idx, thread_idx, ngridmax
+    real(kind=dp), value :: dtdx
+    integer :: i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx
+    integer :: face, work_idx, interface_array_size, ind_nbor, source_idx, father_idx, cell_idx, info
+    real(kind=dp) :: energy_flux, coarse_flux_scale
+
+    interface_array_size = nsubgrid**(ndim-1)
+    coarse_flux_scale = dtdx * (1.0_dp / real(twotondim,dp))
+    if (thread_idx < 6*interface_array_size) then
+       face = thread_idx / interface_array_size
+       work_idx = mod(thread_idx, interface_array_size)
+       energy_flux = 0_dp
+       select case (face/2)
+       case (0)
+          call index_1Dto2D(work_idx, nsubgrid, j_subgrid_idx, k_subgrid_idx)
+          j_subgrid_idx = j_subgrid_idx + 1; k_subgrid_idx = k_subgrid_idx + 1
+          i_subgrid_idx = 0
+          if (mod(face,2) == 1) i_subgrid_idx = nsubgrid + 1
+          do j = 2*j_subgrid_idx - 2, 2*j_subgrid_idx - 1
+             do k = 2*k_subgrid_idx - 2, 2*k_subgrid_idx - 1
+                if (mod(face,2) == 0) then
+                   energy_flux = energy_flux - fluxes_x(0,j,k)*coarse_flux_scale
+                else
+                   energy_flux = energy_flux + fluxes_x(2*nsubgrid,j,k)*coarse_flux_scale
+                endif
+             end do
+          end do
+       case (1)
+          call index_1Dto2D(work_idx, nsubgrid, i_subgrid_idx, k_subgrid_idx)
+          i_subgrid_idx = i_subgrid_idx + 1; k_subgrid_idx = k_subgrid_idx + 1
+          j_subgrid_idx = 0
+          if (mod(face,2) == 1) j_subgrid_idx = nsubgrid + 1
+          do i = 2*i_subgrid_idx - 2, 2*i_subgrid_idx - 1
+             do k = 2*k_subgrid_idx - 2, 2*k_subgrid_idx - 1
+                if (mod(face,2) == 0) then
+                   energy_flux = energy_flux - fluxes_y(i,0,k)*coarse_flux_scale
+                else
+                   energy_flux = energy_flux + fluxes_y(i,2*nsubgrid,k)*coarse_flux_scale
+                endif
+             end do
+          end do
+       case (2)
+          call index_1Dto2D(work_idx, nsubgrid, i_subgrid_idx, j_subgrid_idx)
+          i_subgrid_idx = i_subgrid_idx + 1; j_subgrid_idx = j_subgrid_idx + 1
+          k_subgrid_idx = 0
+          if (mod(face,2) == 1) k_subgrid_idx = nsubgrid + 1
+          do i = 2*i_subgrid_idx - 2, 2*i_subgrid_idx - 1
+             do j = 2*j_subgrid_idx - 2, 2*j_subgrid_idx - 1
+                if (mod(face,2) == 0) then
+                   energy_flux = energy_flux - fluxes_z(i,j,0)*coarse_flux_scale
+                else
+                   energy_flux = energy_flux + fluxes_z(i,j,2*nsubgrid)*coarse_flux_scale
+                endif
+             end do
+          end do
+       end select
+       ind_nbor = 1 + i_subgrid_idx + nsubgridp2*j_subgrid_idx + nsubgridp2sq*k_subgrid_idx
+       source_idx = nbor(ind_nbor, head_idx + block_idx)
+       if (source_idx > ngridmax) then
+          father_idx = father(source_idx)
+          i = grid(source_idx)%ckey(1) - 2*grid(father_idx)%ckey(1)
+          j = grid(source_idx)%ckey(2) - 2*grid(father_idx)%ckey(2)
+          k = grid(source_idx)%ckey(3) - 2*grid(father_idx)%ckey(3)
+          cell_idx = 1 + i + 2*j + 4*k
+          info = atomicadd(unew(cell_idx,5,father_idx), energy_flux)
+       endif
+    endif
+    call coarse_emf_update(grid, bnew, father, nbor, emfx, emfy, emfz, &
+         & head_idx, block_idx, thread_idx, ngridmax, dtdx)
+  end subroutine nimhd_coarse_cell_update
 
   attributes(global) subroutine nimhd_coeff_kernel(uold, bold, eta, head_idx, num_octs, &
        & gamma, smallr, etamag, eta_ad)
