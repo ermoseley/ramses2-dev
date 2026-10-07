@@ -245,6 +245,7 @@ subroutine init_refine_restart(s,ilevel,ncpu_file,levelmin_file,nlevelmax_file,n
 
   ! Local variables
   integer::icpu,ilun
+  integer::nbyte=storage_size(1.0_dp)/8
   integer(kind=8)::iskip_amr=0,iskip_hydro=0,iskip_grav=0,iskip_rt,iskip_cr
   integer::i,ind,istart,iend,noct_tmp,ilev,ioct,i1,j1,k1
   integer::igrid,igrid_start,nleft,nright,ileft,iright
@@ -364,9 +365,9 @@ subroutine init_refine_restart(s,ilevel,ncpu_file,levelmin_file,nlevelmax_file,n
         file_hydro='backup_'//TRIM(nchar)//'/hydro.'//TRIM(ncharcpu)
         open(unit=11,file=file_hydro,access="stream",action="read",form='unformatted')
 #ifdef MHD
-        iskip_hydro=17+4*(nlevelmax_file-levelmin_file+1)+(8*twotondim*(nvar+6))*int(nskip_file(icpu),8)
+        iskip_hydro=17+4*(nlevelmax_file-levelmin_file+1)+(nbyte*twotondim*(nvar+6))*int(nskip_file(icpu),8)
 #else
-        iskip_hydro=17+4*(nlevelmax_file-levelmin_file+1)+(8*twotondim*nvar)*int(nskip_file(icpu),8)
+        iskip_hydro=17+4*(nlevelmax_file-levelmin_file+1)+(nbyte*twotondim*nvar)*int(nskip_file(icpu),8)
 #endif
      endif
 
@@ -374,21 +375,21 @@ subroutine init_refine_restart(s,ilevel,ncpu_file,levelmin_file,nlevelmax_file,n
      if(r%poisson)then
         file_grav='backup_'//TRIM(nchar)//'/grav.'//TRIM(ncharcpu)
         open(unit=12,file=file_grav,access="stream",action="read",form='unformatted')
-        iskip_grav=17+4*(nlevelmax_file-levelmin_file+1)+(8*twotondim*(ndim+1))*int(nskip_file(icpu),8)
+        iskip_grav=17+4*(nlevelmax_file-levelmin_file+1)+(nbyte*twotondim*(ndim+1))*int(nskip_file(icpu),8)
      endif
 
      ! Prepare reading the RT file
      if(r%rt)then
         file_rt='backup_'//TRIM(nchar)//'/rt.'//TRIM(ncharcpu)
         open(unit=13,file=file_rt,access="stream",action="read",form='unformatted')
-        iskip_rt=17+4*(nlevelmax_file-levelmin_file+1)+(8*twotondim*nrtvar)*int(nskip_file(icpu),8)
+        iskip_rt=17+4*(nlevelmax_file-levelmin_file+1)+(nbyte*twotondim*nrtvar)*int(nskip_file(icpu),8)
      endif
 
      ! Prepare reading the CR file
      if(r%cr)then
         file_cr='backup_'//TRIM(nchar)//'/cr.'//TRIM(ncharcpu)
         open(unit=14,file=file_cr,access="stream",action="read",form='unformatted')
-        iskip_cr=17+4*(nlevelmax_file-levelmin_file+1)+(8*twotondim*ncruvar)*int(nskip_file(icpu),8)
+        iskip_cr=17+4*(nlevelmax_file-levelmin_file+1)+(nbyte*twotondim*ncruvar)*int(nskip_file(icpu),8)
      endif
 
      ! Loop over useful octs in file
@@ -406,33 +407,33 @@ subroutine init_refine_restart(s,ilevel,ncpu_file,levelmin_file,nlevelmax_file,n
         ! Read values from HYDRO files
         if(r%hydro)then
 #ifdef MHD
-           ipos=iskip_hydro+(8*twotondim*(nvar+6))*int(i-1,8)
+           ipos=iskip_hydro+(nbyte*twotondim*(nvar+6))*int(i-1,8)
 #else
-           ipos=iskip_hydro+(8*twotondim*nvar)*int(i-1,8)
+           ipos=iskip_hydro+(nbyte*twotondim*nvar)*int(i-1,8)
 #endif
            read(11,POS=ipos)uold
 #ifdef MHD
-           ipos=ipos+8*twotondim*nvar
+           ipos=ipos+nbyte*twotondim*nvar
            read(11,POS=ipos)bold
 #endif
         endif
 
         ! Read values from GRAV files
         if(r%poisson)then
-           ipos=iskip_grav+(8*twotondim*(ndim+1))*int(i-1,8)
+           ipos=iskip_grav+(nbyte*twotondim*(ndim+1))*int(i-1,8)
            read(12,POS=ipos)phi
-           ipos=ipos+8*twotondim
+           ipos=ipos+nbyte*twotondim
            read(12,POS=ipos)f
         endif
 
         ! Read values from RT files
         if(r%rt)then
-           ipos=iskip_rt+(8*twotondim*nrtvar)*int(i-1,8)
+           ipos=iskip_rt+(nbyte*twotondim*nrtvar)*int(i-1,8)
            read(13,POS=ipos)rtuold
         endif
         ! Read values from CR files
         if(r%cr)then
-           ipos=iskip_cr+(8*twotondim*ncruvar)*int(i-1,8)
+           ipos=iskip_cr+(nbyte*twotondim*ncruvar)*int(i-1,8)
            read(14,POS=ipos)cruold
         endif
         ! Create new oct in memory
