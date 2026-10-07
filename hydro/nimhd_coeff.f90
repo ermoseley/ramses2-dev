@@ -10,7 +10,9 @@ contains
   ! eta_a*[(J.B)B-B^2*J]. By default they are the namelist values
   ! etamag (or eta_ohm) and eta_ad. Edit this routine to make the
   ! coefficients depend on density, temperature, ionization or field
-  ! strength.
+  ! strength. They are evaluated once per split step and held over its
+  ! substeps, which is exact for coefficients that are constant or depend
+  ! on density; the B^2 of the ambipolar EMF follows the current field.
   !-----------------------------------------------------------------
 #ifdef _CUDA
   attributes(host,device) &
