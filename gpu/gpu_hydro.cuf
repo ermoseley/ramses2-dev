@@ -3572,26 +3572,22 @@ contains
 #endif
 
 #ifdef MHD
-  ! Coefficient on an edge from the four cells sharing it: the harmonic mean, which is exact for a
-  ! jump between two cells in the plane of the edge, and zero if one of the cells has none.
-  attributes(device) function nimhd_edge_eta(c1, c2, c3, c4) result(eta)
-    real(kind=dp), value :: c1, c2, c3, c4
+  ! Coefficient on an edge times scale from the reciprocal coefficients of the four cells sharing
+  ! it: the harmonic mean, which is exact for a jump between two cells in the plane of the edge.
+  attributes(device) function nimhd_edge_eta(c1, c2, c3, c4, scale) result(eta)
+    real(kind=dp), value :: c1, c2, c3, c4, scale
     real(kind=dp) :: eta
-    if (min(c1, c2, c3, c4) > 0.0_dp) then
-       eta = 4.0_dp/(1.0_dp/c1 + 1.0_dp/c2 + 1.0_dp/c3 + 1.0_dp/c4)
-    else
-       eta = 0.0_dp
-    endif
+    eta = scale/(c1 + c2 + c3 + c4)
   end function nimhd_edge_eta
 
   ! Non-ideal EMF on cell edges, E = -eta_o*J + eta_a*[(J.B)B - B^2*J]. The ambipolar EMF of
   ! each edge is deposited with the transpose of its transverse current average, so that the
   ! operator is dissipative for any coefficients; v holds the transverse components one cell
   ! beyond the oct along each edge.
-  attributes(device) subroutine cmpnimhd_mhd(bf, eta_o_cell, eta_a_cell, emfx, emfy, emfz, vx, vy, vz, dx, thread_idx)
+  attributes(device) subroutine cmpnimhd_mhd(bf, ieta_o, ieta_a, emfx, emfy, emfz, vx, vy, vz, dx, thread_idx)
     type(subgrid_face_b_t), intent(in) :: bf
-    real(kind=dp), intent(in) :: eta_o_cell(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
-    real(kind=dp), intent(in) :: eta_a_cell(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    real(kind=dp), intent(in) :: ieta_o(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    real(kind=dp), intent(in) :: ieta_a(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
     type(subgrid_2x3x3edge_primitive), intent(inout) :: emfx
     type(subgrid_3x2x3edge_primitive), intent(inout) :: emfy
     type(subgrid_3x3x2edge_primitive), intent(inout) :: emfz
@@ -3601,9 +3597,11 @@ contains
     real(kind=dp), value :: dx
     integer, value :: thread_idx
     integer :: work_idx, emf_size, ext_size, I, J, K, X, Y, Z
-    real(kind=dp) :: jx, jy, jz, bxe, bye, bze, jdotb, b2, eta_o, eta_a
+    real(kind=dp) :: jx, jy, jz, bxe, bye, bze, jdotb, b2, eta_o, eta_a, scale
+    real(kind=dp), parameter :: third = 1.0_dp/3.0_dp, twelfth = 1.0_dp/12.0_dp
 
     emf_size = (2*nsubgrid+1)**2 * (2*nsubgrid)
+    scale = 4.0_dp/dx
     ext_size = (2*nsubgrid+1)**2 * (2*nsubgrid+2)
 
     do work_idx = thread_idx, ext_size*3 - 1, blockDim%x
@@ -3625,14 +3623,13 @@ contains
           bye = 0.5_dp*(bf%by(X-1,Y,Z)+bf%by(X,Y,Z))
           bze = 0.125_dp*( bf%bz(X-1,Y-1,Z  )+bf%bz(X,Y-1,Z  )+bf%bz(X-1,Y,Z  )+bf%bz(X,Y,Z  ) &
                &         + bf%bz(X-1,Y-1,Z+1)+bf%bz(X,Y-1,Z+1)+bf%bz(X-1,Y,Z+1)+bf%bz(X,Y,Z+1) )
-          eta_o = nimhd_edge_eta(eta_o_cell(X-1,Y-1,Z), eta_o_cell(X,Y-1,Z), eta_o_cell(X-1,Y,Z), eta_o_cell(X,Y,Z))
-          eta_a = nimhd_edge_eta(eta_a_cell(X-1,Y-1,Z), eta_a_cell(X,Y-1,Z), eta_a_cell(X-1,Y,Z), eta_a_cell(X,Y,Z))
+          eta_o = nimhd_edge_eta(ieta_o(X-1,Y-1,Z), ieta_o(X,Y-1,Z), ieta_o(X-1,Y,Z), ieta_o(X,Y,Z), scale)
+          eta_a = nimhd_edge_eta(ieta_a(X-1,Y-1,Z), ieta_a(X,Y-1,Z), ieta_a(X-1,Y,Z), ieta_a(X,Y,Z), scale)
           jdotb = jx*bxe + jy*bye + jz*bze
           b2 = bxe*bxe + bye*bye + bze*bze
-          eta_a = eta_a/dx
           vz(X,Y,Z,1) = eta_a*(jdotb*bxe - b2*jx)
           vz(X,Y,Z,2) = eta_a*(jdotb*bye - b2*jy)
-          if (K >= 1 .and. K <= 2*nsubgrid) emfz%edge_e(I,J,K-1) = eta_a*(jdotb*bze - b2*jz)/3.0_dp - eta_o*jz/dx
+          if (K >= 1 .and. K <= 2*nsubgrid) emfz%edge_e(I,J,K-1) = eta_a*(jdotb*bze - b2*jz)*third - eta_o*jz
        else if (work_idx < 2*ext_size) then
           call index_1Dto3D(work_idx - ext_size, 2*nsubgrid+1, 2*nsubgrid+2, I, J, K)
           X = I+2; Y = J+1; Z = K+2
@@ -3651,14 +3648,13 @@ contains
           bze = 0.5_dp*(bf%bz(X-1,Y,Z)+bf%bz(X,Y,Z))
           bye = 0.125_dp*( bf%by(X-1,Y,Z-1)+bf%by(X,Y,Z-1)+bf%by(X-1,Y+1,Z-1)+bf%by(X,Y+1,Z-1) &
                &         + bf%by(X-1,Y,Z  )+bf%by(X,Y,Z  )+bf%by(X-1,Y+1,Z  )+bf%by(X,Y+1,Z  ) )
-          eta_o = nimhd_edge_eta(eta_o_cell(X-1,Y,Z-1), eta_o_cell(X,Y,Z-1), eta_o_cell(X-1,Y,Z), eta_o_cell(X,Y,Z))
-          eta_a = nimhd_edge_eta(eta_a_cell(X-1,Y,Z-1), eta_a_cell(X,Y,Z-1), eta_a_cell(X-1,Y,Z), eta_a_cell(X,Y,Z))
+          eta_o = nimhd_edge_eta(ieta_o(X-1,Y,Z-1), ieta_o(X,Y,Z-1), ieta_o(X-1,Y,Z), ieta_o(X,Y,Z), scale)
+          eta_a = nimhd_edge_eta(ieta_a(X-1,Y,Z-1), ieta_a(X,Y,Z-1), ieta_a(X-1,Y,Z), ieta_a(X,Y,Z), scale)
           jdotb = jx*bxe + jy*bye + jz*bze
           b2 = bxe*bxe + bye*bye + bze*bze
-          eta_a = eta_a/dx
           vy(X,Y,Z,1) = eta_a*(jdotb*bxe - b2*jx)
           vy(X,Y,Z,2) = eta_a*(jdotb*bze - b2*jz)
-          if (J >= 1 .and. J <= 2*nsubgrid) emfy%edge_e(I,J-1,K) = eta_a*(jdotb*bye - b2*jy)/3.0_dp - eta_o*jy/dx
+          if (J >= 1 .and. J <= 2*nsubgrid) emfy%edge_e(I,J-1,K) = eta_a*(jdotb*bye - b2*jy)*third - eta_o*jy
        else
           call index_1Dto3D(work_idx - 2*ext_size, 2*nsubgrid+2, 2*nsubgrid+1, I, J, K)
           X = I+1; Y = J+2; Z = K+2
@@ -3677,14 +3673,13 @@ contains
           bze = 0.5_dp*(bf%bz(X,Y-1,Z)+bf%bz(X,Y,Z))
           bxe = 0.125_dp*( bf%bx(X,Y-1,Z-1)+bf%bx(X+1,Y-1,Z-1)+bf%bx(X,Y,Z-1)+bf%bx(X+1,Y,Z-1) &
                &         + bf%bx(X,Y-1,Z  )+bf%bx(X+1,Y-1,Z  )+bf%bx(X,Y,Z  )+bf%bx(X+1,Y,Z  ) )
-          eta_o = nimhd_edge_eta(eta_o_cell(X,Y-1,Z-1), eta_o_cell(X,Y,Z-1), eta_o_cell(X,Y-1,Z), eta_o_cell(X,Y,Z))
-          eta_a = nimhd_edge_eta(eta_a_cell(X,Y-1,Z-1), eta_a_cell(X,Y,Z-1), eta_a_cell(X,Y-1,Z), eta_a_cell(X,Y,Z))
+          eta_o = nimhd_edge_eta(ieta_o(X,Y-1,Z-1), ieta_o(X,Y,Z-1), ieta_o(X,Y-1,Z), ieta_o(X,Y,Z), scale)
+          eta_a = nimhd_edge_eta(ieta_a(X,Y-1,Z-1), ieta_a(X,Y,Z-1), ieta_a(X,Y-1,Z), ieta_a(X,Y,Z), scale)
           jdotb = jx*bxe + jy*bye + jz*bze
           b2 = bxe*bxe + bye*bye + bze*bze
-          eta_a = eta_a/dx
           vx(X,Y,Z,1) = eta_a*(jdotb*bye - b2*jy)
           vx(X,Y,Z,2) = eta_a*(jdotb*bze - b2*jz)
-          if (I >= 1 .and. I <= 2*nsubgrid) emfx%edge_e(I-1,J,K) = eta_a*(jdotb*bxe - b2*jx)/3.0_dp - eta_o*jx/dx
+          if (I >= 1 .and. I <= 2*nsubgrid) emfx%edge_e(I-1,J,K) = eta_a*(jdotb*bxe - b2*jx)*third - eta_o*jx
        end if
     end do
 
@@ -3696,19 +3691,19 @@ contains
           X = I+2; Y = J+2; Z = K+2
           emfz%edge_e(I,J,K) = emfz%edge_e(I,J,K) + ( &
                & vx(X-1,Y,Z  ,2) + vx(X,Y,Z  ,2) + vx(X-1,Y,Z+1,2) + vx(X,Y,Z+1,2) + &
-               & vy(X,Y-1,Z  ,2) + vy(X,Y,Z  ,2) + vy(X,Y-1,Z+1,2) + vy(X,Y,Z+1,2) )/12.0_dp
+               & vy(X,Y-1,Z  ,2) + vy(X,Y,Z  ,2) + vy(X,Y-1,Z+1,2) + vy(X,Y,Z+1,2) )*twelfth
        else if (work_idx < 2*emf_size) then
           call index_1Dto3D(work_idx - emf_size, 2*nsubgrid+1, 2*nsubgrid, I, J, K)
           X = I+2; Y = J+2; Z = K+2
           emfy%edge_e(I,J,K) = emfy%edge_e(I,J,K) + ( &
                & vz(X,Y,Z-1,2) + vz(X,Y+1,Z-1,2) + vz(X,Y,Z,2) + vz(X,Y+1,Z,2) + &
-               & vx(X-1,Y,Z,1) + vx(X,Y,Z,1) + vx(X-1,Y+1,Z,1) + vx(X,Y+1,Z,1) )/12.0_dp
+               & vx(X-1,Y,Z,1) + vx(X,Y,Z,1) + vx(X-1,Y+1,Z,1) + vx(X,Y+1,Z,1) )*twelfth
        else
           call index_1Dto3D(work_idx - 2*emf_size, 2*nsubgrid, 2*nsubgrid+1, I, J, K)
           X = I+2; Y = J+2; Z = K+2
           emfx%edge_e(I,J,K) = emfx%edge_e(I,J,K) + ( &
                & vy(X,Y-1,Z,1) + vy(X+1,Y-1,Z,1) + vy(X,Y,Z,1) + vy(X+1,Y,Z,1) + &
-               & vz(X,Y,Z-1,1) + vz(X+1,Y,Z-1,1) + vz(X,Y,Z,1) + vz(X+1,Y,Z,1) )/12.0_dp
+               & vz(X,Y,Z-1,1) + vz(X+1,Y,Z-1,1) + vz(X,Y,Z,1) + vz(X+1,Y,Z,1) )*twelfth
        end if
     end do
 
@@ -3732,14 +3727,14 @@ contains
   end function nimhd_face_b
 
   attributes(device) subroutine subgrid_load_nimhd(grid, eta, bin, nbor, head_idx, block_idx, thread_idx, &
-       & eta_o, eta_a, refined, bf)
+       & ieta_o, ieta_a, refined, bf)
     type(oct), device :: grid(*)
     real(kind=dp), device :: eta(1:twotondim,1:2,*)
     real(kind=dp), device :: bin(1:twotondim,1:6,*)
     integer(kind=4), device :: nbor(1:subgridsize,*)
     integer(kind=4), value :: head_idx, block_idx, thread_idx
-    real(kind=dp), intent(inout) :: eta_o(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
-    real(kind=dp), intent(inout) :: eta_a(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    real(kind=dp), intent(inout) :: ieta_o(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    real(kind=dp), intent(inout) :: ieta_a(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
     logical(kind=1), intent(inout) :: refined(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
     type(subgrid_face_b_t), intent(inout) :: bf
     integer :: work_idx, ind_nbor, work_size
@@ -3782,8 +3777,8 @@ contains
        if (i >= 1 .and. i <= 2*nsubgrid+2 .and. j >= 1 .and. j <= 2*nsubgrid+2 &
             & .and. k >= 1 .and. k <= 2*nsubgrid+2) then
           refined(i,j,k) = refined_cell
-          eta_o(i,j,k) = eta(cell_idx, 1, source_idx)
-          eta_a(i,j,k) = eta(cell_idx, 2, source_idx)
+          ieta_o(i,j,k) = eta(cell_idx, 1, source_idx)
+          ieta_a(i,j,k) = eta(cell_idx, 2, source_idx)
        endif
     end do
     call syncthreads()
@@ -4356,19 +4351,21 @@ contains
     bb(2) = 0.5_dp*(bold(cell_idx,2,oct_idx)+bold(cell_idx,5,oct_idx))
     bb(3) = 0.5_dp*(bold(cell_idx,3,oct_idx)+bold(cell_idx,6,oct_idx))
     call nimhd_coeff(uu, bb, gamma, etamag, eta_ad, eta_o, eta_a)
-    eta(cell_idx,1,oct_idx) = eta_o
-    eta(cell_idx,2,oct_idx) = eta_a
+    ! eta holds the reciprocal coefficients, so that the edges take their harmonic mean with one
+    ! division; coefficients below 1d-30 (in particular 0) are raised to it to keep them finite
+    eta(cell_idx,1,oct_idx) = 1.0_dp/max(eta_o, 1.0e-30_dp)
+    eta(cell_idx,2,oct_idx) = 1.0_dp/max(eta_a, 1.0e-30_dp)
   end subroutine nimhd_coeff_kernel
 
   ! Upper bound of eta_o + eta_a*B^2 for the edge shared by the four cells (X,Y,Z) - a*d1 - b*d2,
   ! a,b in {0,1}, from the largest coefficients and face B components of these cells. It is
   ! zero when the edge EMF is zeroed, or with coarse_fine unless the edge lies between leaf
   ! and refined cells.
-  attributes(device) function nimhd_chi(bf, eta_o_cell, eta_a_cell, refined, X, Y, Z, i1, j1, k1, i2, j2, k2, &
+  attributes(device) function nimhd_chi(bf, ieta_o, ieta_a, refined, X, Y, Z, i1, j1, k1, i2, j2, k2, &
        & coarse_fine) result(chi)
     type(subgrid_face_b_t), intent(in) :: bf
-    real(kind=dp), intent(in) :: eta_o_cell(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
-    real(kind=dp), intent(in) :: eta_a_cell(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    real(kind=dp), intent(in) :: ieta_o(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    real(kind=dp), intent(in) :: ieta_a(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
     logical(kind=1), intent(in) :: refined(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
     integer, value :: X, Y, Z, i1, j1, k1, i2, j2, k2
     logical, value :: coarse_fine
@@ -4376,7 +4373,7 @@ contains
     integer :: a, b, i, j, k, nref
 
     chi = 0.0_dp
-    eta_o = 0.0_dp; eta_a = 0.0_dp; bx2 = 0.0_dp; by2 = 0.0_dp; bz2 = 0.0_dp
+    eta_o = huge(1.0_dp); eta_a = huge(1.0_dp); bx2 = 0.0_dp; by2 = 0.0_dp; bz2 = 0.0_dp
     nref = 0
     do b = 0, 1
        do a = 0, 1
@@ -4384,8 +4381,8 @@ contains
           j = Y - a*j1 - b*j2
           k = Z - a*k1 - b*k2
           if (refined(i,j,k)) nref = nref + 1
-          eta_o = max(eta_o, eta_o_cell(i,j,k))
-          eta_a = max(eta_a, eta_a_cell(i,j,k))
+          eta_o = min(eta_o, ieta_o(i,j,k))
+          eta_a = min(eta_a, ieta_a(i,j,k))
           bx2 = max(bx2, bf%bx(i,j,k)**2, bf%bx(i+1,j,k)**2)
           by2 = max(by2, bf%by(i,j,k)**2, bf%by(i,j+1,k)**2)
           bz2 = max(bz2, bf%bz(i,j,k)**2, bf%bz(i,j,k+1)**2)
@@ -4396,6 +4393,9 @@ contains
     else
        if (nref > 0) return
     endif
+    ! Largest coefficients of the four cells, from their smallest reciprocals
+    eta_o = 1.0_dp/eta_o
+    eta_a = 1.0_dp/eta_a
     chi = eta_o + eta_a*(bx2 + by2 + bz2)
   end function nimhd_chi
 
@@ -4410,8 +4410,8 @@ contains
     real(kind=dp), value :: dx, nimhd_courant
     logical, value :: coarse_fine
 
-    real(kind=dp), shared :: eta_o(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
-    real(kind=dp), shared :: eta_a(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    real(kind=dp), shared :: ieta_o(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    real(kind=dp), shared :: ieta_a(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
     logical(kind=1), shared :: refined(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
     type(subgrid_face_b_t), shared :: bf
     integer :: block_idx, thread_idx, work_idx, emf_size, info, I, J, K
@@ -4423,20 +4423,20 @@ contains
     if (block_idx >= num_subgrids) return
 
     call subgrid_load_nimhd(grid, eta, bin, nbor, head_idx, block_idx, thread_idx, &
-         & eta_o, eta_a, refined, bf)
+         & ieta_o, ieta_a, refined, bf)
 
     dt_loc = huge(0d0)
     emf_size = (2*nsubgrid+1)**2 * (2*nsubgrid)
     do work_idx = thread_idx, emf_size*3 - 1, blockDim%x
        if (work_idx < emf_size) then
           call index_1Dto3D(work_idx, 2*nsubgrid+1, 2*nsubgrid+1, I, J, K)
-          chi = nimhd_chi(bf, eta_o, eta_a, refined, I+2, J+2, K+2, 1, 0, 0, 0, 1, 0, coarse_fine)
+          chi = nimhd_chi(bf, ieta_o, ieta_a, refined, I+2, J+2, K+2, 1, 0, 0, 0, 1, 0, coarse_fine)
        else if (work_idx < 2*emf_size) then
           call index_1Dto3D(work_idx - emf_size, 2*nsubgrid+1, 2*nsubgrid, I, J, K)
-          chi = nimhd_chi(bf, eta_o, eta_a, refined, I+2, J+2, K+2, 1, 0, 0, 0, 0, 1, coarse_fine)
+          chi = nimhd_chi(bf, ieta_o, ieta_a, refined, I+2, J+2, K+2, 1, 0, 0, 0, 0, 1, coarse_fine)
        else
           call index_1Dto3D(work_idx - 2*emf_size, 2*nsubgrid, 2*nsubgrid+1, I, J, K)
-          chi = nimhd_chi(bf, eta_o, eta_a, refined, I+2, J+2, K+2, 0, 1, 0, 0, 0, 1, coarse_fine)
+          chi = nimhd_chi(bf, ieta_o, ieta_a, refined, I+2, J+2, K+2, 0, 1, 0, 0, 0, 1, coarse_fine)
        end if
        if (chi /= chi) then
           dt_loc = 0d0
@@ -6070,8 +6070,8 @@ contains
     integer, intent(in), value :: ngridmax, ilevel, levelmin, levelmax
     real(kind=dp), intent(in), value :: dt, dx, mu, nu, mut, gt, mut1, weight, bweight
 
-    real(kind=dp), shared :: eta_o(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
-    real(kind=dp), shared :: eta_a(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    real(kind=dp), shared :: ieta_o(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
+    real(kind=dp), shared :: ieta_a(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
     logical(kind=1), shared :: refined(1:2*nsubgrid+2, 1:2*nsubgrid+2, 1:2*nsubgrid+2)
     type(subgrid_face_b_t), shared :: bf
     type(subgrid_2x3x3edge_primitive), shared :: emfx
@@ -6092,9 +6092,9 @@ contains
     if (block_idx >= num_subgrids) return
 
     call subgrid_load_nimhd(grid, eta, yjm1, nbor, head_idx, block_idx, thread_idx, &
-         & eta_o, eta_a, refined, bf)
+         & ieta_o, ieta_a, refined, bf)
 
-    call cmpnimhd_mhd(bf, eta_o, eta_a, emfx, emfy, emfz, vx, vy, vz, dx, thread_idx)
+    call cmpnimhd_mhd(bf, ieta_o, ieta_a, emfx, emfy, emfz, vx, vy, vz, dx, thread_idx)
 
     if (ilevel > levelmin) call nimhd_zero_energy_fluxes(fluxes_x, fluxes_y, fluxes_z, thread_idx)
     if (heat) call nimhd_poynting_fluxes(fluxes_x, fluxes_y, fluxes_z, emfx, emfy, emfz, bf, thread_idx)
