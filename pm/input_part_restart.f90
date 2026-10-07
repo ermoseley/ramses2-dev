@@ -247,9 +247,10 @@ subroutine input_part_restart(r,g,p,ncpu_file,npart_file,mpart_loc)
   ! restart file and allocate particle-based arrays.
   !------------------------------------------------------------
   integer::ipart,ipart_old
-  integer::i,idim,icpu,ileft,iright,nrest,ipos,iskip
+  integer::i,idim,icpu,ileft,iright,nrest
+  integer::nbyte=storage_size(1.0_dp)/8
   integer::istart,iend
-  integer(kind=8)::nleft,nright,npart_tot
+  integer(kind=8)::nleft,nright,npart_tot,ipos,iskip
   integer(kind=8),dimension(0:ncpu_file)::ncum_file
 
   real(dp),allocatable,dimension(:)::xdp
@@ -333,30 +334,30 @@ subroutine input_part_restart(r,g,p,ncpu_file,npart_file,mpart_loc)
 
      ! Read positions
      do idim=1,ndim
-        ipos=iskip+8*(istart-1)
+        ipos=iskip+nbyte*(istart-1)
         read(10,POS=ipos)xdp
         ipart=ipart_old
         do i=istart,iend
            ipart=ipart+1
            p%xp(ipart,idim)=xdp(i)
         end do
-        iskip=iskip+8*npart_file(icpu)
+        iskip=iskip+nbyte*npart_file(icpu)
      end do
 
      ! Read velocities
      do idim=1,ndim
-        ipos=iskip+8*(istart-1)
+        ipos=iskip+nbyte*(istart-1)
         read(10,POS=ipos)xdp
         ipart=ipart_old
         do i=istart,iend
            ipart=ipart+1
            p%vp(ipart,idim)=xdp(i)
         end do
-        iskip=iskip+8*npart_file(icpu)
+        iskip=iskip+nbyte*npart_file(icpu)
      end do
 
      ! Read masses
-     ipos=iskip+8*(istart-1)
+     ipos=iskip+nbyte*(istart-1)
      read(10,POS=ipos)xdp
      ipart=ipart_old
      do i=istart,iend
@@ -364,94 +365,94 @@ subroutine input_part_restart(r,g,p,ncpu_file,npart_file,mpart_loc)
         p%mp(ipart)=xdp(i)
         mpart_loc=mpart_loc+xdp(i)
      end do
-     iskip=iskip+8*npart_file(icpu)
+     iskip=iskip+nbyte*npart_file(icpu)
 
      ! Read metallicity
      if(allocated(p%zp))then
-        ipos=iskip+8*(istart-1)
+        ipos=iskip+nbyte*(istart-1)
         read(10,POS=ipos)xdp
         ipart=ipart_old
         do i=istart,iend
            ipart=ipart+1
            p%zp(ipart)=xdp(i)
         end do
-        iskip=iskip+8*npart_file(icpu)
+        iskip=iskip+nbyte*npart_file(icpu)
      endif
 
      ! Read accelerations
      if(allocated(p%fp))then
         do idim=1,ndim
-           ipos=iskip+8*(istart-1)
+           ipos=iskip+nbyte*(istart-1)
            read(10,POS=ipos)xdp
            ipart=ipart_old
            do i=istart,iend
               ipart=ipart+1
               p%fp(ipart,idim)=xdp(i)
            end do
-           iskip=iskip+8*npart_file(icpu)
+           iskip=iskip+nbyte*npart_file(icpu)
         end do
      endif
 
      ! Read Angular Momenta
      if(allocated(p%jp))then
         do idim=1,ndim
-           ipos=iskip+8*(istart-1)
+           ipos=iskip+nbyte*(istart-1)
            read(10,POS=ipos)xdp
            ipart=ipart_old
            do i=istart,iend
               ipart=ipart+1
               p%jp(ipart,idim)=xdp(i)
            end do
-           iskip=iskip+8*npart_file(icpu)
+           iskip=iskip+nbyte*npart_file(icpu)
         end do
      endif
 
      ! Read birth time
      if(allocated(p%tp))then
-        ipos=iskip+8*(istart-1)
+        ipos=iskip+nbyte*(istart-1)
         read(10,POS=ipos)xdp
         ipart=ipart_old
         do i=istart,iend
            ipart=ipart+1
            p%tp(ipart)=xdp(i)
         end do
-        iskip=iskip+8*npart_file(icpu)
+        iskip=iskip+nbyte*npart_file(icpu)
      endif
 
      ! Read merging time
      if(allocated(p%tm))then
-        ipos=iskip+8*(istart-1)
+        ipos=iskip+nbyte*(istart-1)
         read(10,POS=ipos)xdp
         ipart=ipart_old
         do i=istart,iend
            ipart=ipart+1
            p%tm(ipart)=xdp(i)
         end do
-        iskip=iskip+8*npart_file(icpu)
+        iskip=iskip+nbyte*npart_file(icpu)
      endif
 
      ! Read size
      if(allocated(p%size))then
-        ipos=iskip+8*(istart-1)
+        ipos=iskip+nbyte*(istart-1)
         read(10,POS=ipos)xdp
         ipart=ipart_old
         do i=istart,iend
            ipart=ipart+1
            p%size(ipart)=xdp(i)
         end do
-        iskip=iskip+8*npart_file(icpu)
+        iskip=iskip+nbyte*npart_file(icpu)
      endif
 
      ! Read charge
      if(allocated(p%charge))then
-        ipos=iskip+8*(istart-1)
+        ipos=iskip+nbyte*(istart-1)
         read(10,POS=ipos)xdp
         ipart=ipart_old
         do i=istart,iend
            ipart=ipart+1
            p%charge(ipart)=xdp(i)
         end do
-        iskip=iskip+8*npart_file(icpu)
+        iskip=iskip+nbyte*npart_file(icpu)
      endif
 
      deallocate(xdp)
