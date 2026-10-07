@@ -12,6 +12,7 @@ The three namelist blocks `&SINK_PARAMS`, `&SINK_ACCRETION_PARAMS` and `&SINK_FE
 | `sink_merge`               | `logical`    | `.false.`     | Activate sink-sink merging.                                                                        |
 | `sink_dump`                | `logical`    | `.false.`     | Dump sink particle data on the fly (in `dump/`).                                                   |
 | `sink_delta_tout`          | `real`       | 0             | Time interval (in Myr) between successive high-frequency sink dumps in `sinklog/`.                         |
+| `sink_recenter_on_peak`    | `logical`    | `.true.`      | Reset the position of newly formed sinks to the centre of mass of their host peak.                 |
 | `sink_descent`             | `logical`    | `.false.`     | Activate the density-gradient descent to relocate sinks onto local peaks.                          |
 | `fudge_descent`            | `real`       | 0.5           | Step size used by the density-gradient descent.                                                    |
 | `sink_relevance_threshold` | `real`       | 2             | Peak relevance threshold used for sink formation sites.                                            |

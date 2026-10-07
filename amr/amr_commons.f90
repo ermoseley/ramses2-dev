@@ -436,7 +436,7 @@ module amr_commons
      real(kind=8)::eddington_cap = -1 ! Factor of Eddington rate to cap accretion at
      integer::sink_b_spline_order = 4 ! Order of B-spline interpolation used for sink accretion and dynamics
      logical::verbose_sink = .false. ! Whether to print verbose statements for sink particles
-     logical::bondi_use_gas_mass = .true. ! Whether to include the local gas mass in the Bondi calculation
+     logical::bondi_use_gas_mass = .false. ! Whether to include the local gas mass in the Bondi calculation
      logical::use_local_bondi_rate = .false. ! Switch to average after (true) or before (false) computing the Bondi rate
      logical::use_rho_inf = .true. ! Whether to use bondi_alpha(x) to extrapolate density at infinity from Bondi solution
      real(kind=8)::t_start_black_hole = -1 ! Time after which to start using sink particle/black hole routines

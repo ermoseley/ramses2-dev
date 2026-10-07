@@ -14,3 +14,23 @@ Two different Poisson solvers are available in RAMSES: conjugate gradient (CG) a
 | `epsilon`           | `real`  | 1e-4  | Stopping criterion for the iterative Poisson solver: residual 2-norm should be lower than `epsilon` times the right hand side 2-norm. |
 | `nvcycle`           | `integer` | -1  | Desired number of Multigrid V-cycles (if set to `-1`, iterative solver cycles until residual satisfies `epsilon`). |
 | `cg_levelmin`       | `integer`  | 999 | Minimum level from which the Conjugate Gradient solver is used in place of the Multigrid solver. |
+
+## Particle mass deposition and force interpolation
+
+Each particle family has its own scheme for depositing mass onto the grid (which builds the right hand side of the Poisson equation) and for interpolating the gravitational force back to the particles. The families are dark matter (`part_*`), stars (`star_*`), sinks (`sink_*`) and tree particles (`tree_*`). The schemes are 1 = Cloud-In-Cell (CIC), 2 = Triangular-Shaped Cloud (TSC) and 3 = Piecewise Cubic Spline (PCS). Other values switch off the deposition or the interpolation of that family.
+
+These schemes only apply to CPU runs. GPU builds (`COMPILER=NVHPC` with data on the device) always deposit mass and interpolate forces with CIC, and the `*_dep_algo` parameters then select the CIC deposit kernel. With `COMPILER=METAL`, only dark matter mass deposition runs on the device, with the medium kernel (`part_dep_algo=2`).
+
+| Variable name | Fortran type | Default value  | Description      |
+|:------------------- |:-------|:----- |:------------------------- |
+| `part_mass_deposition_scheme`     | `integer` | 1 | Mass deposition scheme for dark matter particles (1 = CIC, 2 = TSC, 3 = PCS). CPU only. |
+| `part_force_interpolation_scheme` | `integer` | 1 | Force interpolation scheme for dark matter particles (1 = CIC, 2 = TSC, 3 = PCS). CPU only. |
+| `part_dep_algo`                   | `integer` | 2 | GPU CIC deposit kernel for dark matter particles: 1 = large (unshifted 3^ndim stencil), 2 = medium (half-cell shifted 2^ndim stencil), 3 = small (one segmented scan per stencil offset over runs of particles that share a source cell). |
+| `star_mass_deposition_scheme`     | `integer` | 1 | Mass deposition scheme for star particles (1 = CIC, 2 = TSC, 3 = PCS). CPU only. |
+| `star_force_interpolation_scheme` | `integer` | 1 | Force interpolation scheme for star particles (1 = CIC, 2 = TSC, 3 = PCS). CPU only. |
+| `star_dep_algo`                   | `integer` | 2 | GPU CIC deposit kernel for star particles (same values as `part_dep_algo`). |
+| `sink_mass_deposition_scheme`     | `integer` | 1 | Mass deposition scheme for sink particles (1 = CIC, 2 = TSC, 3 = PCS). CPU only. |
+| `sink_force_interpolation_scheme` | `integer` | 1 | Force interpolation scheme for sink particles (1 = CIC, 2 = TSC, 3 = PCS). CPU only. |
+| `sink_dep_algo`                   | `integer` | 2 | GPU CIC deposit kernel for sink particles (same values as `part_dep_algo`). |
+| `tree_mass_deposition_scheme`     | `integer` | 1 | Mass deposition scheme for tree particles. Read but currently unused: tree particles do not deposit mass. |
+| `tree_force_interpolation_scheme` | `integer` | 1 | Force interpolation scheme for tree particles (1 = CIC, 2 = TSC, 3 = PCS). CPU only. |
