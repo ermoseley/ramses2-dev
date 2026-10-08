@@ -2113,10 +2113,11 @@ contains
     real(kind=dp) :: smallp, entho
     real(kind=dp) :: rl, rr, pl, pr, ul, ur, vl, vr, wl, wr
     real(kind=dp) :: el, er, ekinl, ekinr, etotl, etotr
-    real(kind=dp) :: sound_speed_l, sound_speed_r, speed_l, speed_r
+    real(kind=dp) :: c2l, c2r, cmax, speed_l, speed_r
     real(kind=dp) :: rcl, rcr, ustar, pstar
     real(kind=dp) :: rstarl, rstarr, etotstarl, etotstarr
     real(kind=dp) :: ro, uo, vo, wo, po, etoto
+    real(kind=dp) :: inv_rc, inv_star
 
     ! Verify that the density and pressure are reasonable and positive
     smallp = smallc2 / gamma
@@ -2144,19 +2145,19 @@ contains
     etotl = el + ekinl
     etotr = er + ekinr
 
-    ! Compute the sound speeds
-    sound_speed_l = sound_speed(left_state_p, gamma)
-    sound_speed_r = sound_speed(right_state_p, gamma)
-
     ! Compute the wave speeds
-    speed_l = min(ul, ur) - max(sound_speed_l, sound_speed_r)
-    speed_r = max(ul, ur) + max(sound_speed_l, sound_speed_r)
+    c2l = gamma*pl/rl
+    c2r = gamma*pr/rr
+    cmax = sqrt(max(c2l, c2r))
+    speed_l = min(ul, ur) - cmax
+    speed_r = max(ul, ur) + cmax
 
     rcl = rl * (ul - speed_l)
     rcr = rr * (speed_r - ur)
 
-    ustar = (rcr * ur + rcl * ul + (pl - pr)) / (rcr + rcl)
-    pstar = (rcr * pl + rcl * pr + rcl * rcr * (ul - ur)) / (rcr + rcl)
+    inv_rc = 1.0_dp / (rcr + rcl)
+    ustar = (rcr * ur + rcl * ul + (pl - pr)) * inv_rc
+    pstar = (rcr * pl + rcl * pr + rcl * rcr * (ul - ur)) * inv_rc
 
     ! Sample the solution at x/t=0
     if (speed_l > 0.0_dp) then
@@ -2167,8 +2168,9 @@ contains
        po = pl
        etoto = etotl
     else if (ustar > 0.0_dp) then
-       rstarl = rl * (speed_l - ul) / (speed_l - ustar)
-       etotstarl = ((speed_l - ul) * etotl - pl * ul + pstar * ustar) / (speed_l - ustar)
+       inv_star = 1.0_dp / (speed_l - ustar)
+       rstarl = rl * (speed_l - ul) * inv_star
+       etotstarl = ((speed_l - ul) * etotl - pl * ul + pstar * ustar) * inv_star
        ro = rstarl
        uo = ustar
        vo = vl
@@ -2176,8 +2178,9 @@ contains
        po = pstar
        etoto = etotstarl
     else if (speed_r > 0.0_dp) then
-       rstarr = rr * (speed_r - ur) / (speed_r - ustar)
-       etotstarr = ((speed_r - ur) * etotr - pr * ur + pstar * ustar) / (speed_r - ustar)
+       inv_star = 1.0_dp / (speed_r - ustar)
+       rstarr = rr * (speed_r - ur) * inv_star
+       etotstarr = ((speed_r - ur) * etotr - pr * ur + pstar * ustar) * inv_star
        ro = rstarr
        uo = ustar
        vo = vr
