@@ -75,7 +75,6 @@ subroutine condinit(r,g,x,q,dx,nn)
   real(kind=8)::x0,y0,z0,xx,yy,zz,rc,rs,phi
   real(kind=8)::r0,d0,p0,omega0,B0,mass_c_cu,scale_m
   real(kind=8)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v
-  real(kind=8),parameter::pi=3.14159265358979323846d0
   real(kind=8),parameter::delta_rho=0.1d0             ! m=2 density perturbation amplitude
   real(kind=8),parameter::alpha_dense_core=0.1d0      ! thermal-to-gravitational energy ratio
   real(kind=8),parameter::beta_dense_core=0.01d0      ! rotational-to-gravitational energy ratio
@@ -331,6 +330,7 @@ subroutine condinit(r,g,x,q,dx,nn)
 #endif
 
 #if INIT==COLLAPSE
+  pi=3.14159265358979323846d0
   if(abs(theta_mag)>0.0d0)then
      write(*,*)'COLLAPSE condinit currently supports theta_mag=0 only'
      stop
