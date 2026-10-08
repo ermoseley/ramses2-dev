@@ -198,6 +198,7 @@ module hydro_device
   real(kind=dp), device :: switch_llf_dmin_d
   real(kind=dp), device :: switch_llf_pmin_d
 
+#include "hydro_launch.h"
 contains
 
   include 'gpu_reduce.cuf'
@@ -5960,7 +5961,10 @@ contains
 #ifndef PAPER
   ! NVHPC applies a kernel's launch_bounds to every kernel that follows it in the module,
   ! so kernels without launch_bounds are defined before every kernel that has them.
-  attributes(global) subroutine hydro_integrator_kernel(grid, uold, unew, bold, bnew, &
+#ifndef HYDRO_LB
+#define HYDRO_LB
+#endif
+  attributes(global) HYDRO_LB subroutine hydro_integrator_kernel(grid, uold, unew, bold, bnew, &
        & f, father, nbor, &
        & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
        & gamma, smallr, smallc2, dt, dx, slope, slope_mag, riemann, riemann2d, &

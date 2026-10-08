@@ -117,6 +117,7 @@ module gpu_runner
   !> The total number of halo and ghost octs
   integer(kind=4) :: num_send, num_recv
 
+#include "hydro_launch.h"
 contains
 
   include 'gpu_scan.cuf'
@@ -681,7 +682,7 @@ contains
          & gamma, smallr, smallc2, dt, dx, slope, slope_mag, riemann, riemann2d, &
          & switch_llf_dmin, switch_llf_pmin, induction, etamag, constant_gravity, .false.)
 #else
-    if(nsubgrid == 4)threads_per_block = 512
+    threads_per_block = HYDRO_THREADS
     shmem_bytes = storage_size(smem_probe) / 8
     istat = cudaFuncSetAttribute(hydro_integrator_kernel, &
          & cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_bytes)
