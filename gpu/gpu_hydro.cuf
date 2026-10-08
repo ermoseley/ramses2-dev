@@ -4352,9 +4352,9 @@ contains
     bb(3) = 0.5_dp*(bold(cell_idx,3,oct_idx)+bold(cell_idx,6,oct_idx))
     call nimhd_coeff(uu, bb, gamma, etamag, eta_ad, eta_o, eta_a)
     ! eta holds the reciprocal coefficients, so that the edges take their harmonic mean with one
-    ! division; coefficients below 1d-30 (in particular 0) are raised to it to keep them finite
-    eta(cell_idx,1,oct_idx) = 1.0_dp/max(eta_o, 1.0e-30_dp)
-    eta(cell_idx,2,oct_idx) = 1.0_dp/max(eta_a, 1.0e-30_dp)
+    ! division; coefficients are floored at sqrt(tiny) so that the reciprocals of 0 stay finite
+    eta(cell_idx,1,oct_idx) = 1.0_dp/max(eta_o, sqrt(tiny(1.0_dp)))
+    eta(cell_idx,2,oct_idx) = 1.0_dp/max(eta_a, sqrt(tiny(1.0_dp)))
   end subroutine nimhd_coeff_kernel
 
   ! Upper bound of eta_o + eta_a*B^2 for the edge shared by the four cells (X,Y,Z) - a*d1 - b*d2,
