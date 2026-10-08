@@ -1495,6 +1495,9 @@ contains
     integer :: work_idx   ! Loop index for unit of work
     integer :: i, j, k    ! Cell indices
     integer :: work_size
+#ifndef MHD
+    integer :: ncell, nwork, face_idx, face_work, face_i, face_j
+#endif
 #if NVAR>5+NENER
     real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar)
     real(kind=dp) :: dscal_x(1:nscalar), dscal_y(1:nscalar), dscal_z(1:nscalar)
@@ -1528,9 +1531,14 @@ contains
 
     ! Compute the size of the section of the subgrid to operate on
     work_size = 2*nsubgrid+2
+#ifndef MHD
+    ncell = 2*nsubgrid
+    nwork = ncell**3 + 6*ncell**2
+#endif
 
     smallp = smallr * smallc2
 
+#ifdef MHD
     ! Note that we're now excluding the outermost shell of cells since this
     ! stencil operation requires 1 ghost cell. This also requires the
     ! transformation from the basic 3D indexing as shown below to shift the indices from going from 0-5 to 1-6
@@ -1538,6 +1546,34 @@ contains
        ! Compute the 3D indices, note the tranformation so that we're indexing 1-6 and not 0-5
        call index_1Dto3D(work_idx, work_size, work_size, i, j, k)
        i = i + 1; j = j + 1; k = k + 1
+#else
+    ! Interior cells, then the six face layers.
+    do work_idx = thread_idx, nwork - 1, blockDim%x
+       if (work_idx < ncell**3) then
+          call index_1Dto3D(work_idx, ncell, ncell, i, j, k)
+          i = i + 2; j = j + 2; k = k + 2
+       else
+          face_work = work_idx - ncell**3
+          face_idx = face_work / ncell**2
+          face_work = mod(face_work, ncell**2)
+          face_i = mod(face_work, ncell) + 2
+          face_j = face_work / ncell + 2
+          select case (face_idx)
+          case (0)
+             i = 1; j = face_i; k = face_j
+          case (1)
+             i = work_size; j = face_i; k = face_j
+          case (2)
+             i = face_i; j = 1; k = face_j
+          case (3)
+             i = face_i; j = work_size; k = face_j
+          case (4)
+             i = face_i; j = face_j; k = 1
+          case (5)
+             i = face_i; j = face_j; k = work_size
+          end select
+       endif
+#endif
 
 #ifdef MHD
        ! Face
