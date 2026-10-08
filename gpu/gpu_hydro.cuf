@@ -1266,7 +1266,7 @@ contains
 #ifdef MHD
        & bf, &
 #endif
-       & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid)
+       & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, load_refined, local_subgrid)
     type(oct), device :: grid(*)
     real(kind=dp), device :: constant_gravity(3)
     real(kind=dp), device :: f(1:twotondim,1:ndim,*)
@@ -1277,6 +1277,7 @@ contains
     integer(kind=4), value :: block_idx, thread_idx
     real(kind=dp), value :: gamma, smallr, smallc2
     real(kind=dp), value :: dt
+    logical, value :: load_refined
     type(subgrid_6x6x6cell_primitive), intent(inout) :: local_subgrid
 #if NVAR>5+NENER
     real(kind=dp) :: scalar_sub(0:2*nsubgrid+3, 0:2*nsubgrid+3, 0:2*nsubgrid+3, 1:nscalar)
@@ -1395,8 +1396,8 @@ contains
        end do
 #endif
        ! Store refinement flags.
-       if (i >= 1 .and. i <= 2*nsubgrid+2 .and. j >= 1 .and. j <= 2*nsubgrid+2 &
-            & .and. k >= 1 .and. k <= 2*nsubgrid+2) then
+       if (load_refined .and. i >= 1 .and. i <= 2*nsubgrid+2 &
+            & .and. j >= 1 .and. j <= 2*nsubgrid+2 .and. k >= 1 .and. k <= 2*nsubgrid+2) then
           local_subgrid%refined(i, j, k) = grid(source_idx)%refined(cell_idx)
        endif
 
@@ -5977,7 +5978,7 @@ contains
 #ifdef MHD
          & bf, &
 #endif
-         & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, local_subgrid)
+         & head_idx, block_idx, thread_idx, gamma, smallr, smallc2, dt, ilevel < levelmax, local_subgrid)
 
     ! =======================================================================
     ! Perform tracing step and compute the interface states
