@@ -2112,11 +2112,6 @@ contains
     ustar = (rcr * ur + rcl * ul + (pl - pr)) / (rcr + rcl)
     pstar = (rcr * pl + rcl * pr + rcl * rcr * (ul - ur)) / (rcr + rcl)
 
-    rstarl = rl * (speed_l - ul) / (speed_l - ustar)
-    rstarr = rr * (speed_r - ur) / (speed_r - ustar)
-    etotstarl = ((speed_l - ul) * etotl - pl * ul + pstar * ustar) / (speed_l - ustar)
-    etotstarr = ((speed_r - ur) * etotr - pr * ur + pstar * ustar) / (speed_r - ustar)
-
     ! Sample the solution at x/t=0
     if (speed_l > 0.0_dp) then
        ro = rl
@@ -2126,6 +2121,8 @@ contains
        po = pl
        etoto = etotl
     else if (ustar > 0.0_dp) then
+       rstarl = rl * (speed_l - ul) / (speed_l - ustar)
+       etotstarl = ((speed_l - ul) * etotl - pl * ul + pstar * ustar) / (speed_l - ustar)
        ro = rstarl
        uo = ustar
        vo = vl
@@ -2133,6 +2130,8 @@ contains
        po = pstar
        etoto = etotstarl
     else if (speed_r > 0.0_dp) then
+       rstarr = rr * (speed_r - ur) / (speed_r - ustar)
+       etotstarr = ((speed_r - ur) * etotr - pr * ur + pstar * ustar) / (speed_r - ustar)
        ro = rstarr
        uo = ustar
        vo = vr
