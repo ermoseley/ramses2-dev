@@ -463,17 +463,25 @@ contains
     type(conserved_t), intent(in) :: conserved
     real(kind=dp), value :: gamma, smallr, smallc2
     type(primitive_t) :: primitive
+    real(kind=dp) :: inv_density, internal_energy
 
     primitive%density    = max(conserved%density, smallr)
-    primitive%velocity_x = conserved%momentum_x / primitive%density
-    primitive%velocity_y = conserved%momentum_y / primitive%density
-    primitive%velocity_z = conserved%momentum_z / primitive%density
+    inv_density = 1.0_dp / primitive%density
+    primitive%velocity_x = conserved%momentum_x * inv_density
+    primitive%velocity_y = conserved%momentum_y * inv_density
+    primitive%velocity_z = conserved%momentum_z * inv_density
 #ifdef MHD
     primitive%Bx = conserved%Bx
     primitive%By = conserved%By
     primitive%Bz = conserved%Bz
 #endif
-    primitive%pressure   = compute_pressure(conserved, gamma, smallr, smallc2)
+    ! compute_pressure with the reciprocal density
+    internal_energy = conserved%energy - 0.5_dp*magnitude_squared(conserved%momentum_x, &
+         & conserved%momentum_y, conserved%momentum_z)*inv_density
+#ifdef MHD
+    internal_energy = internal_energy - compute_emag(conserved%Bx, conserved%By, conserved%Bz)
+#endif
+    primitive%pressure   = max((gamma - 1.0_dp)*internal_energy, primitive%density*(smallc2/gamma))
     return
   end function conserved_2_primitive
   ! ==========================================================================
@@ -1490,6 +1498,7 @@ contains
     type(primitive_t) :: cell ! The cell centered primitive variables and (eventually) predicted states
     type(primitive_t) :: slopes_x, slopes_y, slopes_z ! The limited slopes in the x, y, and z directions
     type(primitive_t) :: source_term ! The sources terms
+    real(kind=dp) :: inv_density
 
     real(kind=dp) :: smallp
     integer :: work_idx   ! Loop index for unit of work
@@ -1667,6 +1676,7 @@ contains
 #endif
 
        ! Source terms
+       inv_density = 1.0_dp / cell%density
        source_term%density    = -cell%velocity_x * slopes_x%density    &
                                 -cell%velocity_y * slopes_y%density    &
                                 -cell%velocity_z * slopes_z%density    &
@@ -1674,15 +1684,15 @@ contains
        source_term%velocity_x = -cell%velocity_x * slopes_x%velocity_x &
                                 -cell%velocity_y * slopes_y%velocity_x &
                                 -cell%velocity_z * slopes_z%velocity_x &
-                                - (slopes_x%pressure) / cell%density
+                                - (slopes_x%pressure) * inv_density
        source_term%velocity_y = -cell%velocity_x * slopes_x%velocity_y &
                                 -cell%velocity_y * slopes_y%velocity_y &
                                 -cell%velocity_z * slopes_z%velocity_y &
-                                - (slopes_y%pressure) / cell%density
+                                - (slopes_y%pressure) * inv_density
        source_term%velocity_z = -cell%velocity_x * slopes_x%velocity_z &
                                 -cell%velocity_y * slopes_y%velocity_z &
                                 -cell%velocity_z * slopes_z%velocity_z &
-                                - (slopes_z%pressure) / cell%density
+                                - (slopes_z%pressure) * inv_density
        source_term%pressure   = -cell%velocity_x * slopes_x%pressure   &
                                 -cell%velocity_y * slopes_y%pressure   &
                                 -cell%velocity_z * slopes_z%pressure   &
