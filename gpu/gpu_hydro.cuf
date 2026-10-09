@@ -4018,19 +4018,23 @@ contains
     integer, value :: head_idx, block_idx, thread_idx, ngridmax
     real(kind=dp), value :: dtdx
     integer :: i, j, k, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx, subgrid_idx, info
-    integer :: oc1, oc2, oc3, cc1, cc2, cc3
+    integer :: oc1, oc2, oc3, cc1, cc2, cc3, work_idx
     real(kind=dp) :: dflux, weight
     logical :: c1, c2, c3
 
     subgrid_idx = head_idx + block_idx
-    ! Coarse/fine EMF correction, with one thread per oct in the tile.
-    if (thread_idx < nsubgridtondim) then
-       call index_1Dto3D(thread_idx, nsubgrid, nsubgrid, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx)
+    ! Coarse/fine EMF correction at oct boundary edges: one thread per oct and edge
+    ! orientation, counted from the last thread (the flux corrections use the first ones).
+    ! MHD runs with nsubgrid <= 2, so the 3*nsubgrid**3 tasks fit in one pass of the block.
+    work_idx = blockDim%x - 1 - thread_idx
+    if (work_idx < 3*nsubgridtondim) then
+       call index_1Dto3D(work_idx/3, nsubgrid, nsubgrid, i_subgrid_idx, j_subgrid_idx, k_subgrid_idx)
        i = 2*i_subgrid_idx; j = 2*j_subgrid_idx; k = 2*k_subgrid_idx
        i_subgrid_idx = i_subgrid_idx + 1
        j_subgrid_idx = j_subgrid_idx + 1
        k_subgrid_idx = k_subgrid_idx + 1
 
+       if (mod(work_idx, 3) == 0) then
                 ! 4 EMFz edges
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,  j_subgrid_idx-1,k_subgrid_idx, c1,oc1,cc1)
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx-1,j_subgrid_idx-1,k_subgrid_idx, c2,oc2,cc2)
@@ -4073,6 +4077,7 @@ contains
           if(c3)then; info=atomicadd(bnew(cc3,4,oc3),dflux);  info=atomicadd(bnew(cc3,5,oc3),-dflux); endif
        end if
 
+       else if (mod(work_idx, 3) == 1) then
                 ! 4 EMFx edges
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx,  k_subgrid_idx-1, c1,oc1,cc1)
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,j_subgrid_idx-1,k_subgrid_idx-1, c2,oc2,cc2)
@@ -4115,6 +4120,7 @@ contains
           if(c3)then; info=atomicadd(bnew(cc3,5,oc3),dflux);  info=atomicadd(bnew(cc3,6,oc3),-dflux); endif
        end if
 
+       else
                 ! 4 EMFy edges
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx,  j_subgrid_idx,k_subgrid_idx-1, c1,oc1,cc1)
        call get_cf_cell(nbor,grid,father,subgrid_idx,ngridmax, i_subgrid_idx-1,j_subgrid_idx,k_subgrid_idx-1, c2,oc2,cc2)
@@ -4157,6 +4163,7 @@ contains
           if(c3)then; info=atomicadd(bnew(cc3,4,oc3),-dflux); info=atomicadd(bnew(cc3,6,oc3),dflux);  endif
        end if
 
+       end if
     end if
   end subroutine coarse_emf_update
 
