@@ -47,32 +47,32 @@ subroutine condinit(r,g,x,q,dx,nn)
   real(kind=8)::xx,yy,zz,rr,theta,pi,xcenter,ttmin,ttmax
 #if INIT==COEUR
   real(kind=8)::r2,rx,ry,rz,d,p,vx,vy,vz,r_trunc,r2_trunc,c2
-  real(kind=8)::omega_code,AU,Msol,pi,M,sigma,r_min,r2_min,omega_const,r_vortex,invr2_vortex
+  real(kind=8)::omega_code,AU,Msol,M,sigma,r_min,r2_min,omega_const,r_vortex,invr2_vortex
   real(kind=8)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v,scale_m
 #elif INIT==INSTA
   integer::id,iu,iv,iw,ip,ix,iy
   real(kind=8)::x0,lambday,ky,lambdaz,kz,rho1,rho2,p0,v0,v1,v2
 #elif INIT==DOUBLEMACH
   integer::id,iu,iv,iw,ip
-  real(kind=8)::pi,xp
+  real(kind=8)::xp
 #elif INIT==OT
-  real(kind=8)::pi,xc,yc
+  real(kind=8)::xc,yc
 #elif INIT==PONO
   real(kind=8)::vx,vy,vz,tt,omega,R0,twopi
 #elif INIT==ABC
   real(kind=8)::vx,vy,vz,A0,twopi
 #elif INIT==CURRENTSHEET
-  real(kind=8)::pi,xc,yc,beta,v0
+  real(kind=8)::xc,yc,beta,v0
 #elif INIT==RTZEQM
   real(kind=8)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v,scale_m
 #elif INIT==PANCAKE
-  real(kind=8)::pi,del_ini
+  real(kind=8)::del_ini
   real(kind=8)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v,scale_m
 #elif INIT==ALFVENWAVE
-  real(kind=8)::pi,del_ini
+  real(kind=8)::del_ini
   real(kind=8)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v,scale_m
 #elif INIT==COLLAPSE
-  real(kind=8)::x0,y0,z0,xx,yy,zz,rc,rs,phi
+  real(kind=8)::x0,y0,z0,rc,rs,phi
   real(kind=8)::r0,d0,p0,omega0,B0,mass_c_cu,scale_m
   real(kind=8)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v
   real(kind=8),parameter::delta_rho=0.1d0             ! m=2 density perturbation amplitude
