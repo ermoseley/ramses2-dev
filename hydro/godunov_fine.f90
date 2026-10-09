@@ -1,6 +1,6 @@
 module godunov_fine_module
 #ifdef _CUDA
-  use gpu_runner, only: gpu_godunov, gpu_set_unew, gpu_set_uold
+  use gpu_runner, only: gpu_godunov, gpu_set_unew, gpu_set_uold, gpu_nimhd_fine
 #endif
 #ifdef _METAL
   use metal_runner, only: metal_godunov, metal_set_unew, metal_set_uold
@@ -225,6 +225,31 @@ subroutine set_uold(r,g,m,ilevel)
 #endif
 
 end subroutine set_uold
+!###########################################################
+!###########################################################
+!###########################################################
+!###########################################################
+recursive subroutine r_nimhd_fine(pst,input_array,input_size)
+  use mdl_module
+  use ramses_commons, only: pst_t
+  use mdl_parameters
+  implicit none
+  type(pst_t)::pst
+  integer,VALUE::input_size
+  integer,dimension(1:input_size)::input_array
+  integer::rID
+
+  if(pst%nLower>0)then
+     rID = mdl_send_request(pst%s%mdl,MDL_NIMHD_FINE,pst%iUpper+1,input_size,0,input_array)
+     call r_nimhd_fine(pst%pLower,input_array,input_size)
+     call mdl_get_reply(pst%s%mdl,rID,0)
+  else
+#ifdef _CUDA
+     call gpu_nimhd_fine(pst%s, input_array(1), input_array(2))
+#endif
+  endif
+
+end subroutine r_nimhd_fine
 !###########################################################
 !###########################################################
 !###########################################################

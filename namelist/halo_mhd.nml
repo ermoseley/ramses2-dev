@@ -33,7 +33,8 @@ ic_scale_m=0.85
 &AMR_PARAMS
 levelmin=7
 levelmax=13
-ngridmax=2000000
+ngridmax=4000000
+ncachemax=1000000
 npartmax=4000000
 nexpand=1,
 boxlen=140.

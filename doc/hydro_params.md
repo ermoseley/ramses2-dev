@@ -19,4 +19,9 @@ This namelist is called &HYDRO_PARAMS, and is used to specify runtime parameters
 | `entropy=.false.`    |  `Logical`    | Solve for the conservation of entropy using an additional passive scalar. You must compile the code with `NVAR>5`. It can also be used in conjunction with the `dual_energy` parameter. |
 | `dual_energy=-1`     |  `Real`    | Activate dual energy scheme for high-Mach flows if `dual_energy>=0`. Useful to prevent negative temperatures. The chosen value is used to set the fraction of the energy truncation error. Recommended values are between `0.0` and `0.5`. It must be used in conjunction with `entropy=.true.`. |
 | `difmag=0d0` |  `Real`    | Add explicit diffusion for all volume-averaged conservative variable. |
-| `etamag=0d0` |  `Real`    | Add explicit magnetic diffusivity (Ohm's law). |
+| `etamag=0d0` |  `Real`    | Add explicit magnetic diffusivity (Ohm's law). `eta_ohm` is a synonym. |
+| `eta_ad=0d0` |  `Real`    | Add ambipolar diffusion, with EMF `eta_ad*[(J.B)B-B^2 J]`. Needs `nimhd_solver='explicit'` or `'sts'`. |
+| `nimhd_solver='unsplit'` |  `Character LEN=10`| Non-ideal MHD solver. `unsplit` adds `etamag` to the EMF of the Godunov step. `explicit` (substeps) and `sts` (super-time-stepping) solve Ohmic and ambipolar diffusion in a separate split step; with AMR, use `nsubcycle=1`. GPU, 3D and single rank only. The coefficients are set in `nimhd_coeff` (`gpu/gpu_hydro.cuf`). |
+| `nimhd_split='strang'` |  `Character LEN=10`| Splitting of `explicit` and `sts`: `strang` diffuses half a time step before and half after the Godunov step (second order), `godunov` a full time step after it (first order). |
+| `nimhd_courant=0.8` |  `Real`    | Safety factor of the explicit diffusion time step used to set the number of substeps or stages. |
+| `nimhd_alpha=0.5` |  `Real`    | Gegenbauer parameter of `sts` (Mattia et al. 2026), at least 0.5. `0.5` gives the Runge-Kutta-Legendre scheme (Meyer et al. 2014). Larger values are more robust for anisotropic diffusion. |

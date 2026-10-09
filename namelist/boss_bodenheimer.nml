@@ -16,7 +16,8 @@ verbose=.false.
 &AMR_PARAMS
 levelmin=5
 levelmax=14 ! ~ 0.24 AU
-ngridmax=50000
+ngridmax=2000000
+ncachemax=1000000
 nexpand=30*2
 boxlen=0.191405298315250E-01 ! ~ 4000 AU
 /

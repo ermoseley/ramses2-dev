@@ -47,35 +47,34 @@ subroutine condinit(r,g,x,q,dx,nn)
   real(kind=8)::xx,yy,zz,rr,theta,pi,xcenter,ttmin,ttmax
 #if INIT==COEUR
   real(kind=8)::r2,rx,ry,rz,d,p,vx,vy,vz,r_trunc,r2_trunc,c2
-  real(kind=8)::omega_code,AU,Msol,pi,M,sigma,r_min,r2_min,omega_const,r_vortex,invr2_vortex
+  real(kind=8)::omega_code,AU,Msol,M,sigma,r_min,r2_min,omega_const,r_vortex,invr2_vortex
   real(kind=8)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v,scale_m
 #elif INIT==INSTA
   integer::id,iu,iv,iw,ip,ix,iy
   real(kind=8)::x0,lambday,ky,lambdaz,kz,rho1,rho2,p0,v0,v1,v2
 #elif INIT==DOUBLEMACH
   integer::id,iu,iv,iw,ip
-  real(kind=8)::pi,xp
+  real(kind=8)::xp
 #elif INIT==OT
-  real(kind=8)::pi,xc,yc
+  real(kind=8)::xc,yc
 #elif INIT==PONO
   real(kind=8)::vx,vy,vz,tt,omega,R0,twopi
 #elif INIT==ABC
   real(kind=8)::vx,vy,vz,A0,twopi
 #elif INIT==CURRENTSHEET
-  real(kind=8)::pi,xc,yc,beta,v0
+  real(kind=8)::xc,yc,beta,v0
 #elif INIT==RTZEQM
   real(kind=8)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v,scale_m
 #elif INIT==PANCAKE
-  real(kind=8)::pi,del_ini
+  real(kind=8)::del_ini
   real(kind=8)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v,scale_m
 #elif INIT==ALFVENWAVE
-  real(kind=8)::pi,del_ini
+  real(kind=8)::del_ini
   real(kind=8)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v,scale_m
 #elif INIT==COLLAPSE
-  real(kind=8)::x0,y0,z0,xx,yy,zz,rc,rs,phi
+  real(kind=8)::x0,y0,z0,rc,rs,phi
   real(kind=8)::r0,d0,p0,omega0,B0,mass_c_cu,scale_m
   real(kind=8)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v
-  real(kind=8),parameter::pi=3.14159265358979323846d0
   real(kind=8),parameter::delta_rho=0.1d0             ! m=2 density perturbation amplitude
   real(kind=8),parameter::alpha_dense_core=0.1d0      ! thermal-to-gravitational energy ratio
   real(kind=8),parameter::beta_dense_core=0.01d0      ! rotational-to-gravitational energy ratio
@@ -90,6 +89,8 @@ subroutine condinit(r,g,x,q,dx,nn)
   call region_condinit(r,g,x,q,dx,nn)
 #endif
 
+  pi=acos(-1.0d0)
+
   ! Add here, if you wish, some user-defined initial conditions
   ! ........
 
@@ -99,7 +100,6 @@ subroutine condinit(r,g,x,q,dx,nn)
   ! constants
   AU=1.49598d13
   Msol= 1.98892d33
-  pi=3.14159
   ! mass, radius, and ratio of rotational to gravitational energy
   r_trunc=25*4000.*AU/scale_l
   r_min=10.*AU/scale_l
@@ -184,7 +184,6 @@ subroutine condinit(r,g,x,q,dx,nn)
 
 #if INIT==DOUBLEMACH
   id=1; iu=2; iv=3; iw=4; ip=5
-  pi=acos(-1.0d0)
   do i=1,nn
      xp=x(i,1)-x(i,2)/tan(pi/3.0)-10./sin(pi/3.0)*g%t
      if(xp<1./6.)then
@@ -204,7 +203,6 @@ subroutine condinit(r,g,x,q,dx,nn)
 #endif
 
 #if INIT==OT
-  pi=acos(-1.0d0)
   do i=1,nn
      xc=x(i,1)
      yc=x(i,2)
@@ -270,7 +268,6 @@ subroutine condinit(r,g,x,q,dx,nn)
 #endif
 
 #if INIT==CURRENTSHEET
-  pi = acos(-1.0d0)
   beta = 0.1
   v0 = 0.1
   do i = 1,nn
@@ -301,7 +298,6 @@ subroutine condinit(r,g,x,q,dx,nn)
 #endif
 
 #if INIT==PANCAKE
-  pi = acos(-1.0d0)
   del_ini = 0.1
   ! get cgs units
   call units(r,g,scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
@@ -315,7 +311,6 @@ subroutine condinit(r,g,x,q,dx,nn)
 #endif
 
 #if INIT==ALFVENWAVE
-  pi = acos(-1.0d0)
   del_ini = 0.1
   ! get cgs units
   call units(r,g,scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
@@ -432,7 +427,6 @@ subroutine condinit(r,g,x,q,dx,nn)
      ! CR energy: enhanced on one arc of the loop (around the z-axis).
      ! atan2 replaces atan(yy/xx) to avoid a divide-by-zero FPE at xx=0;
      ! it is identical in the xx>0 region that the arc condition selects.
-     pi=acos(-1d0)
      ttmin=-pi/12d0
      ttmax= pi/12d0
      xcenter=r%box_size(1)*0.5d0

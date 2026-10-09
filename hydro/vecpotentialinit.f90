@@ -25,6 +25,7 @@ subroutine vecpotentialinit(r,g,x,A,idim,nn)
 #define PONO 6
 #define CURRENTSHEET 7
 #define CR_LOOP 8
+#define BELTRAMI 9
 
   integer::i
 #if INIT==LOOP
@@ -38,6 +39,9 @@ subroutine vecpotentialinit(r,g,x,A,idim,nn)
 #endif
 #if INIT==CR_LOOP
   real(kind=8)::A0, xx, yy
+#endif
+#if INIT==BELTRAMI
+  real(kind=8)::B0, kx
 #endif
 #if INIT==CURRENTSHEET
   real(kind=8)::B0, pi, xx, yy, tt
@@ -117,6 +121,16 @@ subroutine vecpotentialinit(r,g,x,A,idim,nn)
      if(idim==1)A(i) = 0.0
      if(idim==2)A(i) = 0.0
      if(idim==3)A(i) = A0*(-sqrt(xx**2+yy**2))
+  end do
+#endif
+
+#if INIT==BELTRAMI
+  ! B = B0*(0,sin(kx*x),cos(kx*x)) satisfies curl B = kx*B
+  B0 = 0.1
+  kx = 2.0d0*ACOS(-1.0d0)/r%box_size(1)
+  do i = 1,nn
+     if(idim==2)A(i) = B0/kx*sin(kx*x(i,1))
+     if(idim==3)A(i) = B0/kx*cos(kx*x(i,1))
   end do
 #endif
 
