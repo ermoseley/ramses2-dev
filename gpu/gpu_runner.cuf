@@ -375,7 +375,7 @@ contains
 
     unew_from_uold = .false.
 #if !defined(TRCFLX) && !defined(PAPER) && NENER == 0
-    unew_from_uold = ilevel == sim%r%nlevelmax .and. sim%g%ncpu == 1 .and. .not. sim%r%static_gas &
+    unew_from_uold = ilevel == sim%r%nlevelmax .and. .not. sim%r%static_gas &
          & .and. .not. (sim%r%star .or. sim%r%sink .or. sim%r%rt .or. sim%r%cr)
 #endif
   end function unew_from_uold
