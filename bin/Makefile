@@ -73,16 +73,6 @@ BUILDCOMMAND = ${MAKE} ${MAKEFLAGS}
 DEFINES += -DNDIM=$(NDIM) -DNVAR=$(NVAR)
 DEFINES += $(EXTRA_DEFINES)
 DEFINES += -DNSUBGRID=$(NSUBGRID)
-comma := ,
-ifeq ($(words $(CUDA_ARCH)),1)
-ifneq ($(filter sm_%,$(CUDA_ARCH)),)
-ifeq ($(findstring $(comma),$(CUDA_ARCH)),)
-ifeq ($(shell echo '$(subst sm_,,$(CUDA_ARCH))' | grep -cE '^[0-9]+$$'),1)
-DEFINES += -DGPU_SM=$(subst sm_,,$(CUDA_ARCH))
-endif
-endif
-endif
-endif
 #############################################################################
 # RTZ options
 ifeq ($(DO_RTZ),1)
