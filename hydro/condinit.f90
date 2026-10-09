@@ -89,6 +89,8 @@ subroutine condinit(r,g,x,q,dx,nn)
   call region_condinit(r,g,x,q,dx,nn)
 #endif
 
+  pi=acos(-1.0d0)
+
   ! Add here, if you wish, some user-defined initial conditions
   ! ........
 
@@ -98,7 +100,6 @@ subroutine condinit(r,g,x,q,dx,nn)
   ! constants
   AU=1.49598d13
   Msol= 1.98892d33
-  pi=3.14159
   ! mass, radius, and ratio of rotational to gravitational energy
   r_trunc=25*4000.*AU/scale_l
   r_min=10.*AU/scale_l
@@ -183,7 +184,6 @@ subroutine condinit(r,g,x,q,dx,nn)
 
 #if INIT==DOUBLEMACH
   id=1; iu=2; iv=3; iw=4; ip=5
-  pi=acos(-1.0d0)
   do i=1,nn
      xp=x(i,1)-x(i,2)/tan(pi/3.0)-10./sin(pi/3.0)*g%t
      if(xp<1./6.)then
@@ -203,7 +203,6 @@ subroutine condinit(r,g,x,q,dx,nn)
 #endif
 
 #if INIT==OT
-  pi=acos(-1.0d0)
   do i=1,nn
      xc=x(i,1)
      yc=x(i,2)
@@ -269,7 +268,6 @@ subroutine condinit(r,g,x,q,dx,nn)
 #endif
 
 #if INIT==CURRENTSHEET
-  pi = acos(-1.0d0)
   beta = 0.1
   v0 = 0.1
   do i = 1,nn
@@ -300,7 +298,6 @@ subroutine condinit(r,g,x,q,dx,nn)
 #endif
 
 #if INIT==PANCAKE
-  pi = acos(-1.0d0)
   del_ini = 0.1
   ! get cgs units
   call units(r,g,scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
@@ -314,7 +311,6 @@ subroutine condinit(r,g,x,q,dx,nn)
 #endif
 
 #if INIT==ALFVENWAVE
-  pi = acos(-1.0d0)
   del_ini = 0.1
   ! get cgs units
   call units(r,g,scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
@@ -330,7 +326,6 @@ subroutine condinit(r,g,x,q,dx,nn)
 #endif
 
 #if INIT==COLLAPSE
-  pi=3.14159265358979323846d0
   if(abs(theta_mag)>0.0d0)then
      write(*,*)'COLLAPSE condinit currently supports theta_mag=0 only'
      stop
@@ -432,7 +427,6 @@ subroutine condinit(r,g,x,q,dx,nn)
      ! CR energy: enhanced on one arc of the loop (around the z-axis).
      ! atan2 replaces atan(yy/xx) to avoid a divide-by-zero FPE at xx=0;
      ! it is identical in the xx>0 region that the arc condition selects.
-     pi=acos(-1d0)
      ttmin=-pi/12d0
      ttmax= pi/12d0
      xcenter=r%box_size(1)*0.5d0
