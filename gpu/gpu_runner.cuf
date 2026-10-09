@@ -26,9 +26,6 @@ module gpu_runner
 
   !> Arrays to hold the hydro variables on the device
   real(kind=dp), device, allocatable, dimension(:,:,:) :: uold, unew
-#ifndef MHD
-  logical :: unew_from_uold = .false.
-#endif
 
   !> Arrays to hold face-centred B (MHD) on the device
   real(kind=dp), device, allocatable, dimension(:,:,:) :: bold, bnew
@@ -362,6 +359,28 @@ contains
 
   end subroutine gpu_set_uold
 
+#ifndef MHD
+  !> @brief
+  !> True if the Godunov update of ilevel writes unew = uold + dU, so that set_unew skips its copy
+  !>
+  !> @detail
+  !> Requires that nothing modifies unew between set_unew and the Godunov update (see amr_step):
+  !> no finer level adds flux corrections, and no feedback, sink, RT or CR step runs in between.
+  !> With static_gas the Godunov update does not run, so unew must be copied.
+  !>
+  logical function unew_from_uold(sim, ilevel)
+    use ramses_commons, only: ramses_t
+    type(ramses_t), intent(in) :: sim
+    integer, intent(in) :: ilevel
+
+    unew_from_uold = .false.
+#if !defined(TRCFLX) && !defined(PAPER) && NENER == 0
+    unew_from_uold = ilevel == sim%r%nlevelmax .and. sim%g%ncpu == 1 .and. .not. sim%r%static_gas &
+         & .and. .not. (sim%r%star .or. sim%r%sink .or. sim%r%rt .or. sim%r%cr)
+#endif
+  end function unew_from_uold
+#endif
+
   !> @brief
   !> Set unew equal to uold on a GPU
   !>
@@ -380,16 +399,7 @@ contains
     integer :: threadsX_per_block, threadsY_per_block, num_blocks
 
 #ifndef MHD
-    unew_from_uold = .false.
-#if !defined(TRCFLX) && !defined(PAPER) && NENER == 0
-    ! No finer level or active feedback can change unew before Godunov.
-    ! The hydro update can use uold directly instead of copying it first.
-    if(ilevel == sim%r%nlevelmax .and. sim%g%ncpu == 1 .and. .not. sim%r%static_gas &
-         & .and. .not. sim%r%star .and. .not. sim%r%sink .and. .not. sim%r%rt .and. .not. sim%r%cr)then
-       unew_from_uold = .true.
-       return
-    endif
-#endif
+    if(unew_from_uold(sim, ilevel))return
 #endif
 
     head_idx = sim%m%head(ilevel)
@@ -695,12 +705,9 @@ contains
          & f, father, nbor, &
          & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
          & gamma, smallr, smallc2, dt, dx, slope, slope_mag, riemann, riemann2d, &
-         & switch_llf_dmin, switch_llf_pmin, induction, etamag, constant_gravity, unew_from_uold)
+         & switch_llf_dmin, switch_llf_pmin, induction, etamag, constant_gravity, unew_from_uold(sim, ilevel))
 #endif
     call GPU_Error_Check(__FILE__, __LINE__)
-#endif
-#ifndef MHD
-    unew_from_uold = .false.
 #endif
     call nvtxEndRange()
 

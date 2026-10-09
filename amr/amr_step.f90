@@ -257,6 +257,8 @@ recursive subroutine m_amr_step(pst,ilevel,icount,done)
   !-----------------------
   ! Set unew equal to uold
   !-----------------------
+  ! The GPU skips this copy on the finest level (unew_from_uold in gpu/gpu_runner.cuf),
+  ! so nothing between here and the Godunov update may modify unew on that level.
   !if(r%hydro.and..not.r%static_gas)then
   if(r%hydro)then
      call m_timer('hydro - set unew','start')
