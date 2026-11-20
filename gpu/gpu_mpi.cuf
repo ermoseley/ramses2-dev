@@ -20,6 +20,10 @@ module gpu_mpi
 #endif
   integer, parameter :: halo_tag = 703
   integer(kind=cuda_stream_kind), parameter :: default_stream = 0
+  ! The halo values are gathered, copied and scattered on their own stream, ahead of the interior
+  ! subgrids integrated on another stream during the exchange.
+  integer(kind=cuda_stream_kind) :: halo_stream
+  type(cudaEvent) :: main_ready
   integer :: gpu_comm = MPI_COMM_NULL
   integer :: ncpu = 1, myid = 1, levelmin = 0
   logical :: device_buffers
@@ -47,7 +51,7 @@ contains
   subroutine gpu_mpi_begin(sim)
     type(ramses_t), intent(in) :: sim
 #ifndef WITHOUTMPI
-    integer :: info
+    integer :: info, lowest, highest
     integer(kind=8) :: cuts(0:sim%g%ncpu)
     integer(kind=8) :: expected
 
@@ -70,6 +74,9 @@ contains
        call MPI_COMM_SET_ERRHANDLER(gpu_comm, MPI_ERRORS_RETURN, info)
        call check_mpi(info)
        allocate(soff(0:ncpu), roff(0:ncpu), requests(2*ncpu))
+       call check_cuda(cudaDeviceGetStreamPriorityRange(lowest, highest))
+       call check_cuda(cudaStreamCreateWithPriority(halo_stream, cudaStreamNonBlocking, highest))
+       call check_cuda(cudaEventCreateWithFlags(main_ready, cudaEventDisableTiming))
     endif
     cuts = sim%m%domain(levelmin)%b(1,0:ncpu)
     allocate(bound_key(0:ncpu))
@@ -412,6 +419,7 @@ contains
 #endif
 
   ! Exchange the owner values for one or two fields, from device buffers or through pinned host buffers.
+  ! The values are gathered after the work queued on the default stream, and are in place on return.
   subroutine gpu_halo_update(ilevel, a, nc1, b, nc2)
     integer, intent(in) :: ilevel, nc1
     real(dp), device :: a(*)
@@ -438,16 +446,19 @@ contains
     ns = soff(ncpu)
     nr = roff(ncpu)
     call grow_buffers(max(ns,nr), stride)
+    call check_cuda(cudaEventRecord(main_ready, default_stream))
+    call check_cuda(cudaStreamWaitEvent(halo_stream, main_ready, 0))
     if (ns > 0) then
-       call gather_kernel<<<(ns*twotondim*nc1+255)/256,256>>>(a, nc1, isend, ns, sbuf, stride, 0)
+       call gather_kernel<<<(ns*twotondim*nc1+255)/256,256,0,halo_stream>>>(a, nc1, isend, ns, sbuf, stride, 0)
        call check_cuda(cudaGetLastError())
        if (n2 > 0) then
-          call gather_kernel<<<(ns*twotondim*n2+255)/256,256>>>(b, n2, isend, ns, sbuf, stride, twotondim*nc1)
+          call gather_kernel<<<(ns*twotondim*n2+255)/256,256,0,halo_stream>>>(b, n2, isend, ns, sbuf, stride, &
+               & twotondim*nc1)
           call check_cuda(cudaGetLastError())
        endif
+       if (.not. device_buffers) call check_cuda(cudaMemcpyAsync(sbuf_h, sbuf, ns*stride, halo_stream))
     endif
-    call check_cuda(cudaStreamSynchronize(default_stream))
-    if (.not. device_buffers .and. ns > 0) call check_cuda(cudaMemcpy(sbuf_h, sbuf, ns*stride))
+    call check_cuda(cudaStreamSynchronize(halo_stream))
 
     nmsg = 0
     do k = 1, size(peers)
@@ -480,14 +491,15 @@ contains
     call check_mpi(info)
 
     if (nr > 0) then
-       if (.not. device_buffers) call check_cuda(cudaMemcpy(rbuf, rbuf_h, nr*stride))
-       call scatter_kernel<<<(nr*twotondim*nc1+255)/256,256>>>(a, nc1, irecv, nr, rbuf, stride, 0)
+       if (.not. device_buffers) call check_cuda(cudaMemcpyAsync(rbuf, rbuf_h, nr*stride, halo_stream))
+       call scatter_kernel<<<(nr*twotondim*nc1+255)/256,256,0,halo_stream>>>(a, nc1, irecv, nr, rbuf, stride, 0)
        call check_cuda(cudaGetLastError())
        if (n2 > 0) then
-          call scatter_kernel<<<(nr*twotondim*n2+255)/256,256>>>(b, n2, irecv, nr, rbuf, stride, twotondim*nc1)
+          call scatter_kernel<<<(nr*twotondim*n2+255)/256,256,0,halo_stream>>>(b, n2, irecv, nr, rbuf, stride, &
+               & twotondim*nc1)
           call check_cuda(cudaGetLastError())
        endif
-       call check_cuda(cudaStreamSynchronize(default_stream))
+       call check_cuda(cudaStreamSynchronize(halo_stream))
     endif
 #endif
   end subroutine gpu_halo_update
