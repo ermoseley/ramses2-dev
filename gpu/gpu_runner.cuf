@@ -182,6 +182,16 @@ module gpu_runner
   integer(kind=8), device, allocatable, dimension(:) :: hash_key_mg
   integer(kind=4), device, allocatable, dimension(:) :: hash_val_mg
 
+  !> On several ranks, the subgrids of levelmin: first the godunov_ninterior interior subgrids, whose stencil
+  !> holds only owned octs, then the frontier subgrids, whose stencil reads remote octs. The interior ones are
+  !> integrated on godunov_stream while the halo is refreshed.
+  integer(kind=4), device, allocatable, dimension(:) :: godunov_list
+  integer(kind=4) :: godunov_ninterior = 0
+  integer(kind=cuda_stream_kind) :: godunov_stream
+  type(cudaEvent) :: godunov_ready, godunov_done
+  !> List argument of a launch over a whole level, which does not read it.
+  integer(kind=4), device :: no_list(1)
+
 contains
 
   include 'gpu_scan.cuf'
@@ -849,6 +859,7 @@ contains
   !>
   subroutine gpu_godunov(sim, ilevel)
     use nvtx
+    use mdl_module, only: mdl_abort
 #ifdef PAPER
     use hydro_device, only: hydro_integrator_paper_kernel
 #else
@@ -885,7 +896,8 @@ contains
 #endif
     real(dp) :: dt, dx, smax_cap, gamma, smallr, smallc2, switch_llf_dmin, switch_llf_pmin, etamag
     integer :: slope, riemann, slope_mag, riemann2d
-    logical :: induction
+    logical :: induction, overlap
+    integer(kind=cuda_stream_kind), parameter :: default_stream = 0
 #ifdef MHD
     integer :: istat
     integer(kind=4) :: shmem_bytes
@@ -928,8 +940,14 @@ contains
     num_subgrids = sim%m%noct(ilevel) / nsubgridtondim
     num_blocks = num_subgrids
 
-    ! Stencil values must be current before any subgrid reads them.
-    call gpu_refresh_cache(sim, ilevel)
+    ! Stencil values must be current before any subgrid reads them. On several ranks, the interior
+    ! subgrids are integrated while the halo is refreshed, and the frontier subgrids after it.
+    overlap = .false.
+#ifndef PAPER
+    overlap = sim%g%ncpu > 1 .and. ilevel == sim%r%levelmin .and. num_subgrids > 0 .and. allocated(godunov_list)
+    if (overlap) overlap = size(godunov_list) == num_subgrids + 1
+#endif
+    if (.not. overlap) call gpu_refresh_cache(sim, ilevel)
     if (num_subgrids == 0) return
 
     call nvtxStartRange("GPU Godunov", color=0)!green
@@ -944,6 +962,7 @@ contains
 #ifdef MHD
     if(riemann == solver_uct_hlld .or. riemann == solver_uct_llf .or. riemann == solver_uct_hll)then
        uct_riemann_d = riemann
+       if (overlap) call gpu_refresh_cache(sim, ilevel)
        call gpu_godunov_uct()
        call nvtxEndRange()
        return
@@ -956,12 +975,6 @@ contains
             & ') failed: ',cudaGetErrorString(istat)
        error stop
     endif
-    call hydro_integrator_kernel<<<num_blocks, hydro_threads, shmem_bytes>>>(grid, uold, unew, bold, bnew, &
-         & f, father, nbor, &
-         & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
-         & gamma, smallr, smallc2, dt, dx, smax_cap, slope, slope_mag, riemann, riemann2d, &
-         & switch_llf_dmin, switch_llf_pmin, induction, etamag, constant_gravity)
-    call GPU_Error_Check(__FILE__, __LINE__)
 #else
     shmem_bytes = storage_size(smem_probe) / 8
 #ifdef HYDRO_PAIR
@@ -980,30 +993,62 @@ contains
             & ') failed: ',cudaGetErrorString(istat)
        error stop
     endif
-#ifdef HYDRO_PAIR
-    if (slope == 3) then
-       call hydro_integrator_pair_kernel<<<num_blocks, hydro_pair_threads, shmem_bytes>>>(grid, uold, unew, bold, bnew, &
-            & f, father, nbor, &
-            & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
-            & gamma, smallr, smallc2, dt, dx, smax_cap, slope, slope_mag, riemann, riemann2d, &
-            & switch_llf_dmin, switch_llf_pmin, induction, etamag, constant_gravity)
+#endif
+    if (overlap) then
+       call follow(godunov_stream, default_stream, godunov_ready)
+       call integrate(godunov_ninterior, godunov_list(1), godunov_ninterior, godunov_stream)
+       call gpu_refresh_cache(sim, ilevel)
+       call integrate(num_subgrids - godunov_ninterior, godunov_list(godunov_ninterior + 1), &
+            & num_subgrids - godunov_ninterior, default_stream)
+       call follow(default_stream, godunov_stream, godunov_done)
     else
-#endif
-    call hydro_integrator_kernel<<<num_blocks, hydro_threads, shmem_bytes>>>(grid, uold, unew, bold, bnew, &
-         & f, father, nbor, &
-         & head_idx, num_subgrids, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
-         & gamma, smallr, smallc2, dt, dx, smax_cap, slope, slope_mag, riemann, riemann2d, &
-         & switch_llf_dmin, switch_llf_pmin, induction, etamag, constant_gravity)
-#ifdef HYDRO_PAIR
+       call integrate(num_subgrids, no_list, 0, default_stream)
     endif
-#endif
-#endif
-    call GPU_Error_Check(__FILE__, __LINE__)
 #endif
     call nvtxEndRange()
 
-#if defined(MHD) && !defined(PAPER)
+#ifndef PAPER
   contains
+
+    ! Integrate nblk subgrids on stream: list(1:nlist), or the subgrids of the level when nlist = 0.
+    subroutine integrate(nblk, list, nlist, stream)
+      integer(kind=4), intent(in) :: nblk, nlist
+      integer(kind=4), device :: list(*)
+      integer(kind=cuda_stream_kind), intent(in) :: stream
+
+      if (nblk <= 0) return
+#ifdef HYDRO_PAIR
+      if (slope == 3) then
+         call hydro_integrator_pair_kernel<<<nblk, hydro_pair_threads, shmem_bytes, stream>>>(grid, uold, unew, &
+              & bold, bnew, f, father, nbor, &
+              & head_idx, num_subgrids, list, nlist, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
+              & gamma, smallr, smallc2, dt, dx, smax_cap, slope, slope_mag, riemann, riemann2d, &
+              & switch_llf_dmin, switch_llf_pmin, induction, etamag, constant_gravity)
+         call GPU_Error_Check(__FILE__, __LINE__)
+         return
+      endif
+#endif
+      call hydro_integrator_kernel<<<nblk, hydro_threads, shmem_bytes, stream>>>(grid, uold, unew, &
+           & bold, bnew, f, father, nbor, &
+           & head_idx, num_subgrids, list, nlist, sim%m%ngridmax, ilevel, sim%r%levelmin, sim%r%nlevelmax, &
+           & gamma, smallr, smallc2, dt, dx, smax_cap, slope, slope_mag, riemann, riemann2d, &
+           & switch_llf_dmin, switch_llf_pmin, induction, etamag, constant_gravity)
+      call GPU_Error_Check(__FILE__, __LINE__)
+    end subroutine integrate
+
+    ! Work queued on stream from here on follows the work already queued on other.
+    subroutine follow(stream, other, event)
+      integer(kind=cuda_stream_kind), intent(in) :: stream, other
+      type(cudaEvent) :: event
+
+      istat = cudaEventRecord(event, other)
+      if (istat == cudaSuccess) istat = cudaStreamWaitEvent(stream, event, 0)
+      if (istat /= cudaSuccess) then
+         write(*,*)'gpu_godunov: cannot order the streams: ',cudaGetErrorString(istat)
+         call mdl_abort(sim%mdl)
+      endif
+    end subroutine follow
+#ifdef MHD
 
     ! The owner solves its low faces. Faces owned by ghost octs are solved by their readers.
     subroutine gpu_godunov_uct()
@@ -1149,8 +1194,92 @@ contains
       endif
     end subroutine check_smem
 #endif
+#endif
 
   end subroutine gpu_godunov
+
+  !> @brief
+  !> On several ranks, list the interior subgrids of a level first, then its frontier subgrids.
+  subroutine godunov_split(sim, head_idx, num_subgrids)
+    use cub_inclusive_scan_mod
+    use iso_c_binding, only: c_loc
+    use mdl_module, only: mdl_abort
+    use ramses_commons, only: ramses_t
+    type(ramses_t), intent(in) :: sim
+    integer(kind=4), intent(in) :: head_idx, num_subgrids
+    integer(kind=4) :: head, n
+    integer :: istat
+
+    if (allocated(godunov_list)) then
+       deallocate(godunov_list)
+    else
+       istat = cudaStreamCreateWithFlags(godunov_stream, cudaStreamNonBlocking)
+       if (istat == cudaSuccess) istat = cudaEventCreateWithFlags(godunov_ready, cudaEventDisableTiming)
+       if (istat == cudaSuccess) istat = cudaEventCreateWithFlags(godunov_done, cudaEventDisableTiming)
+       if (istat /= cudaSuccess) then
+          write(*,*)'godunov_split: cannot create the stream of the interior subgrids: ',cudaGetErrorString(istat)
+          call mdl_abort(sim%mdl)
+       endif
+    endif
+    ! One entry more: the list of the other subgrids starts after the last entry when there are none.
+    allocate(godunov_list(1:num_subgrids+1))
+    godunov_ninterior = 0
+    if (num_subgrids == 0) return
+    head = head_idx
+    n = num_subgrids
+    call interior_flag_kernel<<<(n+127)/128, 128>>>(nbor, prefix_sum, head, n)
+    call GPU_Error_Check(__FILE__, __LINE__)
+#if defined(CUB_SCAN_REFINE)
+    call cub_inclusive_sum(c_loc(prefix_sum), head, n)
+#else
+    call gpu_scan(prefix_sum, head, n)
+#endif
+    call interior_list_kernel<<<(n+127)/128, 128>>>(prefix_sum, godunov_list, head, n)
+    call GPU_Error_Check(__FILE__, __LINE__)
+    godunov_ninterior = prefix_sum(head + n - 1)
+
+  end subroutine godunov_split
+
+  !> flag(s) = 1 if the stencil of subgrid s holds only owned octs of its level, else 0.
+  attributes(global) subroutine interior_flag_kernel(nbor, flag, head_idx, num_subgrids)
+    integer(kind=4), device :: nbor(1:subgridsize,*), flag(*)
+    integer(kind=4), value :: head_idx, num_subgrids
+    integer :: s, w, o, first_oct, last_oct
+
+    s = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+    if (s > num_subgrids) return
+    first_oct = (head_idx - 1) * nsubgridtondim + 1
+    last_oct = (head_idx + num_subgrids - 1) * nsubgridtondim
+    flag(head_idx+s-1) = 1
+    do w = 1, subgridsize
+       o = nbor(w, head_idx+s-1)
+       if (o < first_oct .or. o > last_oct) then
+          flag(head_idx+s-1) = 0
+          return
+       endif
+    end do
+
+  end subroutine interior_flag_kernel
+
+  !> From the inclusive scan of the flags, list the interior subgrids first, then the frontier subgrids, in order.
+  attributes(global) subroutine interior_list_kernel(scan, list, head_idx, num_subgrids)
+    integer(kind=4), device :: scan(*), list(*)
+    integer(kind=4), value :: head_idx, num_subgrids
+    integer :: s, c, prev, ninterior
+
+    s = (blockIdx%x - 1) * blockDim%x + threadIdx%x
+    if (s > num_subgrids) return
+    c = scan(head_idx+s-1)
+    prev = 0
+    if (s > 1) prev = scan(head_idx+s-2)
+    ninterior = scan(head_idx+num_subgrids-1)
+    if (c > prev) then
+       list(c) = head_idx + s - 1
+    else
+       list(ninterior+s-c) = head_idx + s - 1
+    endif
+
+  end subroutine interior_list_kernel
 
   !> @brief
   !> Print the launch configuration (gpu_launch.h) of the tuned kernels this run uses.
@@ -3157,7 +3286,10 @@ contains
     endif
 
     ! Every rank takes part, also one without octs
-    if (source == cache_remote) call gpu_halo_build(sim, ilevel, grid, hash_key, hash_val, ckey_max, key_off)
+    if (source == cache_remote) then
+       call gpu_halo_build(sim, ilevel, grid, hash_key, hash_val, ckey_max, key_off)
+       call godunov_split(sim, head_idx, num_subgrids)
+    endif
 
     sim%m%tail_cache(ilevel) = sim%m%ifree_cache - 1
     sim%m%noct_cache(ilevel) = sim%m%ifree_cache - head

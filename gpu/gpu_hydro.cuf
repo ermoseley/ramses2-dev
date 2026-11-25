@@ -7973,18 +7973,32 @@ contains
   ! Fused MHD Godunov+CT kernel; working buffers live in shared memory.
 
 #ifndef PAPER
+  ! Subgrid of this block: the block-th entry of list when nlist > 0, else the block-th subgrid of the level.
+  ! 0 past the end.
+  attributes(device) integer function block_subgrid(head_idx, num_subgrids, list, nlist)
+    integer(kind=4), intent(in) :: head_idx, num_subgrids, nlist
+    integer(kind=4), device :: list(*)
+
+    block_subgrid = 0
+    if (nlist > 0) then
+       if (blockIdx%x <= nlist) block_subgrid = list(blockIdx%x)
+    else
+       if (blockIdx%x <= num_subgrids) block_subgrid = head_idx + blockIdx%x - 1
+    endif
+  end function block_subgrid
+
   ! NVHPC applies a kernel's launch_bounds to every kernel that follows it in the module,
   ! so kernels without launch_bounds are defined before every kernel that has them.
 #ifdef HYDRO_PAIR
   attributes(device) subroutine hydro_integrator(grid, uold, unew, bold, bnew, &
        & f, father, nbor, &
-       & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
+       & head_idx, num_subgrids, list, nlist, ngridmax, ilevel, levelmin, levelmax, &
        & gamma, smallr, smallc2, dt, dx, smax_cap, slope, slope_mag, riemann, riemann2d, &
        & switch_llf_dmin, switch_llf_pmin, induction, etamag, constant_gravity, smem, pair)
 #else
   attributes(global) HYDRO_LB subroutine hydro_integrator_kernel(grid, uold, unew, bold, bnew, &
        & f, father, nbor, &
-       & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
+       & head_idx, num_subgrids, list, nlist, ngridmax, ilevel, levelmin, levelmax, &
        & gamma, smallr, smallc2, dt, dx, smax_cap, slope, slope_mag, riemann, riemann2d, &
        & switch_llf_dmin, switch_llf_pmin, induction, etamag, constant_gravity)
 #endif
@@ -7999,6 +8013,8 @@ contains
     real(kind=dp), device :: bnew(1:twotondim,1:6,*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_subgrids
+    integer(kind=4), device :: list(*)
+    integer(kind=4), intent(in), value :: nlist
     integer, intent(in), value :: ngridmax
     integer, intent(in), value :: ilevel, levelmin, levelmax
     real(kind=dp), intent(in), value :: gamma, smallr, smallc2
@@ -8024,7 +8040,7 @@ contains
     integer(kind=4), shared :: snbor(subgridsize)
     integer :: w
     real(kind=dp) :: dtdx
-    integer :: block_idx  ! The index of this block, corresponds to the subgrid to load
+    integer :: isub       ! The subgrid of this block
     integer :: thread_idx ! The index of this thread within the block
 #ifdef MHD
     real(kind=dp) :: smallc
@@ -8032,14 +8048,13 @@ contains
 #endif
     dtdx = dt / dx
 
-    ! compute the various indices. Note the conversion to zero based indexing
-    block_idx = blockIdx%x - 1
+    ! Note the conversion to zero based indexing
     thread_idx = threadIdx%x - 1
 
-    ! thread guard, probably not needed since num_blocks should always be equal to num_subgrids
-    if (block_idx >= num_subgrids) return
+    isub = block_subgrid(head_idx, num_subgrids, list, nlist)
+    if (isub == 0) return
     do w = thread_idx, subgridsize - 1, blockDim%x
-       snbor(w+1) = nbor(w+1, head_idx + block_idx)
+       snbor(w+1) = nbor(w+1, isub)
     end do
     call syncthreads()
 
@@ -8157,7 +8172,7 @@ contains
   ! slope_type 0-2. Two kernels keep the pair tracing of slope_type=3 out of this kernel's register allocation.
   attributes(global) HYDRO_LB subroutine hydro_integrator_kernel(grid, uold, unew, bold, bnew, &
        & f, father, nbor, &
-       & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
+       & head_idx, num_subgrids, list, nlist, ngridmax, ilevel, levelmin, levelmax, &
        & gamma, smallr, smallc2, dt, dx, smax_cap, slope, slope_mag, riemann, riemann2d, &
        & switch_llf_dmin, switch_llf_pmin, induction, etamag, constant_gravity)
     type(oct), device :: grid(*)
@@ -8171,6 +8186,8 @@ contains
     real(kind=dp), device :: bnew(1:twotondim,1:6,*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_subgrids
+    integer(kind=4), device :: list(*)
+    integer(kind=4), intent(in), value :: nlist
     integer, intent(in), value :: ngridmax
     integer, intent(in), value :: ilevel, levelmin, levelmax
     real(kind=dp), intent(in), value :: gamma, smallr, smallc2
@@ -8188,14 +8205,14 @@ contains
 
     call hydro_integrator(grid, uold, unew, bold, bnew, &
          & f, father, nbor, &
-         & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
+         & head_idx, num_subgrids, list, nlist, ngridmax, ilevel, levelmin, levelmax, &
          & gamma, smallr, smallc2, dt, dx, smax_cap, slope, slope_mag, riemann, riemann2d, &
          & switch_llf_dmin, switch_llf_pmin, induction, etamag, constant_gravity, smem, .false.)
   end subroutine hydro_integrator_kernel
 
   attributes(global) HYDRO_PAIR_LB subroutine hydro_integrator_pair_kernel(grid, uold, unew, bold, bnew, &
        & f, father, nbor, &
-       & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
+       & head_idx, num_subgrids, list, nlist, ngridmax, ilevel, levelmin, levelmax, &
        & gamma, smallr, smallc2, dt, dx, smax_cap, slope, slope_mag, riemann, riemann2d, &
        & switch_llf_dmin, switch_llf_pmin, induction, etamag, constant_gravity)
     type(oct), device :: grid(*)
@@ -8209,6 +8226,8 @@ contains
     real(kind=dp), device :: bnew(1:twotondim,1:6,*)
     integer(kind=4), intent(in), value :: head_idx
     integer(kind=4), intent(in), value :: num_subgrids
+    integer(kind=4), device :: list(*)
+    integer(kind=4), intent(in), value :: nlist
     integer, intent(in), value :: ngridmax
     integer, intent(in), value :: ilevel, levelmin, levelmax
     real(kind=dp), intent(in), value :: gamma, smallr, smallc2
@@ -8226,7 +8245,7 @@ contains
 
     call hydro_integrator(grid, uold, unew, bold, bnew, &
          & f, father, nbor, &
-         & head_idx, num_subgrids, ngridmax, ilevel, levelmin, levelmax, &
+         & head_idx, num_subgrids, list, nlist, ngridmax, ilevel, levelmin, levelmax, &
          & gamma, smallr, smallc2, dt, dx, smax_cap, slope, slope_mag, riemann, riemann2d, &
          & switch_llf_dmin, switch_llf_pmin, induction, etamag, constant_gravity, smem, .true.)
   end subroutine hydro_integrator_pair_kernel
